@@ -16,6 +16,8 @@
 //!   rows (`path` + `primary`).
 //! - `[project_membership]`: container id → project id; `external:`-prefixed
 //!   keys are legal (TOML quotes them).
+//! - `launcher_last_project`: the launcher chip's remembered default target
+//!   (a flat key; cleared state removes it from the file).
 //!
 //! The write face enforces every invariant (roots exist as directories,
 //! dedup + canonicalization, exactly one primary, primary among the roots);
@@ -63,21 +65,42 @@ struct Registry {
     projects: Vec<Project>,
     /// container id → project id — the grouping fact source.
     membership: BTreeMap<String, String>,
+    /// The launcher chip's remembered target: the last project a container
+    /// was minted for (the bare ⌘N default). Session-scoped by nature but
+    /// persisted — one app-owned settings key, the same discipline as the
+    /// rest of the file.
+    launcher_last_project: Option<String>,
 }
 
 static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
 
-/// The one whole-stack test redirects the settings file here; every other
-/// test works on `Registry` values directly.
-#[cfg(test)]
+/// The project the create dialog last minted (process-level, in-memory): the
+/// launcher chip adopts it once the dialog closes, so「新建项目…」lands with
+/// the fresh project already selected.
+static LAST_CREATED: Mutex<Option<String>> = Mutex::new(None);
+
+/// The one whole-stack test (and the test-support integration regressions'
+/// hermetic HOME) redirects the settings file here; every other test works on
+/// `Registry` values directly.
+#[cfg(any(test, feature = "test-support"))]
 static TEST_SETTINGS_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Point the settings file at `path` (`None` restores the real one) and drop
+/// the registry cache, so the next read reloads. Test-support only: the
+/// integration regressions run against a hermetic HOME and must not touch the
+/// developer's `~/.manox/settings.toml`.
+#[cfg(feature = "test-support")]
+pub fn diagnostic_redirect_settings_file(path: Option<PathBuf>) {
+    *TEST_SETTINGS_FILE.lock().expect("test settings lock") = path;
+    *REGISTRY.lock().expect("project registry lock") = None;
+}
 
 fn cached() -> std::sync::MutexGuard<'static, Option<Registry>> {
     REGISTRY.lock().expect("project registry lock")
 }
 
 fn settings_file() -> Option<PathBuf> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if let Some(path) = TEST_SETTINGS_FILE
             .lock()
@@ -133,7 +156,8 @@ pub fn display_name(project: &Project) -> String {
 /// Every root must exist as a directory; duplicates collapse to the first
 /// occurrence; `primary` defaults to the first root. A `name` that is blank
 /// once trimmed means "not customized" — the display name follows the
-/// primary root.
+/// primary root. A success also stamps the process-level
+/// [`last_created_project`] record the launcher chip consumes.
 pub fn create_project(
     name: Option<String>,
     roots: Vec<PathBuf>,
@@ -143,6 +167,7 @@ pub fn create_project(
     let reg = slot.get_or_insert_with(load);
     let project = create_in(reg, name, roots, primary)?;
     persist(reg);
+    *last_created_slot() = Some(project.id.clone());
     Ok(project)
 }
 
@@ -441,6 +466,48 @@ fn containers_in(reg: &Registry, project_id: &str) -> Vec<String> {
         .collect()
 }
 
+// ── launcher memory ───────────────────────────────────────────────────
+
+/// The bare ⌘N launcher's default target: the project the last launcher
+/// container was minted for, when it still exists. `None` → the localized
+/// no-project target.
+pub fn last_launcher_project() -> Option<String> {
+    let mut slot = cached();
+    let reg = slot.get_or_insert_with(load);
+    reg.launcher_last_project
+        .clone()
+        .filter(|id| project(reg, id).is_some())
+}
+
+/// Remember `id` as the launcher's default target. Unknown ids are ignored
+/// (the memory must never dangle), `None` clears it.
+pub fn set_last_launcher_project(id: Option<&str>) {
+    let mut slot = cached();
+    let reg = slot.get_or_insert_with(load);
+    let validated = id
+        .filter(|id| project(reg, id).is_some())
+        .map(str::to_string);
+    if reg.launcher_last_project != validated {
+        reg.launcher_last_project = validated;
+        persist(reg);
+    }
+}
+
+fn last_created_slot() -> std::sync::MutexGuard<'static, Option<String>> {
+    LAST_CREATED.lock().expect("last-created project lock")
+}
+
+/// The project the create dialog last minted (see [`LAST_CREATED`]).
+pub fn last_created_project() -> Option<String> {
+    last_created_slot().clone()
+}
+
+/// Consume the last-created record (the launcher's adoption — one render may
+/// claim it; later reads see `None`).
+pub fn consume_last_created_project() -> Option<String> {
+    last_created_slot().take()
+}
+
 // ── persistence ───────────────────────────────────────────────────────
 
 fn now_secs() -> i64 {
@@ -482,6 +549,10 @@ fn load_at(path: &Path) -> Registry {
                     .collect()
             })
             .unwrap_or_default(),
+        launcher_last_project: doc
+            .get("launcher_last_project")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
     }
 }
 
@@ -583,6 +654,19 @@ fn persist_at(path: &Path, reg: &Registry) {
         "project_membership".to_string(),
         toml::Value::Table(membership),
     );
+    // The launcher memory rides one flat key; cleared state removes it (a
+    // stale key the loader would ignore anyway, but the file stays honest).
+    match &reg.launcher_last_project {
+        Some(id) => {
+            table.insert(
+                "launcher_last_project".to_string(),
+                toml::Value::String(id.clone()),
+            );
+        }
+        None => {
+            table.remove("launcher_last_project");
+        }
+    }
     match toml::to_string_pretty(&doc)
         .context("serialize settings.toml")
         .and_then(|s| std::fs::write(path, s).context("write settings.toml"))
@@ -1027,6 +1111,27 @@ mod tests {
             Some(project.id.as_str())
         );
 
+        // The launcher memory: the create stamped the last-created record
+        // (one consumer), an unknown id never enters the default-target
+        // memory, and a known one round-trips.
+        assert_eq!(
+            last_created_project().as_deref(),
+            Some(project.id.as_str()),
+            "a successful create stamps the record"
+        );
+        assert_eq!(
+            consume_last_created_project().as_deref(),
+            Some(project.id.as_str())
+        );
+        assert!(last_created_project().is_none(), "one consumer");
+        set_last_launcher_project(Some("no-such-id"));
+        assert!(last_launcher_project().is_none(), "unknown id refused");
+        set_last_launcher_project(Some(&project.id));
+        assert_eq!(
+            last_launcher_project().as_deref(),
+            Some(project.id.as_str())
+        );
+
         // The cache drops (the restart shape); the file alone answers.
         *REGISTRY.lock().expect("lock") = None;
         let loaded = list_projects();
@@ -1037,12 +1142,23 @@ mod tests {
             membership_of("session-1").as_deref(),
             Some(project.id.as_str())
         );
+        assert_eq!(
+            last_launcher_project().as_deref(),
+            Some(project.id.as_str()),
+            "the launcher memory survives the restart shape"
+        );
         let doc: toml::Value =
             toml::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("parse");
         assert_eq!(
             doc.get("ui_language").and_then(|v| v.as_str()),
             Some("zh-CN")
         );
+
+        // Clearing the memory removes the key from the file entirely.
+        set_last_launcher_project(None);
+        let doc: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("parse");
+        assert!(doc.get("launcher_last_project").is_none());
 
         delete_project(&project.id);
         assert!(membership_of("session-1").is_none(), "cascade");

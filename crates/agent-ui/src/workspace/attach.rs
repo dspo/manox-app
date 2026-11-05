@@ -114,12 +114,11 @@ impl Workspace {
     /// rendering mirror to that server-minted id and opens the follow stream.
     /// Creation happens exactly once — on the server. The construction
     /// itself is the container entry's native half
-    /// (`container::create_container`): the session container model's
-    /// draft-refill-or-mint decision, object row and folded createSession.
+    /// (`container::create_container`): the object row and folded
+    /// createSession.
     ///
     /// Returns the client-minted session id: the attach lands asynchronously,
-    /// so a caller that must address the fresh thread (e.g. `/exit`'s closing
-    /// notes) keys on this id instead of the live foreground.
+    /// so a caller that must address the fresh thread keys on this id.
     pub fn new_container(
         &mut self,
         project: Option<PathBuf>,
@@ -175,15 +174,14 @@ impl Workspace {
         let access = inherited.as_ref().and_then(|(_, _, a, _)| a.clone());
         let effort_str = inherited.as_ref().and_then(|(_, _, _, e)| e.clone());
         // The construction is the container entry's native half (§2.2): the
-        // draft-refill-or-mint decision, the object row, the folded
-        // createSession and the async attach all live in `create_container`.
+        // object row, the folded createSession and the async attach all live
+        // in `create_container`.
         let sid = self.create_container(
             container::ContainerSeed::Manox(container::NativeContainerSeed {
                 project,
                 model,
                 access,
                 effort: effort_str,
-                refill: container::RefillPolicy::Draft,
             }),
             cx,
         );
@@ -217,6 +215,10 @@ impl Workspace {
         // gate here would flash the loading page on a race with the create
         // subscription.
         self.attach_thread(thread, true, false, window, cx);
+        // The launcher send's staged text flushes NOW — the one reliable
+        // point where the fresh session is bound and its create write is
+        // already ahead on the store's FIFO (design §6).
+        self.flush_pending_first_turn(cx);
     }
 
     /// Switch to a new thread: persist the current one, build/load the new
@@ -809,9 +811,7 @@ impl Workspace {
     /// The inheriting fresh-container creation `/new` lands after its
     /// archive. The inheritance reads the live foreground fold and object
     /// row, which is still the outgoing (just archived) session's at this
-    /// point, and the construction rides the ONE creation entry with the
-    /// [`container::RefillPolicy::Fresh`] policy — the archive already
-    /// disposed of the outgoing conversation, so no draft refill may run.
+    /// point, and the construction rides the ONE creation entry.
     fn open_inheriting_container(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let old = self.chat.read(cx).thread.clone();
         let project = self
@@ -852,7 +852,6 @@ impl Workspace {
                 model: model_str,
                 access,
                 effort: effort_str,
-                refill: container::RefillPolicy::Fresh,
             }),
             cx,
         );

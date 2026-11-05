@@ -127,40 +127,29 @@ pub enum ContainerSeed<'a> {
     /// (container record + session) fold into ONE `createSession` with the
     /// id shared. `attrs` derive here — the cwd from the belonging (or the
     /// window's workspace root), the env from process state the session
-    /// never consumes (D11).
+    /// never consumes (D11). The launcher send is the only remaining native
+    /// mint (the New gestures land the launcher instead — the draft-refill
+    /// pre-minting retired with it).
     Manox(NativeContainerSeed),
     /// An external CLI container: the record lands here, the process spawned
-    /// before (记录 + spawn 两步 — see `project_menu`'s cascade).
+    /// before (记录 + spawn 两步 — see the launcher's action row and the
+    /// project menu's terminal/VS Code rows).
     External(ExternalContainerSeed<'a>),
 }
 
-/// Whether the native half consults the draft refill. The refill is the
-/// sidebar gesture's return-to-draft semantics; `/new`'s landing opts out —
-/// its archive already disposed of the outgoing conversation, and the fresh
-/// sibling must never resurrect a draft.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RefillPolicy {
-    /// A never-materialized conversation under the same project (or
-    /// project-less) is that project's unfinished draft — return to it.
-    Draft,
-    /// Always mint a fresh sibling; the refill lookup never runs.
-    Fresh,
-}
-
-/// The native create intent — everything downstream of the draft-refill
-/// decision (the inherited picks ride the wire create intent).
+/// The native create intent — everything the createSession and the object row
+/// carry.
 pub struct NativeContainerSeed {
-    /// The conversation's belonging: the launch project (the sidebar row
-    /// handed it in), or the foreground conversation's inherited one.
+    /// The conversation's belonging: the launch project (the launcher target's
+    /// primary, or an ad-hoc folder), or `None` for the seed's fallback
+    /// semantics (the window's workspace root).
     pub project: Option<PathBuf>,
-    /// The inherited model, wire-shaped (`provider/id`).
+    /// The picked model, wire-shaped (`provider/id`).
     pub model: Option<String>,
-    /// The inherited access mode.
+    /// The picked access mode (the kebab wire values).
     pub access: Option<String>,
-    /// The inherited reasoning effort.
+    /// The picked reasoning effort.
     pub effort: Option<String>,
-    /// The draft-refill policy ([`RefillPolicy`]).
-    pub refill: RefillPolicy,
 }
 
 /// The external record seed — the already-spawned PTY's identity and row
@@ -208,12 +197,10 @@ impl EventEmitter<ContainerEvent> for Workspace {}
 impl Workspace {
     /// The ONE container creation entry (§2.2 `create_container(kind,
     /// attrs)`). Native folds its conceptual two steps (container record +
-    /// session) into one `createSession` — the draft-refill-or-mint decision,
-    /// the object row and the attach all live here; the sidebar's
-    /// `new_container` gesture is the thin wrapper over this entry
-    /// (leave-external + inheritance, then the native seed). External lands
-    /// the record (the spawn already happened). Returns the container id —
-    /// the routing string both homes share.
+    /// session) into one `createSession` — the object row and the attach all
+    /// live here; the launcher's ⏎ send is the thin wrapper over this entry.
+    /// External lands the record (the spawn already happened). Returns the
+    /// container id — the routing string both homes share.
     pub fn create_container(&mut self, seed: ContainerSeed, cx: &mut Context<Self>) -> String {
         match seed {
             ContainerSeed::Manox(intent) => self.create_native_container(intent, cx),
@@ -222,7 +209,8 @@ impl Workspace {
     }
 
     /// The native half: a manox conversation container. The id is
-    /// client-minted (or the draft's own); the attach lands asynchronously.
+    /// client-minted; the attach lands asynchronously. The launcher send
+    /// stages its text before calling — this half's failure leg refunds it.
     fn create_native_container(
         &mut self,
         intent: NativeContainerSeed,
@@ -233,53 +221,12 @@ impl Workspace {
             model,
             access,
             effort: effort_str,
-            refill,
         } = intent;
         let ws = cx.weak_entity();
         let dir_for_store = project.clone();
-        // The draft refill (the [`RefillPolicy::Draft`] policy): a
-        // never-materialized conversation under the same project (or
-        // project-less) is that project's unfinished draft — return to it
-        // instead of minting a sibling. Its row already carries the
-        // model/access picks the user left there. The FOREGROUND session and
-        // archived rows are excluded: the landing conversation (created
-        // project-less at boot, never spoken) is itself the latest
-        // project-less draft, and a just archived draft would be resurrected
-        // — refilling either would make "new session" a no-op on the very
-        // session it should leave. [`RefillPolicy::Fresh`] skips the lookup:
-        // the caller already disposed of the outgoing conversation (`/new`'s
-        // landing) and the fresh sibling must not resurrect a draft.
-        let foreground = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(_, sid)| sid.clone());
-        let objects = manox_agent::object_store::ObjectStore::try_global();
-        let refill_row = (refill == RefillPolicy::Draft)
-            .then(|| {
-                objects.as_ref().and_then(|store| {
-                    store.latest_draft(
-                        project
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .as_deref(),
-                    )
-                })
-            })
-            .flatten();
-        let refill = refill_row.filter(|row| {
-            !row.archived
-                && foreground.as_deref() != Some(row.id.as_str())
-                && !self.session_retired(cx, &row.id)
-        });
-        // v3: the id is client-minted; a refill carries the draft's own
-        // picks (its row wins over inheritance) and a fresh conversation the
-        // inherited config, and the attach lands once the host answered.
-        let sid = refill
-            .as_ref()
-            .map(|row| row.id.clone())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // v3: the id is client-minted; the picked config rides the create
+        // intent, and the attach lands once the host answered.
+        let sid = uuid::Uuid::new_v4().to_string();
         let mut config = serde_json::Map::new();
         if let Some(model) = &model {
             config.insert("model".into(), serde_json::json!(model));
@@ -289,21 +236,6 @@ impl Workspace {
         }
         if let Some(effort) = &effort_str {
             config.insert("reasoningEffort".into(), serde_json::json!(effort));
-        }
-        if let Some(row) = &refill {
-            if let Some(model_id) = row.model_id.as_deref() {
-                let model = match row.model_provider.as_deref() {
-                    Some(provider) => format!("{provider}/{model_id}"),
-                    None => model_id.to_string(),
-                };
-                config.insert("model".into(), serde_json::json!(model));
-            }
-            if let Some(access) = &row.access_mode {
-                config.insert("accessMode".into(), serde_json::json!(access));
-            }
-            if let Some(effort) = &row.reasoning_effort {
-                config.insert("reasoningEffort".into(), serde_json::json!(effort));
-            }
         }
         // `working_directories` is the create intent's only directory
         // carrier (the host binds its first entry as the session's cwd): a
@@ -318,54 +250,30 @@ impl Workspace {
             .to_string();
         let cwds = vec![format!("file://{cwd}")];
         // The object row: created at once, carrying the conversation's
-        // belonging and picks. A refilled draft reuses its row (the picks
-        // it holds win over inheritance); a fresh conversation starts a
-        // new row.
-        let (provider, model_id, access, effort) = match &refill {
-            Some(row) => (
-                row.model_provider.as_deref(),
-                row.model_id.as_deref(),
-                row.access_mode.as_deref(),
-                row.reasoning_effort.as_deref(),
-            ),
-            None => {
-                let (provider, model_id) = super::attach::split_wire_model(model.as_deref());
-                (provider, model_id, access.as_deref(), effort_str.as_deref())
-            }
-        };
+        // belonging and picks.
+        let (provider, model_id) = super::attach::split_wire_model(model.as_deref());
         super::attach::land_conversation_row(
             &sid,
             project.as_deref(),
             provider,
             model_id,
-            access,
-            effort,
+            access.as_deref(),
+            effort_str.as_deref(),
         );
         let reply = self.with_foreground_store(cx, |store, _| {
             store.create_session(&sid, cwds, Some(config))
         });
         let sid2 = sid.clone();
         cx.spawn(async move |_, cx| {
-            // A create refused with the protocol's SESSION_ALREADY_EXISTS
-            // means the refill named a session the host still carries: the
-            // draft is LIVE (the archive-time bit and the host-retired check
-            // keep retired rows out of the refill). The host owns that live
-            // session and this create does not touch it — attaching to it is
-            // the refill's intent, the same way the host's claim table reuses
-            // a blank id. Every other failure (and a store unbound, where no
-            // create can even ride) lands a visible notification: a
-            // user-initiated new session must never die quietly.
+            // A create that did not ride (store unbound — no create can even
+            // go out) or was refused lands a visible notification AND refunds
+            // the staged first turn to the launcher: a user-initiated send
+            // must never die quietly, and the text must not be swallowed
+            // (design §6's failure leg). A fresh client-minted uuid cannot
+            // collide with a live session, so there is no reopen arm.
             let refusal = match reply {
                 Some(reply) => match reply.recv().await {
                     Ok(Ok(_)) => None,
-                    Ok(Err(err)) if err.is_already_exists() => {
-                        tracing::info!(
-                            session_id = %sid2,
-                            error = %err,
-                            "createSession met a live draft — opening it instead"
-                        );
-                        None
-                    }
                     Ok(Err(err)) => Some(err.message),
                     Err(closed) => Some(closed.to_string()),
                 },
@@ -373,7 +281,7 @@ impl Workspace {
             };
             if let Some(err) = refusal {
                 tracing::warn!(session_id = %sid2, error = %err, "createSession failed");
-                let _ = ws.update_in(cx, |_this, window, cx| {
+                let _ = ws.update_in(cx, |this, window, cx| {
                     window.push_notification(
                         Notification::error(i18n::t_str(
                             "new-thread-create-failed",
@@ -381,6 +289,7 @@ impl Workspace {
                         )),
                         cx,
                     );
+                    this.refund_launcher_first_turn(window, cx);
                 });
                 return;
             }

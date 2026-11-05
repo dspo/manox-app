@@ -105,14 +105,15 @@ impl Workspace {
     /// focused, so the TUI takes keyboard input immediately. The record
     /// itself (identity, attrs snapshot, the PTY subscriptions) lands
     /// through the unified container entry; what remains here is the
-    /// foreground hand-off.
+    /// foreground hand-off. Returns the container id (the routing string the
+    /// launcher's membership write keys on).
     pub fn spawn_external_session(
         &mut self,
         launch: ExternalSessionLaunch<'_>,
         view: gpui::Entity<steer_ghostty::GhosttyView>,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
-    ) {
+    ) -> String {
         let id = self.create_container(
             container::ContainerSeed::External(container::ExternalContainerSeed {
                 agent_id: launch.agent_id,
@@ -131,10 +132,11 @@ impl Workspace {
         // column — so the hand-off drops it (and its refresh poll with it);
         // `open_subagent_stream` is the only way back.
         self.subagent_stream = None;
-        self.active_external = Some(id);
+        self.active_external = Some(id.clone());
         self.view_mode = super::ViewMode::ExternalSession;
         focus_terminal(&view, window, cx);
         cx.notify();
+        id
     }
 
     /// Bring a parked session back into the main column (the sidebar row's

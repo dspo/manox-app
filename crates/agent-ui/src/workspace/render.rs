@@ -65,6 +65,21 @@ impl Render for Workspace {
         {
             return self.apply_chat_actions(card, window, cx);
         }
+        // The launcher (the pre-container launch pad): the composer's ⏎ and
+        // the action row mint the containers from here; the page's render
+        // also adopts a project the create dialog just minted (the chip
+        // menu's 新建项目… closes into this frame).
+        if matches!(self.view_mode, ViewMode::Launcher)
+            && let Some(launcher) = self.launcher.clone()
+        {
+            launcher.update(cx, |state, cx| state.adopt_created_project(cx));
+            let root = gpui::div()
+                .id("launcher-main")
+                .debug_selector(|| "launcher-main".into())
+                .size_full()
+                .child(launcher);
+            return self.apply_chat_actions(root, window, cx);
+        }
         // A blocking overlay owns the page: the turn navigator cannot stay
         // mounted under it.
         if self.blocking_overlay_active(cx) && self.chat.read(cx).turn_navigator.is_some() {
