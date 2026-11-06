@@ -1126,10 +1126,14 @@ impl Workspace {
                 this.teardown_container(id, cx);
             }
         }));
-        // Focus the composer so typing works immediately on the hero screen.
-        // (Boot itself lands on the launcher — focused above; this arms the
-        // landing conversation's own composer for whenever it is focused.)
-        ws.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
+        // Focus follows the boot view mode: the launcher owns the first
+        // keystrokes (it focused above), so its composer is NOT armed here —
+        // `Window::focus` is last-writer-wins, and an armed landing composer
+        // would route the boot typing into the hidden conversation's draft.
+        // A non-launcher boot (none exists today) would arm its composer.
+        if !matches!(ws.view_mode, ViewMode::Launcher) {
+            ws.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
+        }
         ws
     }
 
