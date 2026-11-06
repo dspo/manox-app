@@ -2212,20 +2212,18 @@ impl AhpStore {
         // The object row's archived bit is written HERE, at the one app-side
         // choke point every archive decision (sidebar single, batch,
         // `/exit`'s teardown, the archive command) passes through. The row is
-        // the draft refill's source of truth: an archived conversation whose
-        // row stayed unarchived outlives its own archive as a zombie draft,
-        // and the next `new_container` refills it into a `createSession`
-        // the host can only answer "already exists".
+        // the client's durable retirement fact — it keeps a retired
+        // conversation retired across restarts (the container death
+        // predicate and the sidebar's archived read consult it).
         //
         // It is written unconditionally, before the dispatch: that is a
         // crash-ordering choice, not a causality between the two. A crash
-        // between them leaves the row retired — the conservative side, since
-        // the refill must not resurrect a draft the user just archived — and
+        // between them leaves the row retired — the conservative side — and
         // a refused dispatch leaves it retired too: the catalogue walk that
         // re-seeds a rejected batch restores the summary row, never the
-        // draft candidacy. Archives that never pass through this client (a
-        // host cascade, another client) do not write the bit; the refill's
-        // host-retired check is the guard for those.
+        // row's archived bit. Archives that never pass through this client
+        // (a host cascade, another client) do not write the bit; the host's
+        // own session status is the guard for those.
         if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
             for id in session_ids {
                 objects.set_archived(id, archived);

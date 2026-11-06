@@ -31,7 +31,7 @@
 //! (`removed_projects` / `project_added` / `project_order`) are neither read
 //! nor migrated: path grouping has no counterpart in this model.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -168,8 +168,8 @@ pub fn display_name(project: &Project) -> String {
 /// Every root must exist as a directory; duplicates collapse to the first
 /// occurrence; `primary` defaults to the first root. A `name` that is blank
 /// once trimmed means "not customized" — the display name follows the
-/// primary root. A success also stamps the process-level
-/// [`last_created_project`] record the launcher chip consumes.
+/// primary root. Programmatic creates stay side-effect-quiet: the launcher
+/// chip's adoption record is stamped by the create dialog's confirm only.
 pub fn create_project(
     name: Option<String>,
     roots: Vec<PathBuf>,
@@ -179,7 +179,6 @@ pub fn create_project(
     let reg = slot.get_or_insert_with(load);
     let project = create_in(reg, name, roots, primary)?;
     flush(reg)?;
-    *last_created_slot() = Some(project.id.clone());
     Ok(project)
 }
 
@@ -247,7 +246,15 @@ fn create_in(
         name,
         name_overridden,
         roots,
-        position: reg.projects.iter().map(|p| p.position).min().unwrap_or(0) - 1,
+        // A hand-edited file can put a position at i64::MIN — never panic
+        // over an order hint.
+        position: reg
+            .projects
+            .iter()
+            .map(|p| p.position)
+            .min()
+            .unwrap_or(0)
+            .saturating_sub(1),
         created_at: now_secs(),
     };
     reg.projects.push(project.clone());
@@ -320,6 +327,11 @@ fn delete_in(reg: &mut Registry, id: &str) -> bool {
         return false;
     }
     reg.membership.retain(|_, project| project.as_str() != id);
+    // The remembered launcher target must not survive its project: the read
+    // side filters dead ids, but the file stays honest.
+    if reg.launcher_last_project.as_deref() == Some(id) {
+        reg.launcher_last_project = None;
+    }
     true
 }
 
@@ -428,26 +440,11 @@ pub fn membership_of(container_id: &str) -> Option<String> {
         .cloned()
 }
 
-/// The containers attached to a project, container id order.
-pub fn containers_of_project(project_id: &str) -> Vec<String> {
-    let mut slot = cached();
-    containers_in(slot.get_or_insert_with(load), project_id)
-}
-
 /// Detach a container. Idempotent.
 pub fn remove_membership(container_id: &str) {
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
     if remove_membership_in(reg, container_id) || reg.dirty {
-        flush_quiet(reg);
-    }
-}
-
-/// Batch detach — the container-teardown prune. Persists at most once.
-pub fn prune_memberships(container_ids: &[String]) {
-    let mut slot = cached();
-    let reg = slot.get_or_insert_with(load);
-    if prune_in(reg, container_ids) || reg.dirty {
         flush_quiet(reg);
     }
 }
@@ -476,14 +473,6 @@ fn set_membership_in(reg: &mut Registry, container_id: &str, project_id: &str) -
 
 fn remove_membership_in(reg: &mut Registry, container_id: &str) -> bool {
     reg.membership.remove(container_id).is_some()
-}
-
-fn prune_in(reg: &mut Registry, container_ids: &[String]) -> bool {
-    let ids: HashSet<&str> = container_ids.iter().map(String::as_str).collect();
-    let before = reg.membership.len();
-    reg.membership
-        .retain(|container, _| !ids.contains(container.as_str()));
-    reg.membership.len() != before
 }
 
 fn containers_in(reg: &Registry, project_id: &str) -> Vec<String> {
@@ -523,6 +512,13 @@ pub fn set_last_launcher_project(id: Option<&str>) {
 
 fn last_created_slot() -> std::sync::MutexGuard<'static, Option<String>> {
     LAST_CREATED.lock().expect("last-created project lock")
+}
+
+/// Stamp the process-level last-created record — the create dialog's
+/// confirm only. A programmatic create must not silently retarget a live
+/// launcher chip mid-session.
+pub fn stamp_last_created_project(id: &str) {
+    *last_created_slot() = Some(id.to_string());
 }
 
 /// The project the create dialog last minted (see [`LAST_CREATED`]).
@@ -1048,8 +1044,14 @@ mod tests {
         assert!(set_membership_in(&mut reg, "s1", &p1.id));
         assert!(set_membership_in(&mut reg, "s2", &p1.id));
         assert!(set_membership_in(&mut reg, "s3", &p2.id));
+        // The remembered launcher target follows its project out.
+        reg.launcher_last_project = Some(p1.id.clone());
 
         assert!(delete_in(&mut reg, &p1.id));
+        assert_eq!(
+            reg.launcher_last_project, None,
+            "the launcher memory does not dangle on the deleted id"
+        );
         assert!(reg.projects.iter().all(|p| p.id != p1.id));
         assert!(!reg.membership.contains_key("s1"));
         assert!(!reg.membership.contains_key("s2"));
@@ -1117,8 +1119,9 @@ mod tests {
         projects.into_iter().map(|p| (p.position, p.id)).collect()
     }
 
-    /// Membership CRUD: re-pointing, sorted reads, idempotent removal, and
-    /// the batch prune.
+    /// Membership CRUD: re-pointing, sorted reads, and idempotent removal —
+    /// teardown prunes per id (the batch prune face retired with its last
+    /// caller).
     #[test]
     fn membership_crud() {
         let (_dir_a, a) = temp_root("a");
@@ -1147,16 +1150,6 @@ mod tests {
             !remove_membership_in(&mut reg, "external:codex:u"),
             "idempotent"
         );
-        assert!(prune_in(
-            &mut reg,
-            &[
-                "s1".to_string(),
-                "aaa-first".to_string(),
-                "absent".to_string()
-            ]
-        ));
-        assert!(!prune_in(&mut reg, &["absent".to_string()]), "nothing left");
-        assert!(reg.membership.is_empty());
     }
 
     /// The whole stack through the public API against a redirected
@@ -1197,14 +1190,15 @@ mod tests {
             "a loose source inherits nothing"
         );
 
-        // The launcher memory: the create stamped the last-created record
-        // (one consumer), an unknown id never enters the default-target
+        // The launcher memory: the last-created record is stamped by the
+        // create DIALOG's confirm (a programmatic create stays quiet), one
+        // consumer takes it; an unknown id never enters the default-target
         // memory, and a known one round-trips.
-        assert_eq!(
-            last_created_project().as_deref(),
-            Some(project.id.as_str()),
-            "a successful create stamps the record"
+        assert!(
+            last_created_project().is_none(),
+            "a programmatic create stamps nothing"
         );
+        stamp_last_created_project(&project.id);
         assert_eq!(
             consume_last_created_project().as_deref(),
             Some(project.id.as_str())

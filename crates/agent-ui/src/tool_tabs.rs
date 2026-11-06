@@ -755,8 +755,10 @@ pub(crate) fn spawn_agent_terminal(
     }
     if let Some(prompt) = prompt {
         // The launcher's composer text rides the argv as the CLI's initial
-        // prompt (AgentBuilder passthrough — no shell, no injection face).
-        builder = builder.passthrough([prompt.to_string()]);
+        // prompt (AgentBuilder passthrough — no shell, no injection face),
+        // after the `--` separator: a draft starting with `-` must not
+        // parse as a flag.
+        builder = builder.passthrough(["--".to_string(), prompt.to_string()]);
     }
     let handle = Arc::new(builder.spawn().map_err(|e| e.to_string())?);
     // The REAL external session id: the cx session socket's `<id>.sock`

@@ -182,6 +182,11 @@ pub(crate) struct LauncherState {
     /// The open agent cascade: the agent id whose pill anchors it, the menu
     /// entity and its dismiss subscription.
     agent_menu: Option<(&'static str, Entity<PopupMenu>, Subscription)>,
+    /// The action row's binary availability, resolved ONCE at construction
+    /// (the per-agent PATH scan + stat is setup work the render loop must
+    /// not repeat every frame; the face is an advisory gray-out, and the
+    /// launch itself re-resolves).
+    binary_available: Vec<bool>,
     /// Held for its keep-alive: dropping a Subscription cancels the observer,
     /// and the Enter submission must live as long as the page does.
     _input_sub: Subscription,
@@ -219,6 +224,12 @@ impl LauncherState {
                 let _ = this.ws.update(cx, |ws, cx| ws.submit_launcher(payload, cx));
             }
         });
+        // The action row's availability face: one PATH scan at construction,
+        // not one per agent per frame.
+        let binary_available: Vec<bool> = EXTERNAL_AGENTS
+            .iter()
+            .map(|(id, _, _)| steer_ext_agents::resolve_binary(id).is_ok())
+            .collect();
         // The default target follows the memory (last used > none) — the
         // preset entries override it.
         let target = crate::projects::last_launcher_project()
@@ -238,6 +249,7 @@ impl LauncherState {
             model_menu: None,
             model_menu_sub: None,
             agent_menu: None,
+            binary_available,
             _input_sub: input_sub,
         }
     }
@@ -745,8 +757,9 @@ impl LauncherState {
     }
 
     /// The direct-open action row: the terminal (always available — the PTY
-    /// needs no binary) and the three CLI agents, grayed when the binary is
-    /// not on the machine (`resolve_binary`'s PATH + known-fallback scan).
+    /// needs no binary) and the three CLI agents, grayed when the binary was
+    /// not found at construction (the one cached `resolve_binary` scan —
+    /// see [`Self::binary_available`]).
     fn actions(&self, this: WeakEntity<Self>) -> Vec<LauncherAction> {
         let ws = self.ws.clone();
         let open_agent = self.agent_menu.as_ref().map(|(id, _, _)| *id);
@@ -764,8 +777,10 @@ impl LauncherState {
                 })
             },
         }];
-        for (agent_id, display, svg) in EXTERNAL_AGENTS {
-            let available = steer_ext_agents::resolve_binary(agent_id).is_ok();
+        for ((agent_id, display, svg), available) in
+            EXTERNAL_AGENTS.iter().zip(&self.binary_available)
+        {
+            let (agent_id, display, svg) = (*agent_id, *display, *svg);
             let cascade = (open_agent == Some(agent_id))
                 .then(|| self.agent_menu.as_ref().map(|(_, menu, _)| menu.clone()))
                 .flatten();
@@ -773,8 +788,8 @@ impl LauncherState {
                 id: agent_id,
                 icon: IconAsset(svg),
                 label: display.into(),
-                enabled: available,
-                unavailable: (!available).then(|| {
+                enabled: *available,
+                unavailable: (!*available).then(|| {
                     SharedString::from(steer_i18n::t_str(
                         "launcher-action-unavailable",
                         &[("prog", display)],

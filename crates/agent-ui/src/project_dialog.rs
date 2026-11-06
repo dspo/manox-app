@@ -193,7 +193,12 @@ impl ProjectDialogState {
                 self.roots.clone(),
                 self.primary.clone(),
             )
-            .map(|_| ()),
+            .map(|project| {
+                // The launcher chip adopts the fresh project on the closing
+                // render — the dialog's gesture, not the registry write, is
+                // what retargets a live chip.
+                crate::projects::stamp_last_created_project(&project.id);
+            }),
             Mode::Edit { project_id } => crate::projects::apply_edit(
                 project_id,
                 Some(name),

@@ -877,7 +877,8 @@ fn shell_config(
                     ws.update(cx, |_, cx| cx.notify());
                 }
             })),
-        }, // The titlebar's avatar slot wears the app's own mark.
+        },
+        // The titlebar's avatar slot wears the app's own mark.
         brand: Some(Arc::new(|| {
             gpui::div()
                 .size(gpui::px(13.))
