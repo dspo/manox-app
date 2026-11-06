@@ -25,7 +25,6 @@ use ahp_types::actions::{
     ChatInputCompletedAction, ChatPendingMessageRemovedAction, ChatPendingMessageSetAction,
     ChatToolCallConfirmedAction, ChatTurnCancelledAction, ChatTurnStartedAction,
     SessionActiveClientSetAction, SessionConfigChangedAction, SessionTitleChangedAction,
-    SessionWorkingDirectorySetAction,
 };
 use ahp_types::commands::{
     ChatSource, CreateChatParams, CreateSessionParams, FetchTurnsParams, ForkChatSource,
@@ -1986,12 +1985,11 @@ impl AhpStore {
                     if own {
                         // Every own refusal is visible: a config write
                         // rolls its optimistic twin back by VALUE (see
-                        // `rollback_refused_config`), a cwd write rolls its
-                        // latest twin, and any other refused action — a
-                        // submit, an answer card, a plan verdict — at least
-                        // says so on the transcript. The composer pushes
-                        // its bubble optimistically, and a refusal IS the
-                        // echo, so silence here would strand the bubble
+                        // `rollback_refused_config`), and any other refused
+                        // action — a submit, an answer card, a plan verdict
+                        // — at least says so on the transcript. The composer
+                        // pushes its bubble optimistically, and a refusal IS
+                        // the echo, so silence here would strand the bubble
                         // with no reply and no explanation.
                         // The refusal speaks on the SESSION's bucket, not the
                         // channel's own id: a chat payload carries no URI of
@@ -2008,15 +2006,8 @@ impl AhpStore {
                             Some(id_of(&envelope.channel).to_string())
                         };
                         if let Some(session_id) = session_id {
-                            match config_values_of(&envelope.action) {
-                                Some(config) => {
-                                    self.rollback_refused_config(&session_id, config);
-                                }
-                                None => {
-                                    if let Some(keys) = touched_config_keys(&envelope.action) {
-                                        self.rollback_latest(&session_id, &keys);
-                                    }
-                                }
+                            if let Some(config) = config_values_of(&envelope.action) {
+                                self.rollback_refused_config(&session_id, config);
                             }
                             // The refusal speaks on the OWNING session's
                             // table (a chat payload carries no URI of its
@@ -2046,8 +2037,6 @@ impl AhpStore {
                 // confirmed value, not past it.
                 if own && let Some(config) = config_values_of(&envelope.action) {
                     self.confirm_config(id_of(&envelope.channel), config);
-                } else if own && let Some(keys) = touched_config_keys(&envelope.action) {
-                    self.confirm_latest(id_of(&envelope.channel), &keys);
                 }
                 let chat_id = if envelope.channel.starts_with("ahp-chat:/") {
                     Some(id_of(&envelope.channel).to_string())
@@ -2773,33 +2762,6 @@ impl AhpStore {
         }
     }
 
-    /// Roll back the LATEST in-flight write for each named key — the
-    /// value-blind fallback for actions whose payload does not echo the
-    /// written value back comparable (the cwd write's directory URI).
-    fn rollback_latest(&mut self, session_id: &str, keys: &[String]) {
-        for key in keys {
-            if let Some(position) = self
-                .optimistic_undo
-                .iter()
-                .rposition(|(sid, k, _, _)| sid == session_id && k == key)
-            {
-                let (_, _, base, _) = self.optimistic_undo.remove(position);
-                if let Some(state) = self.book.sessions.get_mut(session_id)
-                    && let Some(seat) = &mut state.config
-                {
-                    match base {
-                        Some(v) => {
-                            seat.values.insert(key.clone(), v);
-                        }
-                        None => {
-                            seat.values.remove(key);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Spend a confirmed write's undo entry (matched by value) and every
     /// earlier entry it superseded: once the host echoed this exact write,
     /// its pre-write value is no longer a truth to restore — a later
@@ -2822,20 +2784,6 @@ impl AhpStore {
                 .map(|(_, entry)| entry)
                 .collect();
             self.optimistic_undo = keep;
-        }
-    }
-
-    /// Spend the latest entry per named key — the acceptance half for the
-    /// value-blind actions (see `rollback_latest`).
-    fn confirm_latest(&mut self, session_id: &str, keys: &[String]) {
-        for key in keys {
-            if let Some(position) = self
-                .optimistic_undo
-                .iter()
-                .rposition(|(sid, k, _, _)| sid == session_id && k == key)
-            {
-                self.optimistic_undo.remove(position);
-            }
         }
     }
 
@@ -3079,22 +3027,6 @@ impl AhpStore {
     /// Rename the session.
     pub fn set_title(&mut self, session_id: &str, title: String) {
         let action = StateAction::SessionTitleChanged(SessionTitleChangedAction { title });
-        self.dispatch(session_uri(session_id), action);
-    }
-
-    /// Replace the session's (single) working directory. The chip echoes
-    /// optimistically — the host's `configChanged` confirmation only lands
-    /// after the engine journals the change (the model picker's trade-off).
-    pub fn set_cwd(&mut self, session_id: &str, path: &str) {
-        let mut config = serde_json::Map::new();
-        config.insert(
-            config_keys::WORKING_DIRECTORY.to_string(),
-            Value::String(path.to_string()),
-        );
-        self.optimistic_config(session_id, &config);
-        let action = StateAction::SessionWorkingDirectorySet(SessionWorkingDirectorySetAction {
-            directory: format!("file://{path}"),
-        });
         self.dispatch(session_uri(session_id), action);
     }
 
@@ -3875,27 +3807,10 @@ pub fn pending_ask_from_ahp(
     })
 }
 
-/// The config keys a write-ahead action touches, for the reconciliation
-/// halves: a refusal (`rejectionReason`) rolls them back out of the client
-/// fold so a refused pick does not linger on the UI, and our own accepted
-/// echo spends their undo history so a later refusal restores to the
-/// confirmed value, not past it.
-fn touched_config_keys(action: &ahp_types::actions::StateAction) -> Option<Vec<String>> {
-    use ahp_types::actions::StateAction as A;
-    match action {
-        A::SessionConfigChanged(changed) => {
-            Some(changed.config.keys().map(|k| k.to_string()).collect())
-        }
-        // The cwd write is a dedicated action, not a config change.
-        A::SessionWorkingDirectorySet(_) => Some(vec![config_keys::WORKING_DIRECTORY.to_string()]),
-        _ => None,
-    }
-}
-
 /// The written values of a config action, when the action echoes them
-/// back comparable — the value-matched reconciliation half of
-/// `touched_config_keys` (the cwd write's payload is a file URI, not the
-/// config-seat string, so it stays on the value-blind path).
+/// back comparable — the value-matched reconciliation half (the refused
+/// pick rolls its optimistic twin out of the client fold, an accepted echo
+/// spends its undo entry).
 fn config_values_of(
     action: &ahp_types::actions::StateAction,
 ) -> Option<&serde_json::Map<String, Value>> {
@@ -3909,7 +3824,10 @@ fn config_values_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ahp_types::actions::{ChatDeltaAction, ChatTurnCompleteAction, SessionTitleChangedAction};
+    use ahp_types::actions::{
+        ChatDeltaAction, ChatTurnCompleteAction, SessionTitleChangedAction,
+        SessionWorkingDirectorySetAction,
+    };
     use gpui::AppContext as _;
 
     /// The sub-agent block's read face: the host's background-work subagent

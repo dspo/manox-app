@@ -41,9 +41,6 @@ impl Render for Workspace {
                 cx.notify();
             });
         }
-        // The render pass is the only place a `Window` is in hand, so the
-        // composer's blank-project input is maintained here.
-        self.ensure_blank_project_input(window, cx);
         // Settings is the split layout: the chrome sidebar carries the nav
         // (swapped in by `enter_settings`) and this column carries the
         // selected page's detail.
@@ -286,8 +283,7 @@ impl Workspace {
     /// The conversation column — the chrome card's main surface, bare of the
     /// shell furniture (gutter/sidebar/card/title bar all belong to the
     /// chrome shell around it). Hero-or-list, footer composer, the floating
-    /// context rail, the blank-project overlay, and the turn-navigator
-    /// overlay.
+    /// context rail, and the turn-navigator overlay.
     fn render_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui_component::{h_flex, v_flex};
         let theme = cx.theme().clone();
@@ -369,7 +365,6 @@ impl Workspace {
             None
         };
         let show_turn_rail = turn_rail.is_some();
-        let overlay = self.render_blank_project_overlay(window, &theme, cx);
         let turn_navigator_overlay = self.render_turn_navigator_overlay(&theme, main_body_w, cx);
 
         let footer =
@@ -604,8 +599,7 @@ impl Workspace {
                                 .children(turn_rail)
                         })
                     })
-                    .children(footer)
-                    .children(overlay),
+                    .children(footer),
             );
         let root = gpui::div()
             .id("embedded-column")

@@ -29,7 +29,7 @@ use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState, RopeExt, Textarea, TextareaState},
+    input::{InputEvent, RopeExt, Textarea, TextareaState},
     speech::{SpeechButton, SpeechEvent, SpeechState},
     tab::{Tab, TabBar},
     v_flex,
@@ -1029,9 +1029,6 @@ impl Workspace {
                 model_menu_sub: None,
                 send_menu: None,
                 send_menu_sub: None,
-                project_chip_open: false,
-                project_chip_menu: None,
-                project_chip_menu_sub: None,
                 completion: None,
                 mention_hover: None,
                 recall_index: -1,
@@ -1061,9 +1058,6 @@ impl Workspace {
                 composer_placeholder_mode: ComposerPlaceholderMode::Normal,
                 pending_attachments: Vec::new(),
                 active_browser_suites: Vec::new(),
-                project_picker_pending: false,
-                blank_project_parent: None,
-                blank_project_name_input: None,
                 thread_sub: None,
                 store_observe: None,
                 pending_successor: None,
@@ -2502,27 +2496,9 @@ impl Workspace {
         self.completion_confirm(ix, window, cx);
     }
 
-    /// Close the project-chip dropdown.
-    fn close_project_chip_menu(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cx| {
-            chat.project_chip_open = false;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.project_chip_menu = None;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.project_chip_menu_sub = None;
-            cx.notify();
-        });
-    }
-
     fn blocking_overlay_active(&self, cx: &App) -> bool {
         let chat = self.chat.read(cx);
-        chat.pending_ask.is_some()
-            || chat.pending_confirmation.is_some()
-            || chat.blank_project_parent.is_some()
+        chat.pending_ask.is_some() || chat.pending_confirmation.is_some()
     }
 
     fn toggle_turn_navigator(&mut self, window: &mut Window, cx: &mut Context<Self>) {

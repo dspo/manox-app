@@ -350,18 +350,6 @@ pub(crate) fn loose_bucket_name() -> String {
 
 const LOOSE_BUCKET_KEY_LOCALIZED: &str = "chrome-sidebar-chats";
 
-/// Project display name: the path's last segment; empty (quick chats) →
-/// "Chats".
-pub(crate) fn project_label(path: &str) -> String {
-    if path.is_empty() || path == "." {
-        return "Chats".into();
-    }
-    std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
