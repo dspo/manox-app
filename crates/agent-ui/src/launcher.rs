@@ -88,9 +88,11 @@ impl LauncherTarget {
         }
     }
 
-    /// The directory the container-to-be roots at: a project's primary root,
-    /// the ad-hoc folder, or `None` for the no-project target (the seed's
-    /// existing fallback semantics).
+    /// The directory the external gestures root at: a project's primary
+    /// root, the ad-hoc folder, or `None` for the no-project target (the
+    /// seed's existing fallback semantics). Single-cwd by design — the CLI
+    /// TUIs take one directory; the full root group rides
+    /// [`Self::roots`].
     pub(crate) fn folder(&self) -> Option<PathBuf> {
         match self {
             LauncherTarget::None => None,
@@ -102,6 +104,34 @@ impl LauncherTarget {
                     .find(|root| root.primary)
                     .map(|root| root.path.clone())
             }),
+        }
+    }
+
+    /// Every directory the container-to-be gets tool authorization for: a
+    /// project's roots with the primary FIRST (the host binds the first
+    /// `working_directories` entry as the session's cwd), the single ad-hoc
+    /// folder, none for the no-project target. The registry's stored order
+    /// is insertion order — the primary badge is an attribute, so the
+    /// primary is hoisted here.
+    pub(crate) fn roots(&self) -> Vec<PathBuf> {
+        match self {
+            LauncherTarget::None => Vec::new(),
+            LauncherTarget::Folder(path) => vec![path.clone()],
+            LauncherTarget::Project(id) => {
+                let mut ordered: Vec<PathBuf> = Vec::new();
+                let mut rest: Vec<PathBuf> = Vec::new();
+                if let Some(project) = crate::projects::get_project(id) {
+                    for root in &project.roots {
+                        if root.primary {
+                            ordered.push(root.path.clone());
+                        } else {
+                            rest.push(root.path.clone());
+                        }
+                    }
+                }
+                ordered.extend(rest);
+                ordered
+            }
         }
     }
 

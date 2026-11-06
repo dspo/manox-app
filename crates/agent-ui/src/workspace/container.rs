@@ -140,10 +140,12 @@ pub enum ContainerSeed<'a> {
 /// The native create intent — everything the createSession and the object row
 /// carry.
 pub struct NativeContainerSeed {
-    /// The conversation's belonging: the launch project (the launcher target's
-    /// primary, or an ad-hoc folder), or `None` for the seed's fallback
-    /// semantics (the window's workspace root).
-    pub project: Option<PathBuf>,
+    /// The conversation's granted roots, primary first: the launcher target's
+    /// project roots (the full group — `working_directories` is the create
+    /// intent's tool-authorization carrier and the host grants every entry),
+    /// or the one ad-hoc folder. Empty = the seed's fallback semantics (the
+    /// window's workspace root as the single root).
+    pub roots: Vec<PathBuf>,
     /// The project entity the container joins. The grouping fact itself is
     /// written at the ATTACH TAIL (the seed only carries it there): a session
     /// that exists — the host answered the create — can never orphan its
@@ -222,14 +224,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> String {
         let NativeContainerSeed {
-            project,
+            roots,
             project_id,
             model,
             access,
             effort: effort_str,
         } = intent;
         let ws = cx.weak_entity();
-        let dir_for_store = project.clone();
         // v3: the id is client-minted; the picked config rides the create
         // intent, and the attach lands once the host answered.
         let sid = uuid::Uuid::new_v4().to_string();
@@ -243,24 +244,27 @@ impl Workspace {
         if let Some(effort) = &effort_str {
             config.insert("reasoningEffort".into(), serde_json::json!(effort));
         }
-        // `working_directories` is the create intent's only directory
-        // carrier (the host binds its first entry as the session's cwd): a
-        // project launch binds the project — the landing chip and the
-        // sidebar group both read it back — a loose one the fallback cwd.
-        // An empty vector leaves the session directory-less ("choose
-        // project" on a thread the user launched FROM a project).
-        let cwd = project
-            .as_ref()
-            .unwrap_or(&self.cwd)
-            .to_string_lossy()
-            .to_string();
-        let cwds = vec![format!("file://{cwd}")];
+        // `working_directories` is the create intent's only directory carrier
+        // AND the tool-authorization grant: a project launch carries its FULL
+        // root group (primary first — the host binds the first entry as the
+        // session's cwd, and the landing chip and the sidebar both read it
+        // back), an ad-hoc folder carries itself, and an empty list falls
+        // back to the window's workspace root as the single root.
+        let primary = roots.first().cloned();
+        let mut granted = roots;
+        if granted.is_empty() {
+            granted.push(self.cwd.clone());
+        }
+        let cwds: Vec<String> = granted
+            .iter()
+            .map(|root| format!("file://{}", root.to_string_lossy()))
+            .collect();
         // The object row: created at once, carrying the conversation's
-        // belonging and picks.
+        // belonging (the primary root) and picks.
         let (provider, model_id) = super::attach::split_wire_model(model.as_deref());
         super::attach::land_conversation_row(
             &sid,
-            project.as_deref(),
+            primary.as_deref(),
             provider,
             model_id,
             access.as_deref(),
@@ -299,7 +303,7 @@ impl Workspace {
                 });
                 return;
             }
-            if let Some(dir) = &dir_for_store {
+            if let Some(dir) = primary.as_deref() {
                 let _ = ws.update(cx, |_ws, cx| {
                     Workspace::register_project_in_store(dir, cx);
                 });

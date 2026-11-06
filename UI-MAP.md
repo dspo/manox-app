@@ -259,7 +259,7 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 | 手势 | 交互 | 铸什么 |
 |---|---|---|
-| composer ⏎ | 输入 + Enter | `Manox` 容器（cwds = chip 目标的 primary/ad-hoc 文件夹；picks 随 seed） |
+| composer ⏎ | 输入 + Enter | `Manox` 容器（cwds = chip 目标的**全部根** primary 在首/ad-hoc 文件夹，进 `working_directories` 授权面；picks 随 seed） |
 | agent 药丸 | 共享级联选模型 | `External` 容器（cwd = 目标 primary/ad-hoc；composer 文本非空时经 `AgentBuilder::passthrough` 作 CLI 初始 prompt） |
 | 终端药丸 | 即点即开 | `External{agent_id "terminal"}`（既有「新建终端」路径的第二个入口） |
 

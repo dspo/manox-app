@@ -96,12 +96,12 @@ impl crate::Workspace {
         if text.trim().is_empty() {
             return;
         }
-        let project_path = target.folder();
+        let roots = target.roots();
         let project_id = target.project_id().map(str::to_string);
         self.create_container(
             crate::workspace::container::ContainerSeed::Manox(
                 crate::workspace::container::NativeContainerSeed {
-                    project: project_path,
+                    roots,
                     project_id: project_id.clone(),
                     model,
                     access,
