@@ -273,16 +273,6 @@ fn update_name_in(reg: &mut Registry, id: &str, name: Option<String>) -> anyhow:
     Ok(())
 }
 
-fn set_roots_in(
-    reg: &mut Registry,
-    id: &str,
-    roots: Vec<PathBuf>,
-    primary: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    let built = build_roots(roots, primary.as_deref())?;
-    set_roots_built(reg, id, built)
-}
-
 /// Assign an already-validated + normalized root set (the edit path's
 /// single-validation shape: refuse before anything is applied).
 fn set_roots_built(reg: &mut Registry, id: &str, roots: Vec<ProjectRoot>) -> anyhow::Result<()> {
@@ -473,14 +463,6 @@ fn set_membership_in(reg: &mut Registry, container_id: &str, project_id: &str) -
 
 fn remove_membership_in(reg: &mut Registry, container_id: &str) -> bool {
     reg.membership.remove(container_id).is_some()
-}
-
-fn containers_in(reg: &Registry, project_id: &str) -> Vec<String> {
-    reg.membership
-        .iter()
-        .filter(|(_, project)| project.as_str() == project_id)
-        .map(|(container, _)| container.clone())
-        .collect()
 }
 
 // ── launcher memory ───────────────────────────────────────────────────
@@ -804,6 +786,26 @@ mod tests {
         let mut projects = reg.projects.clone();
         projects.sort_by_key(|p| p.position);
         projects.into_iter().map(|p| p.id).collect()
+    }
+
+    /// The prod write face's root replacement, for the invariant tests.
+    fn set_roots_in(
+        reg: &mut Registry,
+        id: &str,
+        roots: Vec<PathBuf>,
+        primary: Option<PathBuf>,
+    ) -> anyhow::Result<()> {
+        let built = build_roots(roots, primary.as_deref())?;
+        set_roots_built(reg, id, built)
+    }
+
+    /// The membership ordering read the CRUD test asserts against.
+    fn containers_in(reg: &Registry, project_id: &str) -> Vec<String> {
+        reg.membership
+            .iter()
+            .filter(|(_, project)| project.as_str() == project_id)
+            .map(|(container, _)| container.clone())
+            .collect()
     }
 
     /// The parse-edit-serialize cycle: persisted projects, their nested

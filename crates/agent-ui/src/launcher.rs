@@ -213,11 +213,17 @@ impl LauncherState {
                 shift: false,
             } = ev
             {
-                // The payload extracts INSIDE this update — and only when a
-                // send may actually go out: an in-flight send or a blank
-                // draft leaves the composer untouched, so a second ⏎ during
-                // the flight keeps its text instead of clearing it into a
-                // lost send.
+                // The single-flight peek BEFORE consuming: a send already
+                // in flight keeps the composer untouched, so a second ⏎
+                // during the flight does not clear its text into a lost
+                // send. The peek reads the workspace — the one entity this
+                // callback does not hold.
+                if this.first_turn_in_flight(cx) {
+                    tracing::warn!("launcher send ignored: a first turn is already in flight");
+                    return;
+                }
+                // The payload extracts INSIDE this update — a blank draft
+                // yields nothing and the composer stays untouched.
                 let Some(payload) = this.submit_payload(window, cx) else {
                     return;
                 };
@@ -385,10 +391,11 @@ impl LauncherState {
         )
     }
 
-    /// The send's payload, consumed out of this state — `None` when no send
-    /// may go out: a first turn already in flight (the single-flight peek
-    /// happens BEFORE the composer is consumed — the text stays put instead
-    /// of being cleared into a lost second send) or a blank draft. See
+    /// The send's payload, consumed out of this state — `None` for a blank
+    /// draft (the composer stays untouched). The IN-FLIGHT check is the
+    /// caller's peek ([`Self::first_turn_in_flight`], the PressEnter
+    /// handler) so this extraction never reads the workspace and stays
+    /// callable under a workspace lease (the test driver). See
     /// [`LauncherSubmitPayload`] for why the extraction lives on this side
     /// of the `ws.update`.
     pub(crate) fn submit_payload(
@@ -396,10 +403,6 @@ impl LauncherState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<LauncherSubmitPayload> {
-        if self.first_turn_in_flight(cx) {
-            tracing::warn!("launcher send ignored: a first turn is already in flight");
-            return None;
-        }
         let (target, model, access, effort) = self.snapshot();
         let text = self.take_text_if_present(window, cx)?;
         Some(LauncherSubmitPayload {
@@ -413,6 +416,8 @@ impl LauncherState {
 
     /// Whether a first turn is staged on the workspace but its container not
     /// yet attached (the ⏎-to-attach window the single-flight peek guards).
+    /// Reads the workspace — callable only where it is not leased (the
+    /// PressEnter handler, never a workspace update).
     fn first_turn_in_flight(&self, cx: &App) -> bool {
         self.ws
             .upgrade()

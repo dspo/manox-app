@@ -71,8 +71,8 @@ impl crate::Workspace {
     /// [`Self::flush_pending_first_turn`] sends. The payload arrives
     /// pre-extracted (see `LauncherSubmitPayload`): this gesture runs in the
     /// PressEnter handler's wake, where re-entering the launcher entity
-    /// panics the borrow. The payload is `None` when no send may go out
-    /// (in-flight or blank — the composer keeps its text).
+    /// panics the borrow. The handler peeked first: an in-flight or blank
+    /// send never arrives here with composer text to lose.
     pub(crate) fn submit_launcher(
         &mut self,
         payload: crate::launcher::LauncherSubmitPayload,
