@@ -260,7 +260,13 @@ impl Render for ProjectDialogState {
             .map(|path| ProjectRootRow {
                 path: path.to_string_lossy().into_owned(),
                 label: root_label(path),
-                primary: self.primary.as_deref() == Some(path.as_path()),
+                // The canonical compare the dialog's own rule keeps —
+                // `primary` is always canonical while the picked roots keep
+                // the picker's raw spelling (macOS /tmp vs /private/tmp).
+                primary: self
+                    .primary
+                    .as_deref()
+                    .is_some_and(|current| is_same_path(current, path)),
             })
             .collect();
 

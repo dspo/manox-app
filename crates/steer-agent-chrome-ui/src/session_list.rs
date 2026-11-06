@@ -1016,8 +1016,10 @@ fn group(
         });
     }
     // The membership drop: a row released on this group moves into the
-    // project (the loose bucket detaches). The drop clears the highlight the
-    // drag-move passes kept alive.
+    // project (the loose bucket detaches). The drop handler itself does NOT
+    // touch the highlight — the host's drop face clears it, and the root's
+    // capture-phase on_drop is the backstop; re-raising the drag-over face
+    // here would re-set the marker the drop just cleared.
     if let Some(on_drop_row) = list.on_drop_row.clone() {
         slot = slot
             .on_drag_move::<DraggedRow>({
@@ -1036,12 +1038,8 @@ fn group(
             })
             .on_drop::<DraggedRow>({
                 let target = g.key.clone();
-                let clear = list.on_row_drag_over.clone();
                 move |dragged: &DraggedRow, w, cx| {
                     (on_drop_row)(&target, &dragged.id.to_string(), w, cx);
-                    if let Some(clear) = clear.as_ref() {
-                        (clear)(&target, w, cx);
-                    }
                 }
             });
     }
