@@ -10,7 +10,10 @@
 //! `~/.manox/settings.toml`, read-modify-written with the only-touch-my-keys
 //! discipline — every other key (runtime ones included) survives verbatim,
 //! and a corrupt file is replaced rather than allowed to block the write.
-//! The keys:
+//! The swap is atomic (sibling temp file + rename): a crash mid-write leaves
+//! the previous content intact, and a failed write marks the registry dirty
+//! so the next write retries instead of the change silently dying at the
+//! next restart. The keys:
 //!
 //! - `[[project]]`: one entry per project with nested `[[project.roots]]`
 //!   rows (`path` + `primary`).
@@ -71,6 +74,12 @@ struct Registry {
     /// persisted — one app-owned settings key, the same discipline as the
     /// rest of the file.
     launcher_last_project: Option<String>,
+    /// A persist failed since the last successful write. The in-memory state
+    /// stays live (the UI keeps working), the flag makes the NEXT write flush
+    /// again even when it changed nothing — otherwise a same-value write
+    /// would be judged "no change" and the file would silently lag what the
+    /// UI shows until a restart dropped it.
+    dirty: bool,
 }
 
 static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
@@ -167,7 +176,7 @@ pub fn create_project(
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
     let project = create_in(reg, name, roots, primary)?;
-    persist(reg);
+    flush(reg)?;
     *last_created_slot() = Some(project.id.clone());
     Ok(project)
 }
@@ -178,8 +187,8 @@ pub fn update_name(id: &str, name: Option<String>) -> anyhow::Result<()> {
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
     update_name_in(reg, id, name)?;
-    persist(reg);
-    Ok(())
+    flush(reg)
+
 }
 
 /// Replace a project's root set (same validation as creation) and persist.
@@ -187,8 +196,8 @@ pub fn set_roots(id: &str, roots: Vec<PathBuf>, primary: Option<PathBuf>) -> any
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
     set_roots_in(reg, id, roots, primary)?;
-    persist(reg);
-    Ok(())
+    flush(reg)
+
 }
 
 /// Move the primary badge to `path` — the root order is untouched. The path
@@ -197,8 +206,8 @@ pub fn set_primary(id: &str, path: &Path) -> anyhow::Result<()> {
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
     set_primary_in(reg, id, path)?;
-    persist(reg);
-    Ok(())
+    flush(reg)
+
 }
 
 /// Delete a project and cascade its memberships. The containers themselves
@@ -206,8 +215,8 @@ pub fn set_primary(id: &str, path: &Path) -> anyhow::Result<()> {
 pub fn delete_project(id: &str) {
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
-    if delete_in(reg, id) {
-        persist(reg);
+    if delete_in(reg, id) || reg.dirty {
+        flush_quiet(reg);
     }
 }
 
@@ -218,8 +227,8 @@ pub fn delete_project(id: &str) {
 pub fn reorder(ids_in_new_order: &[String]) {
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
-    if reorder_in(reg, ids_in_new_order) {
-        persist(reg);
+    if reorder_in(reg, ids_in_new_order) || reg.dirty {
+        flush_quiet(reg);
     }
 }
 
@@ -397,8 +406,8 @@ pub fn set_membership(container_id: &str, project_id: &str) {
     }
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
-    if set_membership_in(reg, container_id, project_id) {
-        persist(reg);
+    if set_membership_in(reg, container_id, project_id) || reg.dirty {
+        flush_quiet(reg);
     }
 }
 
@@ -421,8 +430,8 @@ pub fn containers_of_project(project_id: &str) -> Vec<String> {
 pub fn remove_membership(container_id: &str) {
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
-    if remove_membership_in(reg, container_id) {
-        persist(reg);
+    if remove_membership_in(reg, container_id) || reg.dirty {
+        flush_quiet(reg);
     }
 }
 
@@ -430,8 +439,8 @@ pub fn remove_membership(container_id: &str) {
 pub fn prune_memberships(container_ids: &[String]) {
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
-    if prune_in(reg, container_ids) {
-        persist(reg);
+    if prune_in(reg, container_ids) || reg.dirty {
+        flush_quiet(reg);
     }
 }
 
@@ -498,9 +507,9 @@ pub fn set_last_launcher_project(id: Option<&str>) {
     let validated = id
         .filter(|id| project(reg, id).is_some())
         .map(str::to_string);
-    if reg.launcher_last_project != validated {
+    if reg.launcher_last_project != validated || reg.dirty {
         reg.launcher_last_project = validated;
-        persist(reg);
+        flush_quiet(reg);
     }
 }
 
@@ -520,6 +529,27 @@ pub fn consume_last_created_project() -> Option<String> {
 }
 
 // ── persistence ───────────────────────────────────────────────────────
+
+/// The write sites' flush face: persist when the write changed anything OR a
+/// previous persist failed (a retry must not wait for a same-value write to
+/// report "changed"). The error propagates to callers with a failure face;
+/// the void callers use [`flush_quiet`].
+fn flush(reg: &mut Registry) -> anyhow::Result<()> {
+    let result = persist(reg);
+    reg.dirty = result.is_err();
+    result
+}
+
+/// The void-returning writes' flush: a failure only marks the dirty flag and
+/// logs — the next write retries the flush.
+fn flush_quiet(reg: &mut Registry) {
+    if let Err(e) = flush(reg) {
+        tracing::warn!(
+            error = %e,
+            "persist project registry failed; the next write retries"
+        );
+    }
+}
 
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -564,6 +594,7 @@ fn load_at(path: &Path) -> Registry {
             .get("launcher_last_project")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        dirty: false,
     }
 }
 
@@ -628,29 +659,32 @@ fn parse_roots(value: Option<&toml::Value>) -> Option<Vec<ProjectRoot>> {
     Some(roots)
 }
 
-fn persist(reg: &Registry) {
-    let Some(path) = settings_file() else {
-        return;
-    };
-    if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        tracing::warn!(error = %e, "create settings dir failed");
-        return;
+fn persist(reg: &Registry) -> anyhow::Result<()> {
+    let path = settings_file().context("no HOME: nowhere to persist the project registry")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("create settings dir")?;
     }
-    persist_at(&path, reg);
+    persist_at(&path, reg)
 }
 
 /// The write half: parse-edit-serialize keeps every other key intact; a
 /// corrupt file is replaced rather than allowed to block the write (the same
-/// recovery the ui_language accessor uses).
-fn persist_at(path: &Path, reg: &Registry) {
+/// recovery the ui_language accessor uses). The swap is ATOMIC — serialize
+/// fully, write a sibling temp file, rename over the target — so a crash
+/// mid-write leaves the previous content intact instead of a truncated file
+/// the next load would treat as empty (silently wiping every project and
+/// membership alongside the runtime tables sharing the file). No
+/// cross-process lock: the file's other writer
+/// (`manox_agent::settings::save`) is itself unfile-locked, so locking on
+/// this side alone would not close the race — closing it needs an upstream
+/// counterpart.
+fn persist_at(path: &Path, reg: &Registry) -> anyhow::Result<()> {
     let mut doc: toml::Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| toml::from_str(&raw).ok())
         .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
     let Some(table) = doc.as_table_mut() else {
-        return;
+        anyhow::bail!("settings.toml is not a table; refusing to overwrite it");
     };
     table.insert(
         "project".to_string(),
@@ -678,13 +712,15 @@ fn persist_at(path: &Path, reg: &Registry) {
             table.remove("launcher_last_project");
         }
     }
-    match toml::to_string_pretty(&doc)
-        .context("serialize settings.toml")
-        .and_then(|s| std::fs::write(path, s).context("write settings.toml"))
-    {
-        Ok(()) => {}
-        Err(e) => tracing::warn!(error = %e, "persist project registry failed"),
-    }
+    let serialized = toml::to_string_pretty(&doc).context("serialize settings.toml")?;
+    let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))
+        .context("create settings.toml temp file")?;
+    use std::io::Write as _;
+    temp.write_all(serialized.as_bytes())
+        .context("write settings.toml temp file")?;
+    temp.persist(path)
+        .context("swap settings.toml into place")?;
+    Ok(())
 }
 
 fn project_row(project: &Project) -> toml::Value {
@@ -786,7 +822,7 @@ mod tests {
             "external:claude:abc",
             &first.id
         ));
-        persist_at(&settings, &reg);
+        persist_at(&settings, &reg).expect("persist");
 
         let loaded = load_at(&settings);
         assert_eq!(loaded.projects, reg.projects);

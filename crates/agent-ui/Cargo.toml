@@ -43,6 +43,7 @@ base64.workspace = true
 chrono.workspace = true
 futures.workspace = true
 serde.workspace = true
+tempfile = "3"
 serde_json.workspace = true
 tokio.workspace = true
 # CancellationToken — the abort-signal half of the AgentTool trait the
@@ -105,7 +106,6 @@ gpui = { workspace = true, features = ["test-support"] }
 gpui_platform.workspace = true
 image.workspace = true
 serde_json.workspace = true
-tempfile = "3"
 
 # The offscreen visual harness reads back a Metal texture, so it is
 # macOS-only — as is the platform crate it needs.
