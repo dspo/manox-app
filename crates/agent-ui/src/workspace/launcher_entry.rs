@@ -58,6 +58,12 @@ impl crate::Workspace {
         cx.notify();
     }
 
+    /// Whether a launcher send is staged but its container not yet attached —
+    /// the ⏎-to-attach window the submit gesture's single-flight peek guards.
+    pub(crate) fn first_turn_in_flight(&self) -> bool {
+        self.pending_first_turn.is_some()
+    }
+
     /// ⏎ on the launcher composer: mint the Manox container (the target's
     /// folder rides the create intent; the picks land in its config), stage
     /// the text, and let the attach completion flush it. The mode stays
@@ -65,16 +71,17 @@ impl crate::Workspace {
     /// [`Self::flush_pending_first_turn`] sends. The payload arrives
     /// pre-extracted (see `LauncherSubmitPayload`): this gesture runs in the
     /// PressEnter handler's wake, where re-entering the launcher entity
-    /// panics the borrow.
+    /// panics the borrow. The payload is `None` when no send may go out
+    /// (in-flight or blank — the composer keeps its text).
     pub(crate) fn submit_launcher(
         &mut self,
         payload: crate::launcher::LauncherSubmitPayload,
         cx: &mut Context<Self>,
     ) {
         // Single flight: the staged text already names the container being
-        // minted, and the flush is keyed to its attach. A second submit
-        // during the flight would race it (the input cleared on the first
-        // submit, so only a genuinely concurrent send can get here).
+        // minted, and the flush is keyed to its attach. The gesture peeks
+        // before consuming its composer, so an in-flight second send never
+        // reaches here with text to lose.
         if self.pending_first_turn.is_some() {
             tracing::warn!("launcher send ignored: a first turn is already in flight");
             return;

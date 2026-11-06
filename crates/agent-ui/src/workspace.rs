@@ -1252,8 +1252,8 @@ impl Workspace {
         matches!(self.view_mode, ViewMode::Launcher)
     }
 
-    /// Type into the launcher composer. Test-support: the driver face for the
-    /// ⏎-send regression (`restore_text`'s silent set, then submit).
+    /// Type into the launcher composer, replacing whatever it carries.
+    /// Test-support: the driver face for the ⏎-send regressions.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_launcher_type(
         &mut self,
@@ -1262,10 +1262,18 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(launcher) = &self.launcher {
-            launcher.update(cx, |state, cx| {
-                state.restore_text(text.to_string(), window, cx)
-            });
+            launcher.update(cx, |state, cx| state.set_text(text.to_string(), window, cx));
         }
+    }
+
+    /// The launcher composer's current text (the refund regressions' read
+    /// face). Test-support.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_launcher_text(&self, cx: &App) -> String {
+        self.launcher
+            .as_ref()
+            .map(|launcher| launcher.read(cx).text(cx))
+            .unwrap_or_default()
     }
 
     /// Fire the launcher's ⏎ gesture directly (the mint path the New
@@ -1275,7 +1283,10 @@ impl Workspace {
         let Some(launcher) = self.launcher.clone() else {
             return;
         };
-        let payload = launcher.update(cx, |state, cx| state.submit_payload(window, cx));
+        let Some(payload) = launcher.update(cx, |state, cx| state.submit_payload(window, cx))
+        else {
+            return;
+        };
         self.submit_launcher(payload, cx);
     }
 

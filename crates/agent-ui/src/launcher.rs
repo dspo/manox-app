@@ -178,10 +178,14 @@ impl LauncherState {
                 shift: false,
             } = ev
             {
-                // The payload extracts INSIDE this update; the workspace
-                // gesture runs after — re-entering this entity there panics
-                // the borrow.
-                let payload = this.submit_payload(window, cx);
+                // The payload extracts INSIDE this update — and only when a
+                // send may actually go out: an in-flight send or a blank
+                // draft leaves the composer untouched, so a second ⏎ during
+                // the flight keeps its text instead of clearing it into a
+                // lost send.
+                let Some(payload) = this.submit_payload(window, cx) else {
+                    return;
+                };
                 let _ = this.ws.update(cx, |ws, cx| ws.submit_launcher(payload, cx));
             }
         });
@@ -238,17 +242,15 @@ impl LauncherState {
         self.input.update(cx, |state, cx| state.focus(window, cx));
     }
 
-    pub(crate) fn take_text(&self, window: &mut Window, cx: &mut App) -> String {
-        let text = self.input.read(cx).value().to_string();
-        self.input.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-        });
-        text
+    /// The composer's current text (the refund regressions' read face).
+    #[cfg(feature = "test-support")]
+    pub(crate) fn text(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
     }
 
-    /// Consume the composer text only when it carries something — the agent
-    /// gesture reads it as the CLI's initial prompt and leaves an empty field
-    /// alone.
+    /// Consume the composer text only when it carries something — the send
+    /// gestures read it only when it carries a turn (the agent gesture uses
+    /// it as the CLI's initial prompt and leaves an empty field alone).
     pub(crate) fn take_text_if_present(&self, window: &mut Window, cx: &mut App) -> Option<String> {
         let text = self.input.read(cx).value().to_string();
         (!text.trim().is_empty()).then(|| {
@@ -259,7 +261,23 @@ impl LauncherState {
         })
     }
 
+    /// Refill the composer — the failure legs' refund write. Fills ONLY an
+    /// empty composer: a submit that landed while the refund was in flight
+    /// is the fresher intent, and the refund must not clobber it.
     pub(crate) fn restore_text(&self, text: String, window: &mut Window, cx: &mut App) {
+        if !self.input.read(cx).value().trim().is_empty() {
+            return;
+        }
+        self.input.update(cx, |state, cx| {
+            state.set_value(text, window, cx);
+        });
+    }
+
+    /// Replace the composer's text outright — the diagnostic typing face
+    /// (the refund path's [`Self::restore_text`] only fills an empty
+    /// composer). Test-support.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn set_text(&self, text: String, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
         });
@@ -311,23 +329,38 @@ impl LauncherState {
         )
     }
 
-    /// The send's payload, consumed out of this state — the composer text is
-    /// taken, the picks cloned. See [`LauncherSubmitPayload`] for why the
-    /// extraction lives on this side of the `ws.update`.
+    /// The send's payload, consumed out of this state — `None` when no send
+    /// may go out: a first turn already in flight (the single-flight peek
+    /// happens BEFORE the composer is consumed — the text stays put instead
+    /// of being cleared into a lost second send) or a blank draft. See
+    /// [`LauncherSubmitPayload`] for why the extraction lives on this side
+    /// of the `ws.update`.
     pub(crate) fn submit_payload(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> LauncherSubmitPayload {
+    ) -> Option<LauncherSubmitPayload> {
+        if self.first_turn_in_flight(cx) {
+            tracing::warn!("launcher send ignored: a first turn is already in flight");
+            return None;
+        }
         let (target, model, access, effort) = self.snapshot();
-        let text = self.take_text(window, cx);
-        LauncherSubmitPayload {
+        let text = self.take_text_if_present(window, cx)?;
+        Some(LauncherSubmitPayload {
             text,
             target,
             model,
             access,
             effort,
-        }
+        })
+    }
+
+    /// Whether a first turn is staged on the workspace but its container not
+    /// yet attached (the ⏎-to-attach window the single-flight peek guards).
+    fn first_turn_in_flight(&self, cx: &App) -> bool {
+        self.ws
+            .upgrade()
+            .is_some_and(|ws| ws.read(cx).first_turn_in_flight())
     }
 
     // ── menus ─────────────────────────────────────────────────────────
