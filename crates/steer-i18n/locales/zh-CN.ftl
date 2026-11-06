@@ -11,8 +11,6 @@
 
 sidebar-new-chat = 新对话
 
-sidebar-section-projects = 项目
-
 sidebar-section-conversations = 对话
 
 sidebar-new-terminal = 新建终端
@@ -525,8 +523,6 @@ workspace-ask-note-label = 补充：
 
 workspace-ask-skipped = 已跳过
 
-workspace-cancel = 取消
-
 access-mode-sandbox-title = 沙箱访问
 
 access-mode-full-access-title = 完全访问
@@ -537,15 +533,7 @@ workspace-mode-notice = { $mode ->
 }
 
 workspace-project-choose = 选择项目
-
-workspace-project-new = 新建项目
-
-workspace-project-blank = 新建空白项目
 workspace-project-unfiled = 对话
-
-workspace-project-select-folder = 选择文件夹
-
-workspace-project-name-prompt = 项目文件夹名称
 
 workspace-empty-prompt = 我们该做什么？
 

@@ -1270,6 +1270,19 @@ impl Workspace {
             .unwrap_or_default()
     }
 
+    /// The launcher page's target and lock bit (the entry-gesture
+    /// regressions' read face: the project-item presets lock the page, a
+    /// bare ⌘N lands the unlocked no-project default). Test-support.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_launcher_target(
+        &self,
+        cx: &App,
+    ) -> Option<(crate::launcher::LauncherTarget, bool)> {
+        self.launcher
+            .as_ref()
+            .map(|launcher| launcher.read(cx).target_lock())
+    }
+
     /// Fire the launcher's ⏎ gesture directly (the mint path the New
     /// gestures no longer take). Test-support.
     #[cfg(feature = "test-support")]

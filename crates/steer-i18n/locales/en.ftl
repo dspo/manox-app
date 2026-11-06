@@ -11,8 +11,6 @@
 
 sidebar-new-chat = New chat
 
-sidebar-section-projects = Projects
-
 sidebar-section-conversations = Conversations
 
 sidebar-new-terminal = New Terminal
@@ -542,8 +540,6 @@ workspace-ask-note-label = Supplement:
 
 workspace-ask-skipped = Skipped
 
-workspace-cancel = Cancel
-
 access-mode-sandbox-title = Sandbox access
 
 access-mode-full-access-title = Full access
@@ -554,15 +550,7 @@ workspace-mode-notice = { $mode ->
 }
 
 workspace-project-choose = Choose project
-
-workspace-project-new = New project
-
-workspace-project-blank = Create blank project
 workspace-project-unfiled = Conversations
-
-workspace-project-select-folder = Select folder
-
-workspace-project-name-prompt = Project folder name
 
 workspace-empty-prompt = What should we do?
 

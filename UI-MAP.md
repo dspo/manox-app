@@ -56,7 +56,7 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 | 权限门控（AccessMode / ToolCallAuthorization / AskUserQuestion） | ✅ | 文件效果策略：bash 两档都运行（sandbox 档 ride seatbelt profile），fs 写经 `writable_roots` containment + `[sandbox: …]` marker；`require_escalated`+`justification` 升级往返经 `ToolCallAuthorization`；AccessSwitch（composer 底栏内联 segmented TabBar）切 Sandbox/FullAccess，切换热生效（下一次工具调用即按新模式裁决），开关乐观即时刷新、宿主拒绝时回滚并出纠错 notice（写前对账，`LeafView::access_mode_or_default`：座位值 → 宿主声明 schema 默认 → 宿主默认，旧三档持久串一律落默认 Sandbox）；两档网络恒开——无用户面网络开关，app 在每次 attach 播种 `networkAccess=on`（AHP 会话内存态，恢复即关故须重播种；沙箱出网无 allowlist 直连、有 allowlist 走受管代理 + 域名确认卡） |
 | Slash commands | ✅ 部分 | `/compact`、`/exit`(`/quit`)、`/new`(`/clear` `/archive`)、`/goal`、`/mode`（`/plan` 是上游内置 skill：裸文本直通 runtime 的 skill 分发，非本地命令）；markdown/skill 适配器经共享 registry。`/exit` 走容器 teardown 序列（`workspace/exit.rs`，plan A6）：收子代理观察面板 → 关右栏终端/TUI agent 页签与底 dock 终端（PTY drop 即进程树终止；右栏 CLI 页签 = **容器资源**，经 kill-handle 注册表随其容器同死）→ 回收**本容器**的浏览器页签（按容器 id 键控回收，其它容器的页签存活）→ **一条容器 teardown（archive 模式的 `x-manox/teardown`）**（宿主瀑布：cancel 当前 turn + interrupt 全部活跃 run + 结算后台任务 + 沿 parent 边级联归档；路径的乐观半场先清空容器 UI——book 摘行、object 行归档位、侧栏摘行、资源回收）→ 落 [Launcher](#launcher)（2026-11 起不再铸 landing sibling，收尾播报改走窗口 notification），每步以 info 卡播报；turn 运行中同样可发，无需确认弹窗（节拍播报即告知）。`/exit` 只结束**出走容器自身**：侧栏拉起的外部容器是**独立容器**（D6/D8，各持自己的 0 号进程），另一个容器的 `/exit` 不碰它们——行、记录与进程原样存活，唯一终结它们的是 app 进程退出（by design） |
 | 模型选择器 | ✅ | pi `ProviderRegistry`，按 provider 显示名分组；写前对账：乐观写入 → 宿主 echo 确认（撤销史销账）/ `rejectionReason` 回滚 + 纠错 notice |
-| 项目（composer chip / 侧栏文件夹 / 绑定新会话） | ✅ | 宿主 workspace registry（`ClientCall::Workspace` + `HostEvent::WorkspaceUpdate` 状态流），客户端不再写 threads.db `projects` 表 |
+| 项目（composer chip 展示 / 侧栏文件夹 / launcher 绑定新会话） | ✅ | 会话目标创建时一次性确定（A1）：footer chip 只读 object row 的 belonging，无换目标手势；宿主 workspace registry（`ClientCall::Workspace` + `HostEvent::WorkspaceUpdate` 状态流），客户端不再写 threads.db `projects` 表 |
 | Sidebar / 会话列表 / 新建切换归档 / LLM 标题 | ✅ | pi `SessionRepository` + sidecar；标题双模式语义移植自 manox |
 | ConversationInfoBubble（composer 圆圈上方：Captain/subagents/branch 对/todos/per-model 用量/sources） | ✅ | 用量与圆圈同口径（最近请求输入侧）；per-model 成本行与 ±change 计数随卡片退役 |
 | `/compact` + Recap 卡片 | ✅ | 内核 `HarnessEvent` compaction 事件（manual/threshold/overflow） |
@@ -251,9 +251,9 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 ### 2.2 Launcher（新对话发射台，2026-11 新对话入口翻转 P3）
 
-`crates/agent-ui/src/launcher.rs`（状态机 `LauncherState` 实体）+ `crates/agent-ui/src/workspace/launcher_entry.rs`（workspace 侧手势）+ `crates/steer-agent-chrome-ui/src/launcher.rs`（props 组件 `Launcher`，同 [ProjectDialog](#projectdialog) 的职责切分：chrome 只出面）。页面卡内容：heading（`launcher-heading`）+ **项目 chip**（icon + `projects::display_name`；ad-hoc 文件夹显示 basename；无项目走 `launcher-project-none` 文案）+ **轻量 composer**（多行输入 + 模型 chip（`provider · model · effort`，菜单 = 共享级联 builder `build_model_menu` + 推理力度 knob——composer 下拉同款）+ 访问模式分段开关；**附件与 slash 禁用**——它们依赖已 attach 的会话面，铸容器后自然可用）+ **动作行**（「Ghostty 终端」+ Claude Code / Codex / GitHub Copilot 三药丸；agent 缺席时 `steer_ext_agents::resolve_binary` 点灰 + `launcher-action-unavailable` tooltip）。
+`crates/agent-ui/src/launcher.rs`（状态机 `LauncherState` 实体）+ `crates/agent-ui/src/workspace/launcher_entry.rs`（workspace 侧手势）+ `crates/steer-agent-chrome-ui/src/launcher.rs`（props 组件 `Launcher`，同 [ProjectDialog](#projectdialog) 的职责切分：chrome 只出面）。页面卡内容：heading（`launcher-heading`）+ **项目 chip 两态**（unlocked：icon + `projects::display_name`、ad-hoc 文件夹 basename、无项目走 `launcher-project-none` 文案，点击弹项目菜单；**locked**：目标被进入手势锁死（组头「＋」/组菜单「新建对话」的项目 preset）——纯展示，无 chevron、无 hover/点击面（chrome `on_project_chip: Option`，locked 页拿不到 pick handler），锁定位随 preset 显式传入、不隐式推断）+ **轻量 composer**（多行输入 + 模型 chip（`provider · model · effort`，菜单 = 共享级联 builder `build_model_menu` + 推理力度 knob——composer 下拉同款）+ 访问模式分段开关；**附件与 slash 禁用**——它们依赖已 attach 的会话面，铸容器后自然可用）+ **动作行**（「Ghostty 终端」+ Claude Code / Codex / GitHub Copilot 三药丸；agent 缺席时 `steer_ext_agents::resolve_binary` 点灰 + `launcher-action-unavailable` tooltip）。
 
-**项目 chip 菜单**：项目列表（display_name + primary basename 副行，当前项勾选）→「打开其他文件夹…」（rfd 单选目录 → ad-hoc 目标）→「新建项目…」（[ProjectDialog](#projectdialog)；对话框关闭后的渲染里经 `projects::last_created_project()` 进程级记录采纳新项目为当前目标）→「无项目」。目标记忆 = settings.toml app-owned 键 `launcher_last_project`（`projects::set_last_launcher_project`）：默认目标 = 调用处预选（组菜单进入）> last_launcher_project > 无项目；显式选中与项目目标下的成功铸写都回写记忆。
+**项目 chip 菜单（仅 unlocked 态）**：项目列表（display_name + primary basename 副行，当前项勾选）→「打开其他文件夹…」（rfd 单选目录 → ad-hoc 目标）→「新建项目…」（[ProjectDialog](#projectdialog)；对话框关闭后的渲染里经 `projects::last_created_project()` 进程级记录采纳新项目为当前目标——locked 页不消费该记录，留给下一个 unlocked 页）→「无项目」。**目标在创建时一次性确定（A1-D1/D2/D3）**：默认目标恒为无项目（`apply_default_target`），settings 键 `launcher_last_project` 与 last-used 记忆整套退役；继承型 preset（`/new`、`ctrl-b`）只作建议、保持 unlocked。
 
 **三个提交手势（全部经唯一 `create_container`，membership 当场写入——目标为项目实体时）**：
 
@@ -265,7 +265,7 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 **首条消息 flush 时序（设计 §6 的关键点）**：⏎ 时容器尚不存在——文本暂存 `Workspace::pending_first_turn`，走 `create_container` → **`attach_created_session`（attach 完成回调）是唯一 flush 点**：attach 同步绑定前台 store、create 写已在 store FIFO 排在 submit 之前，暂存文本经 `send_user_turn`（既有路径：乐观气泡 + 侧栏 seed 行原样）发出，attach 尾部的 mode 翻转把新容器列带上来；create 失败腿把文本**还回 Launcher**（重开发射台、文本还原，`refund_launcher_first_turn`），不吞字；暂存在飞时提交单飞（第二次 ⏎ 忽略）。
 
-**入口收敛与预铸翻转**：New 按钮 / ⌘N（`HostHooks::on_new_session`）→ `enter_launcher(None)`；组菜单「新建对话」→ `enter_launcher(Some(项目目录))`（agent 级联 submenu 从菜单退役——launcher 动作行是唯一 agent 启动面，D8'）；`cmd-;`、`/new`、`/exit`、`ctrl-b` 的归档/停靠落地全部改道 Launcher（`ArchiveLanding` 延续；`/exit` 的收尾播报改走窗口 notification——无新容器可落 journal 卡）。**draft-refill 退役**：`RefillPolicy`（Draft/Fresh）与 `latest_draft` 查找随预铸翻转拆除（`NativeContainerSeed` 不再有 refill 位；object 行的 per-thread draft 存取保留——那是 composer 草稿跨切换/重启的承载，与 refill 无关）；attach 的 parked reclaim（运行容器恢复语义）不受牵连。**hero 保留**给「已存在但空」的容器（搜索命中 / landing）——它是会话视图的空态、无动作行；Launcher 是无容器的发射面，语义不重叠。**boot landing**：landing 会话仍是 `Workspace::new` 的构造期数据锚（store 绑定 / catalogue 拉取 / GW5 焦点），但视图落 Launcher——landing 保持「隐藏除非聚焦」的空容器，不再被 refill 当作 draft 目标。离屏出图：`CHROME_LAUNCHER=1`（真实组件 + 静态 props）。
+**入口收敛与预铸翻转**：New 按钮 / ⌘N（`HostHooks::on_new_session`）→ `enter_launcher(None, unlocked)`；组头「＋」/ 组菜单「新建对话」→ `enter_launcher(Some(Project(id)), locked)`（loose bucket 的 ＋ 落裸默认；agent 级联 submenu 从菜单退役——launcher 动作行是唯一 agent 启动面，D8'）；`cmd-;`、`/new`、`/exit`、`ctrl-b` 的归档/停靠落地全部改道 Launcher（`ArchiveLanding` 延续；`/exit` 的收尾播报改走窗口 notification——无新容器可落 journal 卡）。**draft-refill 退役**：`RefillPolicy`（Draft/Fresh）与 `latest_draft` 查找随预铸翻转拆除（`NativeContainerSeed` 不再有 refill 位；object 行的 per-thread draft 存取保留——那是 composer 草稿跨切换/重启的承载，与 refill 无关）；attach 的 parked reclaim（运行容器恢复语义）不受牵连。**hero 保留**给「已存在但空」的容器（搜索命中 / landing）——它是会话视图的空态、无动作行；Launcher 是无容器的发射面，语义不重叠。**boot landing**：landing 会话仍是 `Workspace::new` 的构造期数据锚（store 绑定 / catalogue 拉取 / GW5 焦点），但视图落 Launcher——landing 保持「隐藏除非聚焦」的空容器，不再被 refill 当作 draft 目标。离屏出图：`CHROME_LAUNCHER=1`（真实组件 + 静态 props）。
 
 > Source: `crates/agent-ui/src/launcher.rs`, `crates/agent-ui/src/workspace/launcher_entry.rs`, `crates/agent-ui/src/workspace/render.rs`, `crates/agent-ui/src/workspace/container.rs`, `crates/steer-agent-chrome-ui/src/launcher.rs`
 
@@ -715,14 +715,14 @@ Inline two-segment [AccessMode](#access-modes) switch in the footer's left contr
 
 #### ProjectChip
 
-Dropdown chip showing current project → [ProjectMenu](#projectmenu) popup. The
-label is the workspace row accounting the foreground session (host registry
-order), falling back to the session's project mirror for sessions no row
-accounts; the menu's recency list is the same registry, and each row names the
-directory by its LAST SEGMENT (`sidebar_projection::project_label`, the
-chip's own label rule — the sidebar groups have since re-keyed onto the
-project registry's display names) with the full path on the row's tooltip —
-the list never spends its width on the path.
+DISPLAY-ONLY chip naming the conversation's belonging (A1-D4): the label
+reads the object row's project — the CREATION-TIME working context, never
+the mutable membership grouping, so the display and the prompt's declared
+roots cannot diverge (A1-D8); a project-less conversation renders the
+localized 未归类 line. No chevron, no hover, no click face: the docked
+picker ([ProjectMenu](#projectmenu), the blank-project flow, the folder
+pick) retired with the `session/workingDirectorySet` dispatch it fed — a
+started conversation offers no target-change gesture (A1-D1/D5).
 
 > Source: `crates/agent-ui/src/workspace/composer_render.rs`
 
@@ -840,24 +840,21 @@ Trigger: [ModelChip](#modelchip). Model selector dropdown: provider submenus for
 
 > Source: `crates/agent-ui/src/workspace/chips.rs`
 
-#### ProjectMenu
+#### ProjectMenu (retired)
 
-Trigger: [ProjectChip](#projectchip). Recent projects + create blank / select folder.
-
-> Source: `crates/agent-ui/src/workspace/chips.rs`
-
-> Source: `crates/agent-ui/src/views/title_menu.rs`
+The footer chip's docked picker (recent projects + create blank / select
+folder) retired with the chip's display-only flip (A1-D4) — the launcher's
+unlocked chip menu is the only pre-creation target picker left.
 
 #### 3.2.5 Overlays
 
 Absolute-positioned over [Body](#body), with scrim.
 
 
-#### BlankProjectOverlay
+#### BlankProjectOverlay (retired)
 
-Trigger: "Create blank project" from [ProjectMenu](#projectmenu). Centered modal: project name input + confirm.
-
-> Source: `crates/agent-ui/src/workspace/composer_render.rs`
+The footer picker's blank-project flow (parent-directory pick + name input
+modal) retired with the picker itself (A1-D4).
 
 ### 3.3 ConversationInfoBubble
 

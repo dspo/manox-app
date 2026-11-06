@@ -322,6 +322,14 @@ impl LauncherState {
         self.input.read(cx).value().to_string()
     }
 
+    /// The page's target and its lock bit (the entry-gesture regressions'
+    /// read face: the project-item presets lock, the bare ⌘N default is the
+    /// unlocked no-project target). Test-support.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn target_lock(&self) -> (LauncherTarget, bool) {
+        (self.target.clone(), self.locked)
+    }
+
     /// Consume the composer text only when it carries something — the send
     /// gestures read it only when it carries a turn (the agent gesture uses
     /// it as the CLI's initial prompt and leaves an empty field alone).
