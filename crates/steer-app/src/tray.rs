@@ -5,7 +5,7 @@
 //! "quit". Backends: macOS and Windows use `tray-icon` (a native status item
 //! whose global event channels the gpui main loop polls), Linux uses `ksni`
 //! (StatusNotifierItem over D-Bus — no GTK main loop, so it coexists with
-//! gpui's own X11/Wayland loop and delivers commands from its own thread).
+//! gpui's own Wayland loop and delivers commands from its own thread).
 //!
 //! gpui exposes no cross-thread wake primitive (`AsyncApp` is `!Send` and the
 //! platform dispatcher is not reachable from `App`), so tray events are
