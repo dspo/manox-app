@@ -121,6 +121,7 @@ impl Workspace {
     pub(super) fn attach_created_session(
         &mut self,
         session_id: &str,
+        project_id: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -134,6 +135,14 @@ impl Workspace {
         // gate here would flash the loading page on a race with the create
         // subscription.
         self.attach_thread(thread, true, false, window, cx);
+        // The grouping fact lands at the attach tail — the same confidence
+        // point as the first turn's flush below: the host answered the
+        // create, so the session exists and the membership key can never
+        // orphan. A refused create never reaches this tail and never writes
+        // one.
+        if let Some(project_id) = project_id {
+            crate::projects::set_membership(session_id, project_id);
+        }
         // The launcher send's staged text flushes after THIS — the store
         // chains it onto the fresh chat's subscribe answer on the wire.
         self.flush_pending_first_turn(window, cx);

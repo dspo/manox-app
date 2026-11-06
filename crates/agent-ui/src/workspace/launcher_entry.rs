@@ -98,10 +98,11 @@ impl crate::Workspace {
         }
         let project_path = target.folder();
         let project_id = target.project_id().map(str::to_string);
-        let sid = self.create_container(
+        self.create_container(
             crate::workspace::container::ContainerSeed::Manox(
                 crate::workspace::container::NativeContainerSeed {
                     project: project_path,
+                    project_id: project_id.clone(),
                     model,
                     access,
                     effort,
@@ -110,9 +111,9 @@ impl crate::Workspace {
             cx,
         );
         if let Some(project_id) = &project_id {
-            // The grouping fact lands with the mint (design §2.1's write
-            // timing), and the target becomes the remembered default.
-            crate::projects::set_membership(&sid, project_id);
+            // The target becomes the remembered default at the mint; the
+            // grouping fact itself lands at the attach tail (the seed carries
+            // it there — a refused create must not leave a dead key).
             crate::projects::set_last_launcher_project(Some(project_id));
         }
         self.pending_first_turn = Some(text);

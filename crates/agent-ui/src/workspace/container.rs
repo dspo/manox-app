@@ -144,6 +144,12 @@ pub struct NativeContainerSeed {
     /// primary, or an ad-hoc folder), or `None` for the seed's fallback
     /// semantics (the window's workspace root).
     pub project: Option<PathBuf>,
+    /// The project entity the container joins. The grouping fact itself is
+    /// written at the ATTACH TAIL (the seed only carries it there): a session
+    /// that exists — the host answered the create — can never orphan its
+    /// membership key, while a refused create never reaches the tail and
+    /// never writes one.
+    pub project_id: Option<String>,
     /// The picked model, wire-shaped (`provider/id`).
     pub model: Option<String>,
     /// The picked access mode (the kebab wire values).
@@ -217,6 +223,7 @@ impl Workspace {
     ) -> String {
         let NativeContainerSeed {
             project,
+            project_id,
             model,
             access,
             effort: effort_str,
@@ -298,7 +305,7 @@ impl Workspace {
                 });
             }
             match ws.update_in(cx, |this, window, cx| {
-                this.attach_created_session(&sid2, window, cx);
+                this.attach_created_session(&sid2, project_id.as_deref(), window, cx)
             }) {
                 Ok(()) => tracing::info!(session_id = %sid2, "new-thread attach landed"),
                 Err(err) => {
