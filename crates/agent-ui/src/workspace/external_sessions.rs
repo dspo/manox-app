@@ -128,6 +128,8 @@ impl Workspace {
         self.active_external = Some(id.clone());
         self.view_mode = super::ViewMode::ExternalSession;
         focus_terminal(&view, window, cx);
+        // The sidebar row wears the selection: the terminal owns the column.
+        crate::chrome_assembly::select_container(&id, cx);
         cx.notify();
         id
     }

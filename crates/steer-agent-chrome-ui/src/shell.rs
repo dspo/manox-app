@@ -513,6 +513,21 @@ impl Shell {
         }
     }
 
+    /// The programmatic face of [`Self::select`]: the highlight only — no
+    /// `on_select` fires. The host pushes this from its own open/attach/spawn
+    /// paths, where routing back through the select hook would re-enter the
+    /// very path that pushed it. Row clicks still go through
+    /// [`Self::select`].
+    pub fn set_active(&mut self, id: &str) {
+        self.active = Some(id.to_string());
+    }
+
+    /// No container owns the main column (the launcher is up): no row wears
+    /// the selection.
+    pub fn clear_active(&mut self) {
+        self.active = None;
+    }
+
     /// The New button / ⌘N: default behavior is the empty state (no active
     /// session); hosts with a real new-session path hook `on_new_session`.
     pub fn new_session(&mut self, window: &mut Window, cx: &mut App) {

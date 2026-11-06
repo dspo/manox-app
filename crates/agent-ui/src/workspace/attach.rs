@@ -389,6 +389,9 @@ impl Workspace {
         // unread while the one just left never lit up.
         self.multiplexer
             .update(cx, |m, cx| m.set_focused(Some(&new_id), cx));
+        // The sidebar's selection follows the foreground: every attach leg
+        // (an open, the launcher create, a reclaim) changes hands.
+        crate::chrome_assembly::select_container(&new_id, cx);
 
         // Persist the old thread's current state before switching away. The
         // spawned-task save backstop in `run_turn` will persist again when the

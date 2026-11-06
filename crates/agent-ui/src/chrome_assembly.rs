@@ -67,6 +67,24 @@ pub fn leave_settings_layout(cx: &mut App) {
     shell.update(cx, |shell, cx| shell.set_sidebar_surface(None, cx));
 }
 
+/// The sidebar's selection follows the foreground container: the attach and
+/// the external-spawn paths push it whenever the main column changes hands.
+/// Highlight only — the select hook (the click's open route) does not fire.
+pub fn select_container(id: &str, cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    shell.update(cx, |shell, _| shell.set_active(id));
+}
+
+/// The launcher owns the main column: no row wears the selection.
+pub fn clear_container_selection(cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    shell.update(cx, |shell, _| shell.clear_active());
+}
+
 /// Open the create-project dialog, or the edit variant for `edit_of` — the
 /// sidebar footer's ＋ 新建项目 row and the Chats bucket's menu entry both
 /// land here. The dialog entity is the mounted view; closing it is
