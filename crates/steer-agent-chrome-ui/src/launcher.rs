@@ -67,7 +67,10 @@ pub struct Launcher {
     pub model_menu: Option<Entity<PopupMenu>>,
     /// The access switch's current face (`true` = full access).
     pub access_full: bool,
-    pub on_project_chip: OnWindowApp,
+    /// The project chip's pick handler; `None` is the LOCKED face (the
+    /// target was fixed by the entry gesture — a project item's 「＋」/新建
+    /// 对话): a display-only chip, no affordance and no menu slot.
+    pub on_project_chip: Option<OnWindowApp>,
     pub on_model_pick: OnWindowApp,
     pub on_access_pick: OnAccessPick,
     pub actions: Vec<LauncherAction>,
@@ -103,41 +106,45 @@ impl RenderOnce for Launcher {
 }
 
 /// The project chip: the target's icon + display + the chevron, an anchored
-/// host-menu slot below it.
+/// host-menu slot below it. Without a handler the chip is the LOCKED face —
+/// the entry gesture fixed the target, so the chip renders display-only (no
+/// affordance, no chevron, no menu slot).
 fn project_chip(launcher: &Launcher) -> impl IntoElement {
-    let on_chip = launcher.on_project_chip.clone();
+    let base = div()
+        .id("launcher-project-chip")
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .px(px(10.))
+        .py(px(5.))
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(BORDER)
+        .bg(CARD_BG)
+        .child(icon(icons::FOLDER, 13.).text_color(FG_DIM))
+        .child(
+            div()
+                .max_w(px(280.))
+                .truncate()
+                .text_size(px(12.))
+                .child(launcher.project_label.clone()),
+        );
+    let chip = match launcher.on_project_chip.clone() {
+        Some(on_chip) => base
+            .cursor_pointer()
+            .hover(|style| style.bg(LIST_HOVER))
+            .child(icon(icons::CHEVRON_DOWN, 12.).text_color(FG_FAINT))
+            .on_click(move |_, w, cx| {
+                cx.stop_propagation();
+                on_chip(w, cx);
+            }),
+        None => base,
+    };
     div()
         .flex()
         .justify_center()
         .relative()
-        .child(
-            div()
-                .id("launcher-project-chip")
-                .on_click(move |_, w, cx| {
-                    cx.stop_propagation();
-                    on_chip(w, cx);
-                })
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px(px(10.))
-                .py(px(5.))
-                .rounded(px(CARD_RADIUS))
-                .border_1()
-                .border_color(BORDER)
-                .bg(CARD_BG)
-                .cursor_pointer()
-                .hover(|style| style.bg(LIST_HOVER))
-                .child(icon(icons::FOLDER, 13.).text_color(FG_DIM))
-                .child(
-                    div()
-                        .max_w(px(280.))
-                        .truncate()
-                        .text_size(px(12.))
-                        .child(launcher.project_label.clone()),
-                )
-                .child(icon(icons::CHEVRON_DOWN, 12.).text_color(FG_FAINT)),
-        )
+        .child(chip)
         .children(
             launcher
                 .project_menu_open

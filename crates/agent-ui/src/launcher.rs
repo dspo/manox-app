@@ -164,6 +164,10 @@ pub(crate) struct LauncherState {
     ws: WeakEntity<crate::Workspace>,
     input: Entity<TextareaState>,
     target: LauncherTarget,
+    /// The target was fixed by the entry gesture (a project item's 「＋」 /
+    /// 新建对话): the chip renders display-only and no pick can retarget the
+    /// page. Only a fresh entry clears it.
+    locked: bool,
     /// The picked model, wire-shaped (`provider/id`); `None` shows — and
     /// seeds nothing but — the registry default.
     model: Option<String>,
@@ -236,15 +240,14 @@ impl LauncherState {
             .iter()
             .map(|(id, _, _)| steer_ext_agents::resolve_binary(id).is_ok())
             .collect();
-        // The default target follows the memory (last used > none) — the
-        // preset entries override it.
-        let target = crate::projects::last_launcher_project()
-            .map(LauncherTarget::Project)
-            .unwrap_or(LauncherTarget::None);
+        // The bare default is the no-project target (the target is an
+        // explicit creation-time pick, never a carried-over memory).
+        let target = LauncherTarget::None;
         Self {
             ws,
             input,
             target,
+            locked: false,
             model: None,
             access_full: false,
             effort: None,
@@ -260,15 +263,25 @@ impl LauncherState {
         }
     }
 
-    /// Preset the target (the group menu's project id, the inherited reads'
-    /// ad-hoc folder): a project id lands verbatim, a folder resolves through
-    /// the registry (a project owning the directory wins — canonical
-    /// compare, the dialog's own rule).
-    pub(crate) fn preset_target(&mut self, target: LauncherTarget, cx: &mut Context<Self>) {
+    /// Preset the target (the group header's 「＋」 and the group menu's
+    /// 新建对话 preset the project id, the inherited entries an ad-hoc
+    /// folder): a project id lands verbatim, a folder resolves through the
+    /// registry (a project owning the directory wins — canonical compare,
+    /// the dialog's own rule). `locked` is the project-item entries' stick —
+    /// the target is the entry's intent, not a suggestion; inherited
+    /// presets stay unlocked (the pick remains an explicit pre-creation
+    /// choice).
+    pub(crate) fn preset_target(
+        &mut self,
+        target: LauncherTarget,
+        locked: bool,
+        cx: &mut Context<Self>,
+    ) {
         match target {
-            LauncherTarget::Folder(dir) => self.preset_folder(&dir, cx),
+            LauncherTarget::Folder(dir) => self.preset_folder(&dir, locked, cx),
             target => {
                 self.target = target;
+                self.locked = locked;
                 cx.notify();
             }
         }
@@ -277,27 +290,26 @@ impl LauncherState {
     /// Preset the target from a directory (the folder presets): a registry
     /// project owning the directory wins (canonical compare, the dialog's
     /// own rule), the folder becomes an ad-hoc target otherwise.
-    pub(crate) fn preset_folder(&mut self, dir: &Path, cx: &mut Context<Self>) {
+    pub(crate) fn preset_folder(&mut self, dir: &Path, locked: bool, cx: &mut Context<Self>) {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         self.target = crate::projects::list_projects()
             .into_iter()
             .find(|project| project.roots.iter().any(|root| root.path == dir))
             .map(|project| LauncherTarget::Project(project.id))
             .unwrap_or_else(|| LauncherTarget::Folder(dir));
+        self.locked = locked;
         cx.notify();
     }
 
-    /// A fresh (non-launcher) entry without a preset: the memory decides —
-    /// last used project when it still exists, none otherwise. The entity's
-    /// constructor already applied the memory; re-validate here so a project
-    /// deleted since the last visit cannot linger as the target.
+    /// A fresh bare entry (⌘N / the New button): the default is ALWAYS the
+    /// no-project target — the launcher never inherits a previous
+    /// conversation's belonging, the pick is an explicit pre-creation
+    /// action. This also clears a leftover lock from a preset entry the
+    /// user backed out of.
     pub(crate) fn apply_default_target(&mut self, cx: &mut Context<Self>) {
-        if let LauncherTarget::Project(id) = &self.target
-            && crate::projects::get_project(id).is_none()
-        {
-            self.target = LauncherTarget::None;
-            cx.notify();
-        }
+        self.target = LauncherTarget::None;
+        self.locked = false;
+        cx.notify();
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -346,16 +358,20 @@ impl LauncherState {
     }
 
     /// Adopt the project the create dialog last minted (「新建项目…」 from the
-    /// chip menu): one consumer takes the record, the chip selects it, and it
-    /// becomes the remembered default. Runs in the launcher's render pass —
-    /// the dialog closes outside any event this state subscribes to.
+    /// chip menu): one consumer takes the record and the chip selects it.
+    /// Runs in the launcher's render pass — the dialog closes outside any
+    /// event this state subscribes to. A locked page does not consume the
+    /// record: its target is the entry's intent, and the minted project is
+    /// adopted by the next unlocked page instead.
     pub(crate) fn adopt_created_project(&mut self, cx: &mut Context<Self>) {
+        if self.locked {
+            return;
+        }
         let Some(id) = crate::projects::consume_last_created_project() else {
             return;
         };
         if crate::projects::get_project(&id).is_some() {
-            self.target = LauncherTarget::Project(id.clone());
-            crate::projects::set_last_launcher_project(Some(&id));
+            self.target = LauncherTarget::Project(id);
             cx.notify();
         }
     }
@@ -488,7 +504,6 @@ impl LauncherState {
                         move |_, _, cx| {
                             let _ = this.update(cx, |state, cx| {
                                 state.target = LauncherTarget::Project(id.clone());
-                                crate::projects::set_last_launcher_project(Some(&id));
                                 state.close_project_menu(cx);
                             });
                         }
@@ -736,12 +751,16 @@ impl LauncherState {
             model_menu_open: self.model_menu_open,
             model_menu: self.model_menu.clone(),
             access_full: self.access_full,
-            on_project_chip: {
+            // The locked page's chip is display-only — the entry gesture
+            // fixed the target, so the chrome gets no pick handler at all.
+            on_project_chip: (!self.locked).then(|| {
                 let this = this.clone();
-                Rc::new(move |window, cx| {
-                    let _ = this.update(cx, |state, cx| state.open_project_menu(window, cx));
-                })
-            },
+                let pick: steer_agent_chrome_ui::session_list::OnWindowApp =
+                    Rc::new(move |window, cx| {
+                        let _ = this.update(cx, |state, cx| state.open_project_menu(window, cx));
+                    });
+                pick
+            }),
             on_model_pick: {
                 let this = this.clone();
                 Rc::new(move |window, cx| {

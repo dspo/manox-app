@@ -833,7 +833,7 @@ mod macos {
                 model_menu_open: false,
                 model_menu: None,
                 access_full: true,
-                on_project_chip: noop_root.clone(),
+                on_project_chip: Some(noop_root.clone()),
                 on_model_pick: noop_root,
                 on_access_pick: noop_access,
                 actions: vec![

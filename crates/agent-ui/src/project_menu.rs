@@ -81,22 +81,23 @@ pub fn group_menu(
             );
         }
         // 新建对话: the launcher with this project preselected BY ID (root
-        // overlap is allowed — a path find could pick the wrong owner). No
-        // container is minted here — the composer's send is the mint.
+        // overlap is allowed — a path find could pick the wrong owner) and
+        // LOCKED — the chip renders display-only, the target is the entry's
+        // intent. The loose bucket's row lands the bare unlocked no-project
+        // default. No container is minted here — the composer's send is the
+        // mint.
         menu = menu.item(
             PopupMenuItem::new(steer_i18n::t("project-new-conversation"))
                 .icon(Icon::default().path("icons/steer.svg"))
                 .on_click({
                     let ws = ws.clone();
                     move |_, window, cx| {
+                        let preset = id_launcher
+                            .clone()
+                            .map(crate::launcher::LauncherTarget::Project);
+                        let locked = preset.is_some();
                         let _ = ws.update(cx, |ws, cx| {
-                            ws.enter_launcher(
-                                id_launcher
-                                    .clone()
-                                    .map(crate::launcher::LauncherTarget::Project),
-                                window,
-                                cx,
-                            );
+                            ws.enter_launcher(preset, locked, window, cx);
                             cx.notify();
                         });
                     }

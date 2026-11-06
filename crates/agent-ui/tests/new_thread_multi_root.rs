@@ -113,13 +113,15 @@ async fn a_two_root_project_grants_both_roots_on_the_create(cx: &mut TestAppCont
 
     let before = cx.update(|cx| ws.read(cx).diagnostic_foreground_session(cx));
 
-    // The launcher presets BY ID (the group-menu shape) with a non-default
-    // pick, then sends: mint + attach + flush.
+    // The launcher presets BY ID (the group-menu shape — locked, the chip's
+    // pick face is gone) with a non-default pick, then sends: mint + attach
+    // + flush.
     cx.update_window(window.into(), |_, window, cx| {
         let ws = ws.clone();
         ws.update(cx, |ws, cx| {
             ws.enter_launcher(
                 Some(LauncherTarget::Project(project.id.clone())),
+                true,
                 window,
                 cx,
             );

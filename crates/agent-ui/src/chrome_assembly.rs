@@ -665,12 +665,12 @@ fn shell_config(
             })),
             // The New button / ⌘N lands the LAUNCHER (design §3.3) — the
             // pre-container launch pad. Nothing is minted here; repeated New
-            // is idempotent (focus the composer).
+            // is idempotent (focus the composer). Bare: no preset, unlocked.
             on_new_session: Some(Box::new({
                 let ws = ws.clone();
                 move |w, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.enter_launcher(None, w, cx);
+                        ws.enter_launcher(None, false, w, cx);
                         cx.notify();
                     });
                 }
@@ -794,20 +794,20 @@ fn shell_config(
                 crate::projects::reorder(keys);
             })),
             // The group header's hover ＋: the new-conversation entry
-            // preselecting that group's project (the launcher's preset
-            // gesture). The loose bucket's ＋ follows the launcher's own
-            // default-target memory.
+            // preselecting that group's project — LOCKED (the target is the
+            // entry's intent; the chip renders display-only). The loose
+            // bucket is not a project: its ＋ lands the bare unlocked
+            // no-project default.
             on_group_new: Some(Box::new({
                 let ws = ws.downgrade();
                 move |key, window, cx| {
                     // The group key IS the project id — no path find (root
                     // overlap is allowed to be ambiguous).
+                    let preset = (key != steer_agent_chrome_ui::session_list::LOOSE_BUCKET_KEY)
+                        .then(|| crate::launcher::LauncherTarget::Project(key.to_string()));
+                    let locked = preset.is_some();
                     let _ = ws.update(cx, |ws, cx| {
-                        ws.enter_launcher(
-                            Some(crate::launcher::LauncherTarget::Project(key.to_string())),
-                            window,
-                            cx,
-                        );
+                        ws.enter_launcher(preset, locked, window, cx);
                         cx.notify();
                     });
                 }

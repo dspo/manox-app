@@ -38,13 +38,15 @@ async fn a_refused_create_reopens_the_launcher_with_the_text_back(cx: &mut TestA
 
     let before = common::foreground_session(cx, &ws);
 
-    // The launcher targets the project; the pick names a provider the
-    // hermetic registry never carried — the create refuses on it.
+    // The launcher targets the project (the locked group-menu shape); the
+    // pick names a provider the hermetic registry never carried — the
+    // create refuses on it.
     common::enter_launcher(
         cx,
         &ws,
         window,
         Some(LauncherTarget::Project(project.id.clone())),
+        true,
     );
     cx.update_window(window, |_, _window, cx| {
         ws.update(cx, |ws, cx| {

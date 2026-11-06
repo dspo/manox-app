@@ -21,8 +21,6 @@
 //!   keys persist quoted (TOML handles it) but are dropped at load — an
 //!   external container has no durable record and its death paths include
 //!   ones that skip the teardown, so the key is dead weight by construction.
-//! - `launcher_last_project`: the launcher chip's remembered default target
-//!   (a flat key; cleared state removes it from the file).
 //!
 //! The write face enforces every invariant (roots exist as directories,
 //! dedup + canonicalization, exactly one primary, primary among the roots);
@@ -71,11 +69,6 @@ struct Registry {
     projects: Vec<Project>,
     /// container id → project id — the grouping fact source.
     membership: BTreeMap<String, String>,
-    /// The launcher chip's remembered target: the last project a container
-    /// was minted for (the bare ⌘N default). Session-scoped by nature but
-    /// persisted — one app-owned settings key, the same discipline as the
-    /// rest of the file.
-    launcher_last_project: Option<String>,
     /// A persist failed since the last successful write. The in-memory state
     /// stays live (the UI keeps working), the flag makes the NEXT write flush
     /// again even when it changed nothing — otherwise a same-value write
@@ -317,11 +310,6 @@ fn delete_in(reg: &mut Registry, id: &str) -> bool {
         return false;
     }
     reg.membership.retain(|_, project| project.as_str() != id);
-    // The remembered launcher target must not survive its project: the read
-    // side filters dead ids, but the file stays honest.
-    if reg.launcher_last_project.as_deref() == Some(id) {
-        reg.launcher_last_project = None;
-    }
     true
 }
 
@@ -465,32 +453,7 @@ fn remove_membership_in(reg: &mut Registry, container_id: &str) -> bool {
     reg.membership.remove(container_id).is_some()
 }
 
-// ── launcher memory ───────────────────────────────────────────────────
-
-/// The bare ⌘N launcher's default target: the project the last launcher
-/// container was minted for, when it still exists. `None` → the localized
-/// no-project target.
-pub fn last_launcher_project() -> Option<String> {
-    let mut slot = cached();
-    let reg = slot.get_or_insert_with(load);
-    reg.launcher_last_project
-        .clone()
-        .filter(|id| project(reg, id).is_some())
-}
-
-/// Remember `id` as the launcher's default target. Unknown ids are ignored
-/// (the memory must never dangle), `None` clears it.
-pub fn set_last_launcher_project(id: Option<&str>) {
-    let mut slot = cached();
-    let reg = slot.get_or_insert_with(load);
-    let validated = id
-        .filter(|id| project(reg, id).is_some())
-        .map(str::to_string);
-    if reg.launcher_last_project != validated || reg.dirty {
-        reg.launcher_last_project = validated;
-        flush_quiet(reg);
-    }
-}
+// ── last-created stamp ────────────────────────────────────────────────
 
 fn last_created_slot() -> std::sync::MutexGuard<'static, Option<String>> {
     LAST_CREATED.lock().expect("last-created project lock")
@@ -582,10 +545,6 @@ fn load_at(path: &Path) -> Registry {
                     .collect()
             })
             .unwrap_or_default(),
-        launcher_last_project: doc
-            .get("launcher_last_project")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
         dirty: false,
     }
 }
@@ -691,19 +650,6 @@ fn persist_at(path: &Path, reg: &Registry) -> anyhow::Result<()> {
         "project_membership".to_string(),
         toml::Value::Table(membership),
     );
-    // The launcher memory rides one flat key; cleared state removes it (a
-    // stale key the loader would ignore anyway, but the file stays honest).
-    match &reg.launcher_last_project {
-        Some(id) => {
-            table.insert(
-                "launcher_last_project".to_string(),
-                toml::Value::String(id.clone()),
-            );
-        }
-        None => {
-            table.remove("launcher_last_project");
-        }
-    }
     let serialized = toml::to_string_pretty(&doc).context("serialize settings.toml")?;
     let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))
         .context("create settings.toml temp file")?;
@@ -1046,14 +992,8 @@ mod tests {
         assert!(set_membership_in(&mut reg, "s1", &p1.id));
         assert!(set_membership_in(&mut reg, "s2", &p1.id));
         assert!(set_membership_in(&mut reg, "s3", &p2.id));
-        // The remembered launcher target follows its project out.
-        reg.launcher_last_project = Some(p1.id.clone());
 
         assert!(delete_in(&mut reg, &p1.id));
-        assert_eq!(
-            reg.launcher_last_project, None,
-            "the launcher memory does not dangle on the deleted id"
-        );
         assert!(reg.projects.iter().all(|p| p.id != p1.id));
         assert!(!reg.membership.contains_key("s1"));
         assert!(!reg.membership.contains_key("s2"));
@@ -1192,10 +1132,8 @@ mod tests {
             "a loose source inherits nothing"
         );
 
-        // The launcher memory: the last-created record is stamped by the
-        // create DIALOG's confirm (a programmatic create stays quiet), one
-        // consumer takes it; an unknown id never enters the default-target
-        // memory, and a known one round-trips.
+        // The create DIALOG's confirm stamps the last-created record (a
+        // programmatic create stays quiet); one consumer takes it.
         assert!(
             last_created_project().is_none(),
             "a programmatic create stamps nothing"
@@ -1206,13 +1144,6 @@ mod tests {
             Some(project.id.as_str())
         );
         assert!(last_created_project().is_none(), "one consumer");
-        set_last_launcher_project(Some("no-such-id"));
-        assert!(last_launcher_project().is_none(), "unknown id refused");
-        set_last_launcher_project(Some(&project.id));
-        assert_eq!(
-            last_launcher_project().as_deref(),
-            Some(project.id.as_str())
-        );
 
         // The cache drops (the restart shape); the file alone answers.
         *REGISTRY.lock().expect("lock") = None;
@@ -1224,23 +1155,12 @@ mod tests {
             membership_of("session-1").as_deref(),
             Some(project.id.as_str())
         );
-        assert_eq!(
-            last_launcher_project().as_deref(),
-            Some(project.id.as_str()),
-            "the launcher memory survives the restart shape"
-        );
         let doc: toml::Value =
             toml::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("parse");
         assert_eq!(
             doc.get("ui_language").and_then(|v| v.as_str()),
             Some("zh-CN")
         );
-
-        // Clearing the memory removes the key from the file entirely.
-        set_last_launcher_project(None);
-        let doc: toml::Value =
-            toml::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("parse");
-        assert!(doc.get("launcher_last_project").is_none());
 
         delete_project(&project.id);
         assert!(membership_of("session-1").is_none(), "cascade");

@@ -137,7 +137,9 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
     });
 
     // Non-default picks (the second model, full access, max effort) make a
-    // dropped intent visible in the journal and the chip.
+    // dropped intent visible in the journal and the chip. The folder preset
+    // stays unlocked (the inherit shape — the target remains an explicit
+    // pre-creation pick).
     cx.update_window(window.into(), |_, window, cx| {
         let ws = ws.clone();
         ws.update(cx, |ws, cx| {
@@ -145,6 +147,7 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
                 Some(agent_ui::launcher::LauncherTarget::Folder(
                     project_path.clone(),
                 )),
+                false,
                 window,
                 cx,
             );

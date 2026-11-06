@@ -184,7 +184,7 @@ impl Workspace {
             // word rides the window notification face — there is no fresh
             // container left to journal the closing pair onto.
             let _ = this.update_in(cx, |ws, window, cx| {
-                ws.enter_launcher(None, window, cx);
+                ws.enter_launcher(None, false, window, cx);
                 window.push_notification(Notification::info(steer_i18n::t("exit-archived")), cx);
             });
         })

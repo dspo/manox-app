@@ -15,12 +15,16 @@ impl crate::Workspace {
     /// entry yields the main column the way every other mode flip does (an
     /// on-screen external session parks, the sub-agent page drops, the
     /// settings nav unmounts); already on the launcher, it is idempotent —
-    /// the composer takes focus. `preset` preselects the target (the group
-    /// menu's project id, an inherited ad-hoc folder); a fresh entry without
-    /// one follows the memory (last used project > none).
+    /// the composer takes focus. `preset` preselects the target (the project
+    /// item gestures' project id, an inherited ad-hoc folder) and `locked`
+    /// fixes it (the project-item entries: the target IS the entry's intent,
+    /// the chip renders display-only — a bare entry is always unlocked). A
+    /// fresh bare entry follows the no-project default (the target is an
+    /// explicit creation-time pick, never a memory).
     pub fn enter_launcher(
         &mut self,
         preset: Option<crate::launcher::LauncherTarget>,
+        locked: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -44,9 +48,9 @@ impl crate::Workspace {
         };
         launcher.update(cx, |state, cx| {
             match preset {
-                Some(target) => state.preset_target(target, cx),
-                // A preset entry keeps the current target; a bare fresh entry
-                // re-validates the memory.
+                Some(target) => state.preset_target(target, locked, cx),
+                // A preset entry keeps the current target; a bare fresh
+                // entry resets to the no-project default.
                 None if !already => state.apply_default_target(cx),
                 None => {}
             }
@@ -102,7 +106,7 @@ impl crate::Workspace {
             crate::workspace::container::ContainerSeed::Manox(
                 crate::workspace::container::NativeContainerSeed {
                     roots,
-                    project_id: project_id.clone(),
+                    project_id,
                     model,
                     access,
                     effort,
@@ -110,12 +114,9 @@ impl crate::Workspace {
             ),
             cx,
         );
-        if let Some(project_id) = &project_id {
-            // The target becomes the remembered default at the mint; the
-            // grouping fact itself lands at the attach tail (the seed carries
-            // it there — a refused create must not leave a dead key).
-            crate::projects::set_last_launcher_project(Some(project_id));
-        }
+        // The grouping fact lands at the attach tail (the seed carries it
+        // there — a refused create must not leave a dead key); the launcher
+        // itself remembers nothing across conversations.
         self.pending_first_turn = Some(text);
         cx.notify();
     }
@@ -177,7 +178,7 @@ impl crate::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.enter_launcher(None, window, cx);
+        self.enter_launcher(None, false, window, cx);
         if let Some(launcher) = &self.launcher {
             launcher.update(cx, |state, cx| state.restore_text(text, window, cx));
         }

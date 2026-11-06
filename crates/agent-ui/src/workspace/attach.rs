@@ -715,7 +715,7 @@ impl Workspace {
         }
         let landing: super::lifecycle::ArchiveLanding = std::sync::Arc::new(
             |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
-                ws.enter_launcher(None, window, cx);
+                ws.enter_launcher(None, false, window, cx);
             },
         );
         self.confirm_archive_containers(vec![sid], Some(landing), window, cx);
@@ -746,7 +746,9 @@ impl Workspace {
                 // first — the grouping fact the drag-in wrote, unambiguous
                 // where root overlap is allowed — and the object row's
                 // project path only the fallback (an ad-hoc folder target; a
-                // subdirectory cwd must not guess a project by path).
+                // subdirectory cwd must not guess a project by path). The
+                // preset stays unlocked: it is a suggestion, the target
+                // remains an explicit pre-creation pick.
                 let preset = ws.chat.read(cx).store.clone().and_then(|(_, sid)| {
                     inherited_membership_preset(&sid).or_else(|| {
                         manox_agent::object_store::ObjectStore::try_global()
@@ -756,7 +758,7 @@ impl Workspace {
                             })
                     })
                 });
-                ws.enter_launcher(preset, window, cx);
+                ws.enter_launcher(preset, false, window, cx);
             },
         );
         self.confirm_archive_containers(vec![sid], Some(landing), window, cx);
@@ -792,7 +794,10 @@ impl Workspace {
         if !running {
             return;
         }
-        self.enter_launcher(project, window, cx);
+        // The parked thread's project is a suggestion, not the entry's
+        // intent — the preset stays unlocked (the target remains an explicit
+        // pre-creation pick).
+        self.enter_launcher(project, false, window, cx);
     }
 
     pub fn open_container(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
