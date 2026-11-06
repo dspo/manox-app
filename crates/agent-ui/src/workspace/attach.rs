@@ -136,7 +136,7 @@ impl Workspace {
         self.attach_thread(thread, true, false, window, cx);
         // The launcher send's staged text flushes after THIS — the store
         // chains it onto the fresh chat's subscribe answer on the wire.
-        self.flush_pending_first_turn(cx);
+        self.flush_pending_first_turn(window, cx);
     }
 
     /// Switch to a new thread: persist the current one, build/load the new

@@ -128,32 +128,11 @@ impl crate::Workspace {
     /// opened the chat is answered not-found and silently lost — the journal
     /// never materializes and the message is gone. The text rides the
     /// ordinary submit path — optimistic bubble and the sidebar's seed row
-    /// included.
-    pub(crate) fn flush_pending_first_turn(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = self.pending_first_turn.take() else {
-            return;
-        };
-        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
-            tracing::warn!("launcher send dropped: the foreground store is unbound");
-            return;
-        };
-        let ws = cx.weak_entity();
-        store.update(cx, |store, cx| {
-            store.subscribe_then(
-                steer_agent_chat_ui::ahp_store::chat_uri(&sid),
-                move |cx| {
-                    let _ = ws.update(cx, |ws, cx| {
-                        ws.send_user_turn(text, Vec::new(), SubmitBehavior::Send, cx);
-                    });
-                },
-                cx,
-            );
-        });
-    }
-
-    /// The failed create's refund leg (design §6): the staged text returns to
-    /// the launcher — re-opened, text restored, never swallowed.
-    pub(crate) fn refund_launcher_first_turn(
+    /// included. A failed subscribe (either this direct leg or the
+    /// connect-replay leg) answers the hook with `Failed`: the first turn
+    /// refunds through [`Self::refund_first_turn`] instead of firing into a
+    /// channel that never opened.
+    pub(crate) fn flush_pending_first_turn(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -161,11 +140,63 @@ impl crate::Workspace {
         let Some(text) = self.pending_first_turn.take() else {
             return;
         };
+        let Some((store, sid)) = self.chat.read(cx).store.clone() else {
+            // The unbound-store failure leg (design §6): the staged text
+            // refunds, never swallowed.
+            tracing::warn!("launcher send refunds: the foreground store is unbound");
+            self.refund_first_turn(text, window, cx);
+            return;
+        };
+        let ws = cx.weak_entity();
+        store.update(cx, |store, cx| {
+            store.subscribe_then(
+                steer_agent_chat_ui::ahp_store::chat_uri(&sid),
+                move |outcome, cx| {
+                    let _ = ws.update_in(cx, |ws, window, cx| match outcome {
+                        steer_agent_chat_ui::ahp_store::SubscribeThenOutcome::Answered => {
+                            ws.send_user_turn(text, Vec::new(), SubmitBehavior::Send, cx);
+                        }
+                        steer_agent_chat_ui::ahp_store::SubscribeThenOutcome::Failed(err) => {
+                            tracing::warn!(error = %err, "first-turn subscribe failed; refund");
+                            ws.refund_first_turn(text, window, cx);
+                        }
+                    });
+                },
+                cx,
+            );
+        });
+    }
+
+    /// The failure legs' ONE refund face (design §6): re-open the launcher
+    /// and put `text` back into its composer. Every failure point funnels
+    /// here — the createSession refusal, a failed first-turn subscribe on
+    /// either leg, an unbound foreground store, a failed agent spawn — a
+    /// user-initiated send is never swallowed. `restore_text` fills only an
+    /// empty composer, so a refund never clobbers input submitted during
+    /// the flight.
+    pub(crate) fn refund_first_turn(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.enter_launcher(None, window, cx);
         if let Some(launcher) = &self.launcher {
             launcher.update(cx, |state, cx| state.restore_text(text, window, cx));
         }
         cx.notify();
+    }
+
+    /// The staged-slot refund — the createSession refusal feeds from
+    /// [`Self::pending_first_turn`]; the face is [`Self::refund_first_turn`].
+    pub(crate) fn refund_launcher_first_turn(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(text) = self.pending_first_turn.take() {
+            self.refund_first_turn(text, window, cx);
+        }
     }
 
     /// One agent cascade pick: spawn the CLI as the container-to-be's 0 号,
@@ -216,7 +247,16 @@ impl crate::Workspace {
                     crate::projects::set_membership(&id, &project_id);
                 }
             }
-            Err(e) => spawn_failed_notification(launch.display, &e, window, cx),
+            Err(e) => {
+                spawn_failed_notification(launch.display, &e, window, cx);
+                // The spawn-failure leg (design §6): the composer text the
+                // gesture consumed as the initial prompt refunds through the
+                // one face — already on the launcher, so the refund is the
+                // refill plus the composer focus.
+                if let Some(prompt) = prompt {
+                    self.refund_first_turn(prompt, window, cx);
+                }
+            }
         }
     }
 

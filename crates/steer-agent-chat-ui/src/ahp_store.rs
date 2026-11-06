@@ -896,9 +896,21 @@ impl From<ahp::ClientError> for CreateSessionError {
     }
 }
 
+/// The subscribe answer a `subscribe_then` hook receives: `Answered` once
+/// the host answered the subscribe and its snapshot folded; `Failed` when
+/// the subscribe itself failed — the channel never opened, so a hook that
+/// would have dispatched onto it (the launcher send's first turn) must
+/// refund instead of firing into a closed channel.
+#[derive(Debug)]
+pub enum SubscribeThenOutcome {
+    Answered,
+    Failed(String),
+}
+
 /// The hook a queued `subscribe_then` runs once the replayed subscribe has
-/// been answered and its snapshot folded (see [`AhpStore::subscribe_then`]).
-type SubscribeThenHook = dyn FnOnce(&mut gpui::AsyncApp);
+/// been answered and its snapshot folded — or refused (see
+/// [`AhpStore::subscribe_then`]).
+type SubscribeThenHook = dyn FnOnce(SubscribeThenOutcome, &mut gpui::AsyncApp);
 
 /// A write issued before the handshake, replayed **in order** on connect —
 /// the landing createSession precedes its subscribes, and the subscribes
@@ -1637,17 +1649,33 @@ impl AhpStore {
                         // hook in a SEPARATE update — hooks call back into
                         // the store (the launcher send dispatches its turn),
                         // and re-entering the held borrow panics.
-                        if let Ok(result) = folded
-                            && let Some(snapshot) = result.snapshot
-                        {
-                            let _ = this.update(cx, |store, cx| {
-                                let uri = snapshot.resource.clone();
-                                if store.apply_snapshot_confirmed(&uri, snapshot.state) {
-                                    cx.notify();
-                                }
-                            });
+                        // The hook learns the subscribe's fate: a failed
+                        // subscribe never opened the channel, so the hook
+                        // runs with `Failed` and its caller refunds whatever
+                        // it meant to dispatch — it never fires pre-open.
+                        match folded {
+                            Ok(result) => {
+                                // Fold the snapshot the same way the direct
+                                // path does (without it a fresh landing
+                                // session runs on the empty-session fallback
+                                // whose `config` seat is None, and every
+                                // configChanged merge no-ops), then run the
+                                // hook in a SEPARATE update — hooks call
+                                // back into the store (the launcher send
+                                // dispatches its turn), and re-entering the
+                                // held borrow panics.
+                                let _ = this.update(cx, |store, cx| {
+                                    if let Some(snapshot) = result.snapshot {
+                                        let uri = snapshot.resource.clone();
+                                        if store.apply_snapshot_confirmed(&uri, snapshot.state) {
+                                            cx.notify();
+                                        }
+                                    }
+                                });
+                                then(SubscribeThenOutcome::Answered, cx);
+                            }
+                            Err(err) => then(SubscribeThenOutcome::Failed(err), cx),
                         }
-                        then(cx);
                     }
                     PendingWrite::Unsubscribe(uri) => {
                         let _ = tokio_wait({
@@ -2349,10 +2377,8 @@ impl AhpStore {
 
     /// Subscribe one channel. The snapshot (state-bearing channels) folds
     /// into the book when the host answers.
-    /// Subscribe one channel. The snapshot (state-bearing channels) folds
-    /// into the book when the host answers.
     pub fn subscribe(&mut self, uri: impl Into<String>, cx: &mut gpui::Context<Self>) {
-        self.subscribe_then(uri, |_| {}, cx);
+        self.subscribe_then(uri, |_, _| {}, cx);
     }
 
     /// Subscribe one channel and run `then` once the host has ANSWERED the
@@ -2365,10 +2391,15 @@ impl AhpStore {
     /// turn that lands before the host opened the fresh chat is answered
     /// not-found and silently lost (the session's journal never
     /// materializes).
+    ///
+    /// The hook carries the subscribe's outcome: `Answered` on success,
+    /// `Failed` when the subscribe itself failed — the channel never opened,
+    /// so the hook must NOT dispatch onto it; its caller refunds instead
+    /// (both this direct leg and the connect-replay leg behave alike).
     pub fn subscribe_then(
         &mut self,
         uri: impl Into<String>,
-        then: impl FnOnce(&mut gpui::AsyncApp) + 'static,
+        then: impl FnOnce(SubscribeThenOutcome, &mut gpui::AsyncApp) + 'static,
         cx: &mut gpui::Context<Self>,
     ) {
         let uri: String = uri.into();
@@ -2391,27 +2422,29 @@ impl AhpStore {
                     .map_err(|err| err.to_string())
             })
             .await;
-            let result: SubscribeResult = match value
-                .and_then(|v| serde_json::from_value(v).map_err(|err| err.to_string()))
-            {
-                Ok(result) => result,
+            let outcome = match value.and_then(|v| {
+                serde_json::from_value::<SubscribeResult>(v).map_err(|e| e.to_string())
+            }) {
+                Ok(result) => {
+                    let _ = this.update(cx, |store, cx| {
+                        if let Some(snapshot) = result.snapshot {
+                            let uri = snapshot.resource.clone();
+                            if store.apply_snapshot_confirmed(&uri, snapshot.state) {
+                                cx.notify();
+                            }
+                        }
+                    });
+                    SubscribeThenOutcome::Answered
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "subscribe failed");
-                    return;
+                    SubscribeThenOutcome::Failed(err)
                 }
             };
-            let _ = this.update(cx, |store, cx| {
-                if let Some(snapshot) = result.snapshot {
-                    let uri = snapshot.resource.clone();
-                    if store.apply_snapshot_confirmed(&uri, snapshot.state) {
-                        cx.notify();
-                    }
-                }
-            });
             // The hook runs with NO store borrow held: hooks call back into
             // the store (the launcher send dispatches its turn), so any
             // store update on the hook's path would re-enter the borrow.
-            then(cx);
+            then(outcome, cx);
         })
         .detach();
     }
