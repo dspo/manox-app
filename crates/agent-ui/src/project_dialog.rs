@@ -180,8 +180,10 @@ impl ProjectDialogState {
 
     /// Commit the draft. Creation is `create_project` (blank name → the
     /// display name follows the primary — the registry trims); editing is
-    /// `update_name` + `set_roots`. Success closes the dialog; failure keeps
-    /// it open with the inline red line.
+    /// the registry's single-write `apply_edit` (one validation, one
+    /// persist — a refused root set cannot leave the rename applied).
+    /// Success closes the dialog; failure keeps it open with the inline red
+    /// line.
     pub fn confirm(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         let name = self.name.read(cx).value().trim().to_string();
@@ -192,10 +194,12 @@ impl ProjectDialogState {
                 self.primary.clone(),
             )
             .map(|_| ()),
-            Mode::Edit { project_id } => crate::projects::update_name(project_id, Some(name))
-                .and_then(|_| {
-                    crate::projects::set_roots(project_id, self.roots.clone(), self.primary.clone())
-                }),
+            Mode::Edit { project_id } => crate::projects::apply_edit(
+                project_id,
+                Some(name),
+                self.roots.clone(),
+                self.primary.clone(),
+            ),
         };
         match result {
             Ok(()) => crate::chrome_assembly::close_project_dialog(cx),

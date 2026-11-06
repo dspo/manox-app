@@ -800,15 +800,14 @@ fn shell_config(
             on_group_new: Some(Box::new({
                 let ws = ws.downgrade();
                 move |key, window, cx| {
-                    let dir = crate::projects::get_project(key).and_then(|project| {
-                        project
-                            .roots
-                            .iter()
-                            .find(|root| root.primary)
-                            .map(|root| root.path.clone())
-                    });
+                    // The group key IS the project id — no path find (root
+                    // overlap is allowed to be ambiguous).
                     let _ = ws.update(cx, |ws, cx| {
-                        ws.enter_launcher(dir, window, cx);
+                        ws.enter_launcher(
+                            Some(crate::launcher::LauncherTarget::Project(key.to_string())),
+                            window,
+                            cx,
+                        );
                         cx.notify();
                     });
                 }

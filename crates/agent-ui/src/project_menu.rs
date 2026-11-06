@@ -80,18 +80,23 @@ pub fn group_menu(
                     }),
             );
         }
-        // 新建对话: the launcher with this group's project preselected (the
-        // bare ⌘N launcher resolves its own default). No container is minted
-        // here — the composer's send is the mint.
+        // 新建对话: the launcher with this project preselected BY ID (root
+        // overlap is allowed — a path find could pick the wrong owner). No
+        // container is minted here — the composer's send is the mint.
         menu = menu.item(
             PopupMenuItem::new(steer_i18n::t("project-new-conversation"))
                 .icon(Icon::default().path("icons/steer.svg"))
                 .on_click({
                     let ws = ws.clone();
                     move |_, window, cx| {
-                        let dir = id_launcher.as_deref().and_then(primary_root);
                         let _ = ws.update(cx, |ws, cx| {
-                            ws.enter_launcher(dir, window, cx);
+                            ws.enter_launcher(
+                                id_launcher
+                                    .clone()
+                                    .map(crate::launcher::LauncherTarget::Project),
+                                window,
+                                cx,
+                            );
                             cx.notify();
                         });
                     }

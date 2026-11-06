@@ -16,11 +16,11 @@ impl crate::Workspace {
     /// on-screen external session parks, the sub-agent page drops, the
     /// settings nav unmounts); already on the launcher, it is idempotent —
     /// the composer takes focus. `preset` preselects the target (the group
-    /// menu's project); a fresh entry without one follows the memory (last
-    /// used project > none).
+    /// menu's project id, an inherited ad-hoc folder); a fresh entry without
+    /// one follows the memory (last used project > none).
     pub fn enter_launcher(
         &mut self,
-        preset: Option<PathBuf>,
+        preset: Option<crate::launcher::LauncherTarget>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -43,8 +43,8 @@ impl crate::Workspace {
             }
         };
         launcher.update(cx, |state, cx| {
-            match preset.as_deref() {
-                Some(dir) => state.preset_folder(dir, cx),
+            match preset {
+                Some(target) => state.preset_target(target, cx),
                 // A preset entry keeps the current target; a bare fresh entry
                 // re-validates the memory.
                 None if !already => state.apply_default_target(cx),
@@ -133,11 +133,7 @@ impl crate::Workspace {
     /// connect-replay leg) answers the hook with `Failed`: the first turn
     /// refunds through [`Self::refund_first_turn`] instead of firing into a
     /// channel that never opened.
-    pub(crate) fn flush_pending_first_turn(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn flush_pending_first_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = self.pending_first_turn.take() else {
             return;
         };

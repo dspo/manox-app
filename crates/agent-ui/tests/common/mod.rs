@@ -204,16 +204,17 @@ pub fn full_wiring_boot_shell(
     (ws, window.into(), shell)
 }
 
-/// Enter the launcher with `project` preset (the group menu's 新建对话 shape).
-/// Nothing is minted — the landing is a mode flip.
+/// Enter the launcher with a preset target (the group menu's 新建对话 shape
+/// hands a project id; a folder lands ad-hoc). Nothing is minted — the
+/// landing is a mode flip.
 pub fn enter_launcher(
     cx: &mut TestAppContext,
     ws: &Entity<Workspace>,
     window: gpui::AnyWindowHandle,
-    project: Option<std::path::PathBuf>,
+    preset: Option<agent_ui::launcher::LauncherTarget>,
 ) {
     cx.update_window(window, move |_, window, cx| {
-        ws.update(cx, |ws, cx| ws.enter_launcher(project.clone(), window, cx))
+        ws.update(cx, |ws, cx| ws.enter_launcher(preset.clone(), window, cx))
     })
     .expect("the full-wiring window is live")
 }

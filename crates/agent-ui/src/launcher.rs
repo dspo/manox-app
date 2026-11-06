@@ -74,7 +74,7 @@ pub(crate) struct LauncherSubmitPayload {
 /// mid-flight); a folder target is an ad-hoc belonging that never enters the
 /// registry.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LauncherTarget {
+pub enum LauncherTarget {
     None,
     Project(String),
     Folder(PathBuf),
@@ -242,9 +242,23 @@ impl LauncherState {
         }
     }
 
-    /// Preset the target from a directory (the group menu's 新建对话): a
-    /// registry project owning the directory wins (canonical compare, the
-    /// dialog's own rule), the folder becomes an ad-hoc target otherwise.
+    /// Preset the target (the group menu's project id, the inherited reads'
+    /// ad-hoc folder): a project id lands verbatim, a folder resolves through
+    /// the registry (a project owning the directory wins — canonical
+    /// compare, the dialog's own rule).
+    pub(crate) fn preset_target(&mut self, target: LauncherTarget, cx: &mut Context<Self>) {
+        match target {
+            LauncherTarget::Folder(dir) => self.preset_folder(&dir, cx),
+            target => {
+                self.target = target;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Preset the target from a directory (the folder presets): a registry
+    /// project owning the directory wins (canonical compare, the dialog's
+    /// own rule), the folder becomes an ad-hoc target otherwise.
     pub(crate) fn preset_folder(&mut self, dir: &Path, cx: &mut Context<Self>) {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         self.target = crate::projects::list_projects()

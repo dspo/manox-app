@@ -37,6 +37,15 @@ pub(super) fn land_conversation_row(
     }
 }
 
+/// The conversation's inherited launcher preset: its membership first — the
+/// grouping fact, unambiguous where root overlap is allowed to be — `None`
+/// when absent or dangling (the caller falls back to a path).
+fn inherited_membership_preset(sid: &str) -> Option<crate::launcher::LauncherTarget> {
+    crate::projects::membership_of(sid)
+        .filter(|id| crate::projects::get_project(id).is_some())
+        .map(crate::launcher::LauncherTarget::Project)
+}
+
 /// Split the session config's `model` value into the two halves the row
 /// keeps apart. The app writes the wire form (`provider/id`); a value that
 /// carries no provider keeps its id whole.
@@ -733,22 +742,21 @@ impl Workspace {
         }
         let landing: super::lifecycle::ArchiveLanding = std::sync::Arc::new(
             |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
-                // The inherited *project* is the conversation's belonging,
-                // read from its object row — not its working directory. A
-                // project-less conversation runs in a temporary workspace of
-                // its own, and inheriting that path would file the next
-                // thread under a directory the user never chose.
-                let project = ws
-                    .chat
-                    .read(cx)
-                    .store
-                    .clone()
-                    .and_then(|(_, sid)| {
+                // The inherited *project* is the conversation's membership
+                // first — the grouping fact the drag-in wrote, unambiguous
+                // where root overlap is allowed — and the object row's
+                // project path only the fallback (an ad-hoc folder target; a
+                // subdirectory cwd must not guess a project by path).
+                let preset = ws.chat.read(cx).store.clone().and_then(|(_, sid)| {
+                    inherited_membership_preset(&sid).or_else(|| {
                         manox_agent::object_store::ObjectStore::try_global()
                             .and_then(|objects| objects.project_of(&sid))
+                            .map(|path| {
+                                crate::launcher::LauncherTarget::Folder(PathBuf::from(path))
+                            })
                     })
-                    .map(PathBuf::from);
-                ws.enter_launcher(project, window, cx);
+                });
+                ws.enter_launcher(preset, window, cx);
             },
         );
         self.confirm_archive_containers(vec![sid], Some(landing), window, cx);
@@ -758,7 +766,8 @@ impl Workspace {
     /// subscriptions) and open the launcher — the explicit "background this
     /// task, start something new" gesture, bound to `ctrl-b`. No-op when the
     /// active thread is idle so the shortcut can't spam empty pads. The
-    /// launcher opens with the parked thread's project preselected; the next
+    /// launcher opens with the parked thread's project preselected (its
+    /// membership first, the working directory the ad-hoc fallback); the next
     /// send from it mints the fresh container.
     pub(super) fn background_current_thread(
         &mut self,
@@ -771,7 +780,11 @@ impl Workspace {
                 Some((store, sid)) => {
                     let view = store.read(cx);
                     let leaf = crate::ahp_store::leaf(&view.book, &sid);
-                    (leaf.running(), leaf.cwd().map(std::path::PathBuf::from))
+                    let preset = inherited_membership_preset(&sid).or_else(|| {
+                        leaf.cwd()
+                            .map(|cwd| crate::launcher::LauncherTarget::Folder(PathBuf::from(cwd)))
+                    });
+                    (leaf.running(), preset)
                 }
                 None => return,
             }

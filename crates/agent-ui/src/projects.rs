@@ -18,7 +18,9 @@
 //! - `[[project]]`: one entry per project with nested `[[project.roots]]`
 //!   rows (`path` + `primary`).
 //! - `[project_membership]`: container id → project id; `external:`-prefixed
-//!   keys are legal (TOML quotes them).
+//!   keys persist quoted (TOML handles it) but are dropped at load — an
+//!   external container has no durable record and its death paths include
+//!   ones that skip the teardown, so the key is dead weight by construction.
 //! - `launcher_last_project`: the launcher chip's remembered default target
 //!   (a flat key; cleared state removes it from the file).
 //!
@@ -181,23 +183,24 @@ pub fn create_project(
     Ok(project)
 }
 
-/// Set (`Some`) or clear (`None`) the custom name; cleared, the display
-/// name follows the primary root again.
-pub fn update_name(id: &str, name: Option<String>) -> anyhow::Result<()> {
+/// The edit dialog's single write: rename and re-root in ONE validation +
+/// ONE persist — a refused root set cannot leave the rename applied while
+/// the dialog reports a failure (the two-write shape let the name survive a
+/// failed save).
+pub fn apply_edit(
+    id: &str,
+    name: Option<String>,
+    roots: Vec<PathBuf>,
+    primary: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let mut slot = cached();
     let reg = slot.get_or_insert_with(load);
+    // Validate the whole edit BEFORE any in-memory application: an unknown
+    // id and a refused root set both fail with nothing half-applied.
+    let built = build_roots(roots, primary.as_deref())?;
     update_name_in(reg, id, name)?;
+    set_roots_built(reg, id, built)?;
     flush(reg)
-
-}
-
-/// Replace a project's root set (same validation as creation) and persist.
-pub fn set_roots(id: &str, roots: Vec<PathBuf>, primary: Option<PathBuf>) -> anyhow::Result<()> {
-    let mut slot = cached();
-    let reg = slot.get_or_insert_with(load);
-    set_roots_in(reg, id, roots, primary)?;
-    flush(reg)
-
 }
 
 /// Move the primary badge to `path` — the root order is untouched. The path
@@ -207,7 +210,6 @@ pub fn set_primary(id: &str, path: &Path) -> anyhow::Result<()> {
     let reg = slot.get_or_insert_with(load);
     set_primary_in(reg, id, path)?;
     flush(reg)
-
 }
 
 /// Delete a project and cascade its memberships. The containers themselves
@@ -270,12 +272,18 @@ fn set_roots_in(
     roots: Vec<PathBuf>,
     primary: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    let built = build_roots(roots, primary.as_deref())?;
+    set_roots_built(reg, id, built)
+}
+
+/// Assign an already-validated + normalized root set (the edit path's
+/// single-validation shape: refuse before anything is applied).
+fn set_roots_built(reg: &mut Registry, id: &str, roots: Vec<ProjectRoot>) -> anyhow::Result<()> {
     let index = reg
         .projects
         .iter()
         .position(|p| p.id == id)
         .with_context(|| format!("unknown project {id}"))?;
-    let roots = build_roots(roots, primary.as_deref())?;
     reg.projects[index].roots = roots;
     Ok(())
 }
@@ -586,6 +594,12 @@ fn load_at(path: &Path) -> Registry {
             .map(|table| {
                 table
                     .iter()
+                    // External containers have no durable record — their
+                    // death paths include ones that skip the teardown
+                    // (quit, window close) — so an `external:` key is dead
+                    // weight by construction: dropped at load, never
+                    // resurrected.
+                    .filter(|(k, _)| !crate::workspace::container::ContainerId::is_external_id(k))
                     .filter_map(|(k, v)| v.as_str().map(|project| (k.clone(), project.to_string())))
                     .collect()
             })
@@ -826,7 +840,16 @@ mod tests {
 
         let loaded = load_at(&settings);
         assert_eq!(loaded.projects, reg.projects);
-        assert_eq!(loaded.membership, reg.membership);
+        // The `external:` key persists (TOML quotes it — the file stays
+        // honest) but the loader drops it: external containers have no
+        // durable record, so their keys are dead weight by construction.
+        let native: BTreeMap<_, _> = reg
+            .membership
+            .iter()
+            .filter(|(k, _)| !k.starts_with("external:"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(loaded.membership, native);
 
         let raw = std::fs::read_to_string(&settings).expect("read");
         assert!(raw.contains("[[project]]"));

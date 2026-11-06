@@ -141,7 +141,13 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
     cx.update_window(window.into(), |_, window, cx| {
         let ws = ws.clone();
         ws.update(cx, |ws, cx| {
-            ws.enter_launcher(Some(project_path.clone()), window, cx);
+            ws.enter_launcher(
+                Some(agent_ui::launcher::LauncherTarget::Folder(
+                    project_path.clone(),
+                )),
+                window,
+                cx,
+            );
             ws.diagnostic_launcher_picks(Some("test-anthropic/t-model-2"), true, Some("max"), cx);
         });
     })

@@ -2428,11 +2428,7 @@ fn carry_over_unmodeled_sections(config: &mut CxConfig, fresh: &CxConfig) {
     config.vscode_app = fresh.vscode_app.clone();
     config.subagents = fresh.subagents.clone();
     for provider in &mut config.providers {
-        let Some(fresh_provider) = fresh
-            .providers
-            .iter()
-            .find(|p| p.name == provider.name)
-        else {
+        let Some(fresh_provider) = fresh.providers.iter().find(|p| p.name == provider.name) else {
             continue;
         };
         provider.headers = fresh_provider.headers.clone();
@@ -2567,7 +2563,11 @@ mod tests {
                     ),
                     (
                         "responses".to_string(),
-                        detailed("https://fresh.invalid", Vec::new(), headers(&[("X-H", "v")])),
+                        detailed(
+                            "https://fresh.invalid",
+                            Vec::new(),
+                            headers(&[("X-H", "v")]),
+                        ),
                     ),
                 ]
                 .into_iter()
@@ -2588,9 +2588,7 @@ mod tests {
             Some("fresh"),
             "provider-level headers restore from fresh"
         );
-        let ProviderEndpointSpec::Detailed(anthropic) =
-            &provider.endpoints["anthropic"]
-        else {
+        let ProviderEndpointSpec::Detailed(anthropic) = &provider.endpoints["anthropic"] else {
             panic!("a fresh endpoint with headers stays Detailed");
         };
         assert_eq!(
