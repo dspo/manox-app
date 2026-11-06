@@ -424,6 +424,10 @@ settings-models-apikey-shell = shell 命令
 
 settings-models-section-env = 环境变量
 
+settings-models-section-headers = 请求头
+
+settings-models-headers-empty = 暂无自定义请求头
+
 settings-models-section-endpoints = 端点配置
 
 settings-models-add-endpoint = 添加端点
@@ -489,6 +493,10 @@ settings-models-err-model-dup = Provider「{$name}」：模型「{$id}」重复
 settings-models-err-number = Provider「{$name}」模型「{$id}」：「{$field}」需为整数 token 数
 
 settings-models-err-env-key = Provider「{$name}」：环境变量名不能为空
+
+settings-models-err-header-name = Provider「{$name}」：请求头名称不能为空
+
+settings-models-err-header-dup = Provider「{$name}」：请求头 {$key} 重复（HTTP 头名不区分大小写）
 
 ### views/settings.rs — 个性化面板
 
