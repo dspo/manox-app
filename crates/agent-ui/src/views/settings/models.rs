@@ -3,8 +3,8 @@
 //! A provider list with a drill-down detail, over the cx providers config
 //! (`~/.manox/cx.providers.config.yaml`, schema: `manox_providers::CxConfig`).
 //! The list stacks one thin-bordered tile per provider; clicking a tile opens
-//! its detail, which stacks all four sections — 基本信息 / 环境变量 / 端点配置
-//! / 模型列表 — in one scrolling column (no nested split). Every edit
+//! its detail, which stacks all five sections — 基本信息 / 环境变量 / 请求头
+//! / 端点配置 / 模型列表 — in one scrolling column (no nested split). Every edit
 //! schedules a debounced autosave that validates the form, atomically writes
 //! the whole config back — preserving the top-level `agents:` section
 //! verbatim — and reloads the process-wide provider registry on a background
@@ -149,9 +149,9 @@ struct ProviderForm {
     apikey_kind: ApiKeySourceKind,
     apikey_value: Entity<InputState>,
     endpoints: Vec<EndpointForm>,
-    /// Preserved verbatim from the YAML: the form has no editor for
-    /// provider-level `headers:` yet, so a save must never strip them.
-    headers: BTreeMap<String, String>,
+    /// Provider-level `headers:` rows, edited like every other field; the
+    /// map handed to the config on save is rebuilt from them.
+    headers: Vec<KvForm>,
     env: Vec<KvForm>,
     /// `models:` is a remote URL string instead of inline definitions.
     remote_models: bool,
@@ -169,9 +169,9 @@ struct EndpointForm {
     agents: Vec<String>,
     /// Empty = unset (null in YAML), else `api_key` / `bearer_token`.
     copilot_auth: SharedString,
-    /// Preserved verbatim from the YAML; rendered into the endpoint spec
-    /// on save. No editor yet.
-    headers: BTreeMap<String, String>,
+    /// Endpoint-level `headers:` rows; non-empty rows force the Detailed
+    /// endpoint spec on save (a plain-URL endpoint cannot carry them).
+    headers: Vec<KvForm>,
 }
 
 struct KvForm {
@@ -408,7 +408,7 @@ impl ModelsPanelState {
                 url: new_input(window, cx, "", Some(i18n::t("settings-models-ph-url"))),
                 agents: Vec::new(),
                 copilot_auth: SharedString::default(),
-                headers: BTreeMap::new(),
+                headers: Vec::new(),
             });
         }
     }
@@ -452,6 +452,43 @@ impl ModelsPanelState {
 
     fn remove_env_row(&mut self, pid: usize, mid: Option<usize>, id: usize) {
         if let Some(rows) = self.env_rows_mut(pid, mid) {
+            rows.retain(|kv| kv.id != id);
+        }
+    }
+
+    fn header_rows_mut(&mut self, pid: usize, eid: Option<usize>) -> Option<&mut Vec<KvForm>> {
+        match eid {
+            Some(eid) => Some(&mut self.endpoint_mut(pid, eid)?.headers),
+            None => Some(&mut self.provider_mut(pid)?.headers),
+        }
+    }
+
+    /// Insert an empty header row after `index` (or at the end when `None`)
+    /// and focus its name input, ready for typing. `eid` selects the
+    /// endpoint-level (`Some`) or provider-level (`None`) block.
+    fn add_header_row(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<SettingsView>,
+        pid: usize,
+        eid: Option<usize>,
+        index: Option<usize>,
+    ) {
+        let id = self.new_form_id();
+        if let Some(rows) = self.header_rows_mut(pid, eid) {
+            let at = match index {
+                Some(ix) => (ix + 1).min(rows.len()),
+                None => rows.len(),
+            };
+            rows.insert(at, KvForm::new(id, window, cx));
+            if let Some(key) = rows.get(at).map(|row| row.key.clone()) {
+                key.update(cx, |state, cx| state.focus(window, cx));
+            }
+        }
+    }
+
+    fn remove_header_row(&mut self, pid: usize, eid: Option<usize>, id: usize) {
+        if let Some(rows) = self.header_rows_mut(pid, eid) {
             rows.retain(|kv| kv.id != id);
         }
     }
@@ -530,21 +567,13 @@ impl ModelsPanelState {
                 } else {
                     None
                 };
-                let spec = if e.agents.is_empty() && copilot_auth.is_none() && e.headers.is_empty()
-                {
-                    ProviderEndpointSpec::Url(url)
-                } else {
-                    ProviderEndpointSpec::Detailed(ProviderEndpointDetail {
-                        url,
-                        agents: e.agents.clone(),
-                        copilot_auth,
-                        headers: e.headers.clone(),
-                    })
-                };
+                let headers = collect_headers(cx, &e.headers, &name)?;
+                let spec = endpoint_spec(url, e.agents.clone(), copilot_auth, headers);
                 endpoints.insert(wire, spec);
             }
 
             let env = collect_env(cx, &p.env, &name, None)?;
+            let provider_headers = collect_headers(cx, &p.headers, &name)?;
 
             let models = if p.remote_models {
                 let url = p.remote_url.read(cx).value().trim().to_string();
@@ -615,7 +644,7 @@ impl ModelsPanelState {
                 apikey_source,
                 models,
                 endpoints,
-                headers: p.headers.clone(),
+                headers: provider_headers,
                 env,
             });
         }
@@ -785,13 +814,21 @@ impl ProviderForm {
                         detail.headers,
                     ),
                 };
+                let header_inputs = headers
+                    .iter()
+                    .map(|(key, value)| KvForm {
+                        id: take_id(),
+                        key: new_input(window, cx, key, None),
+                        value: new_input(window, cx, value, None),
+                    })
+                    .collect();
                 EndpointForm {
                     id: take_id(),
                     wire_api: SharedString::from(wire_api),
                     url: new_input(window, cx, &url, Some(i18n::t("settings-models-ph-url"))),
                     agents,
                     copilot_auth: SharedString::from(copilot_auth.unwrap_or_default()),
-                    headers,
+                    headers: header_inputs,
                 }
             })
             .collect();
@@ -802,6 +839,15 @@ impl ProviderForm {
                 id: take_id(),
                 key: new_input(window, cx, &key, None),
                 value: new_input(window, cx, &value, None),
+            })
+            .collect();
+        let provider_headers = config
+            .headers
+            .iter()
+            .map(|(key, value)| KvForm {
+                id: take_id(),
+                key: new_input(window, cx, key, None),
+                value: new_input(window, cx, value, None),
             })
             .collect();
         let remote_models = matches!(config.models, ProviderModels::RemoteUrl(_));
@@ -865,7 +911,7 @@ impl ProviderForm {
                 Some(SharedString::from(kind_placeholder(apikey_kind))),
             ),
             endpoints,
-            headers: config.headers,
+            headers: provider_headers,
             env,
             remote_models,
             remote_url,
@@ -954,6 +1000,94 @@ fn collect_env(
         env.insert(key, value);
     }
     Ok(env)
+}
+
+/// Validation failure of header rows, kept pure so the form tests can pin
+/// the save-path invariants without a window.
+#[derive(Debug, PartialEq, Eq)]
+enum HeaderEntryError {
+    /// A value was entered without a name.
+    EmptyName,
+    /// Two rows name the same header — HTTP names compare
+    /// case-insensitively, and the runtime merges provider/endpoint levels
+    /// the same way, so same-name entries could never coexist on the wire.
+    Duplicate(String),
+}
+
+/// Pure core of [`collect_headers`]: blank rows are skipped, a value
+/// without a name is [`HeaderEntryError::EmptyName`], and same-name rows
+/// (even differing only in case) are [`HeaderEntryError::Duplicate`].
+fn header_entries_to_map(
+    entries: Vec<(String, String)>,
+) -> Result<BTreeMap<String, String>, HeaderEntryError> {
+    let mut map = BTreeMap::new();
+    for (key, value) in entries {
+        if key.is_empty() {
+            if value.is_empty() {
+                continue;
+            }
+            return Err(HeaderEntryError::EmptyName);
+        }
+        let lower = key.to_ascii_lowercase();
+        if map
+            .keys()
+            .any(|existing: &String| existing.to_ascii_lowercase() == lower)
+        {
+            return Err(HeaderEntryError::Duplicate(key));
+        }
+        map.insert(key, value);
+    }
+    Ok(map)
+}
+
+/// Collect `Name: value` header rows into the config map. Blank rows are
+/// skipped; a value without a name, or two same-name rows, is an error
+/// (see [`header_entries_to_map`]).
+fn collect_headers(
+    cx: &App,
+    rows: &[KvForm],
+    provider_name: &str,
+) -> Result<BTreeMap<String, String>, SharedString> {
+    let entries = rows
+        .iter()
+        .map(|kv| {
+            (
+                kv.key.read(cx).value().trim().to_string(),
+                kv.value.read(cx).value().trim().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    header_entries_to_map(entries).map_err(|err| match err {
+        HeaderEntryError::EmptyName => {
+            provider_err(provider_name, "settings-models-err-header-name", &[])
+        }
+        HeaderEntryError::Duplicate(key) => provider_err(
+            provider_name,
+            "settings-models-err-header-dup",
+            &[("key", &key)],
+        ),
+    })
+}
+
+/// A plain-URL endpoint until something demands the Detailed form: an
+/// agent allow-list, explicit copilot auth, or endpoint-level headers (a
+/// plain-URL endpoint cannot carry any of those in the config schema).
+fn endpoint_spec(
+    url: String,
+    agents: Vec<String>,
+    copilot_auth: Option<String>,
+    headers: BTreeMap<String, String>,
+) -> ProviderEndpointSpec {
+    if agents.is_empty() && copilot_auth.is_none() && headers.is_empty() {
+        ProviderEndpointSpec::Url(url)
+    } else {
+        ProviderEndpointSpec::Detailed(ProviderEndpointDetail {
+            url,
+            agents,
+            copilot_auth,
+            headers,
+        })
+    }
 }
 
 /// Localized validation error scoped to a provider.
@@ -1280,6 +1414,19 @@ fn render_provider_detail(
         ))
         .child(detail_section(
             theme,
+            AssetIcon::Webhook,
+            "settings-models-section-headers",
+            vec![header_rows(
+                theme,
+                entity.clone(),
+                pid,
+                None,
+                &p.headers,
+                &pending,
+            )],
+        ))
+        .child(detail_section(
+            theme,
             AssetIcon::Globe,
             "settings-models-section-endpoints",
             vec![render_endpoints_module(
@@ -1582,6 +1729,124 @@ fn render_env_block(
         .into_any_element()
 }
 
+/// 请求头 key/value rows for the provider-level (`eid == None`) or
+/// endpoint-level block; same row grammar as env rows (「-」 deletes, 「+」
+/// inserts a focused empty row below).
+fn header_rows(
+    theme: &Theme,
+    entity: Entity<SettingsView>,
+    pid: usize,
+    eid: Option<usize>,
+    rows: &[KvForm],
+    pending: &Option<String>,
+) -> AnyElement {
+    let mut children: Vec<AnyElement> = Vec::new();
+
+    if rows.is_empty() {
+        children.push(
+            h_flex()
+                .py_1()
+                .items_center()
+                .gap_2()
+                .child(muted_text(
+                    i18n::t("settings-models-headers-empty"),
+                    theme.muted_foreground,
+                ))
+                .child(icon_button(
+                    format!("models-p{pid}-e{eid:?}-headers-add-first"),
+                    IconName::Plus,
+                    entity.clone(),
+                    Arc::new(move |this, window, cx| {
+                        this.models_panel.add_header_row(window, cx, pid, eid, None);
+                        this.models_panel.touch(cx);
+                    }),
+                ))
+                .into_any_element(),
+        );
+    }
+
+    for (ix, kv) in rows.iter().enumerate() {
+        let kid = kv.id;
+        children.push(
+            h_flex()
+                .py_1()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .id(format!("settings-input-blur-{:?}", kv.key.entity_id()))
+                        .w(px(KEY_W))
+                        .flex_shrink_0()
+                        .on_mouse_down_out(blur_on_click_out(kv.key.clone()))
+                        .child(Input::new(&kv.key)),
+                )
+                .child(
+                    div()
+                        .id(format!("settings-input-blur-{:?}", kv.value.entity_id()))
+                        .flex_1()
+                        .min_w_0()
+                        .on_mouse_down_out(blur_on_click_out(kv.value.clone()))
+                        .child(Input::new(&kv.value)),
+                )
+                .child({
+                    let key = format!("models-header{kid}-remove");
+                    let is_pending = pending.as_deref() == Some(key.as_str());
+                    remove_button(
+                        theme,
+                        key,
+                        is_pending,
+                        entity.clone(),
+                        Arc::new(move |this, cx| {
+                            this.models_panel.remove_header_row(pid, eid, kid);
+                            this.models_panel.touch(cx);
+                        }),
+                    )
+                })
+                .child(icon_button(
+                    format!("models-header{kid}-add-below"),
+                    IconName::Plus,
+                    entity.clone(),
+                    Arc::new(move |this, window, cx| {
+                        this.models_panel
+                            .add_header_row(window, cx, pid, eid, Some(ix));
+                        this.models_panel.touch(cx);
+                    }),
+                ))
+                .into_any_element(),
+        );
+    }
+    v_flex()
+        .w_full()
+        .gap_1()
+        .children(children)
+        .into_any_element()
+}
+
+/// 请求头 block inside an endpoint card: a small heading over the shared
+/// row list, mirroring the model card's env block.
+fn render_headers_block(
+    theme: &Theme,
+    entity: Entity<SettingsView>,
+    pid: usize,
+    eid: usize,
+    rows: &[KvForm],
+    pending: &Option<String>,
+) -> AnyElement {
+    v_flex()
+        .w_full()
+        .px_3()
+        .py_1p5()
+        .gap_1()
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.foreground)
+                .child(i18n::t("settings-models-section-headers")),
+        )
+        .child(header_rows(theme, entity, pid, Some(eid), rows, pending))
+        .into_any_element()
+}
+
 /// 端点信息 module: add button first (hidden once all three wire APIs are
 /// taken), then one card per endpoint.
 fn render_endpoints_module(
@@ -1715,6 +1980,14 @@ fn render_endpoint(
             ),
         ));
     }
+    rows.push(render_headers_block(
+        theme,
+        entity.clone(),
+        pid,
+        eid,
+        &e.headers,
+        pending,
+    ));
     let card = plain_card(theme, rows);
     let key = format!("models-e{eid}-remove");
     let is_pending = pending.as_deref() == Some(key.as_str());
@@ -2414,9 +2687,15 @@ fn carry_over_unmodeled_sections(config: &mut CxConfig, fresh: &CxConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::{carry_over_unmodeled_sections, wire_color_name};
+    use super::{
+        HeaderEntryError, carry_over_unmodeled_sections, endpoint_spec, header_entries_to_map,
+        wire_color_name,
+    };
     use gpui_component::ColorName;
-    use manox_providers::{ChatGptAppSettings, CxConfig, VsCodeAppSettings, VsCodeExtensionBlock};
+    use manox_providers::{
+        ChatGptAppSettings, CxConfig, ProviderEndpointSpec, VsCodeAppSettings, VsCodeExtensionBlock,
+    };
+    use std::collections::BTreeMap;
 
     /// The endpoint map's wire keys must reuse the picker's dedicated palette
     /// (Blue / Cyan / Amber), not fall through to the unknown-API gray.
@@ -2471,6 +2750,81 @@ mod tests {
             collected.subagents.get("Explore").map(String::as_str),
             Some("百炼::qwen3.8-flash::high"),
             "subagents must survive carry-over"
+        );
+    }
+
+    /// The save path's header invariants, pinned pure: a header map read
+    /// from YAML round-trips through the row entries unchanged, blank rows
+    /// vanish, a value without a name is an error, and two same-name rows
+    /// (even differing only in case) are an error — the runtime merges
+    /// header names case-insensitively, so duplicates could never survive
+    /// to the wire anyway.
+    #[test]
+    fn header_entries_round_trip_and_reject_duplicates() {
+        let map = BTreeMap::from([
+            ("X-Trace-Source".to_string(), "manox".to_string()),
+            (
+                "X-Opencode-Session".to_string(),
+                "{{ session_id }}".to_string(),
+            ),
+        ]);
+        let entries: Vec<(String, String)> =
+            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        assert_eq!(header_entries_to_map(entries.clone()), Ok(map));
+
+        // Blank rows (both fields empty) are skipped silently.
+        let mut with_blank = entries.clone();
+        with_blank.push((String::new(), String::new()));
+        assert_eq!(
+            header_entries_to_map(with_blank).unwrap().len(),
+            entries.len()
+        );
+
+        // A value without a name is an error; a name without a value is a
+        // legal empty-valued header.
+        assert_eq!(
+            header_entries_to_map(vec![(String::new(), "v".to_string())]),
+            Err(HeaderEntryError::EmptyName)
+        );
+        let named = header_entries_to_map(vec![("X-Empty".to_string(), String::new())]).unwrap();
+        assert_eq!(named.get("X-Empty").map(String::as_str), Some(""));
+
+        // Same name, case-insensitively, is a duplicate.
+        assert_eq!(
+            header_entries_to_map(vec![
+                ("X-Shared".to_string(), "a".to_string()),
+                ("x-shared".to_string(), "b".to_string()),
+            ]),
+            Err(HeaderEntryError::Duplicate("x-shared".to_string()))
+        );
+    }
+
+    /// A plain-URL endpoint stays plain until something demands the
+    /// Detailed form — endpoint-level headers are one of those triggers, so
+    /// a refactor of this decision must never silently degrade a headers
+    /// carrying endpoint back to the URL shape (which would strip them).
+    #[test]
+    fn endpoint_spec_stays_plain_until_headers_demand_detailed() {
+        let plain = endpoint_spec(
+            "https://example.com/v1".into(),
+            Vec::new(),
+            None,
+            BTreeMap::new(),
+        );
+        assert!(matches!(plain, ProviderEndpointSpec::Url(_)));
+
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "X-Opencode-Session".to_string(),
+            "{{ session_id }}".to_string(),
+        );
+        let detailed = endpoint_spec("https://example.com/v1".into(), Vec::new(), None, headers);
+        let ProviderEndpointSpec::Detailed(detail) = detailed else {
+            panic!("headers must force the Detailed endpoint spec")
+        };
+        assert_eq!(
+            detail.headers.get("X-Opencode-Session").map(String::as_str),
+            Some("{{ session_id }}")
         );
     }
 }

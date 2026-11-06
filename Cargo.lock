@@ -2326,6 +2326,7 @@ dependencies = [
  "steer-ext-agents",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
