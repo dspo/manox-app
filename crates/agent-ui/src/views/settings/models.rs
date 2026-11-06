@@ -530,17 +530,7 @@ impl ModelsPanelState {
                 } else {
                     None
                 };
-                let spec = if e.agents.is_empty() && copilot_auth.is_none() && e.headers.is_empty()
-                {
-                    ProviderEndpointSpec::Url(url)
-                } else {
-                    ProviderEndpointSpec::Detailed(ProviderEndpointDetail {
-                        url,
-                        agents: e.agents.clone(),
-                        copilot_auth,
-                        headers: e.headers.clone(),
-                    })
-                };
+                let spec = endpoint_spec(url, e.agents.clone(), copilot_auth, e.headers.clone());
                 endpoints.insert(wire, spec);
             }
 
@@ -2403,20 +2393,310 @@ fn remove_button(
         .into_any_element()
 }
 
-/// Carry over top-level sections this form does not model (owned by the
-/// External Tools panels and the host's subagent dispatch) from a fresh disk
-/// read, so a Models-panel save can never erase them.
+/// The endpoint spec decision, shared by `collect()` and the headers
+/// carry-over (which rebuilds specs from the form's edits plus the FRESH
+/// headers): a bare `Url` only when nothing else rides the endpoint — a
+/// headers-only endpoint stays `Detailed` and never collapses.
+fn endpoint_spec(
+    url: String,
+    agents: Vec<String>,
+    copilot_auth: Option<String>,
+    headers: BTreeMap<String, String>,
+) -> ProviderEndpointSpec {
+    if agents.is_empty() && copilot_auth.is_none() && headers.is_empty() {
+        ProviderEndpointSpec::Url(url)
+    } else {
+        ProviderEndpointSpec::Detailed(ProviderEndpointDetail {
+            url,
+            agents,
+            copilot_auth,
+            headers,
+        })
+    }
+}
+
+/// Carry over everything this form does not model (owned by the External
+/// Tools panels and the host's subagent dispatch) and everything it models
+/// only as a PASSTHROUGH SNAPSHOT: the provider/endpoint request headers
+/// have no editor, so the form's open-time capture must never win over a
+/// hand edit on disk. Headers restore by provider name / endpoint wire key;
+/// a form-added provider or endpoint has no fresh record and keeps what the
+/// form holds. Removals propagate the same way — fresh's headers replace the
+/// snapshot, including down to none.
 fn carry_over_unmodeled_sections(config: &mut CxConfig, fresh: &CxConfig) {
     config.chatgpt_app = fresh.chatgpt_app.clone();
     config.vscode_app = fresh.vscode_app.clone();
     config.subagents = fresh.subagents.clone();
+    for provider in &mut config.providers {
+        let Some(fresh_provider) = fresh
+            .providers
+            .iter()
+            .find(|p| p.name == provider.name)
+        else {
+            continue;
+        };
+        provider.headers = fresh_provider.headers.clone();
+        for (wire, spec) in &mut provider.endpoints {
+            let Some(fresh_spec) = fresh_provider.endpoints.get(wire) else {
+                continue;
+            };
+            let fresh_headers = match fresh_spec {
+                ProviderEndpointSpec::Url(_) => BTreeMap::new(),
+                ProviderEndpointSpec::Detailed(detail) => detail.headers.clone(),
+            };
+            let (url, agents, copilot_auth) = match spec {
+                ProviderEndpointSpec::Url(url) => (url.clone(), Vec::new(), None),
+                ProviderEndpointSpec::Detailed(detail) => (
+                    detail.url.clone(),
+                    detail.agents.clone(),
+                    detail.copilot_auth.clone(),
+                ),
+            };
+            *spec = endpoint_spec(url, agents, copilot_auth, fresh_headers);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{carry_over_unmodeled_sections, wire_color_name};
+    use super::{carry_over_unmodeled_sections, endpoint_spec, wire_color_name};
     use gpui_component::ColorName;
-    use manox_providers::{ChatGptAppSettings, CxConfig, VsCodeAppSettings, VsCodeExtensionBlock};
+    use manox_providers::{
+        ChatGptAppSettings, CxConfig, ProviderConfig, ProviderEndpointDetail, ProviderEndpointSpec,
+        ProviderModels, VsCodeAppSettings, VsCodeExtensionBlock,
+    };
+    use std::collections::BTreeMap;
+
+    fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn detailed(
+        url: &str,
+        agents: Vec<String>,
+        headers: BTreeMap<String, String>,
+    ) -> ProviderEndpointSpec {
+        ProviderEndpointSpec::Detailed(ProviderEndpointDetail {
+            url: url.to_string(),
+            agents,
+            copilot_auth: None,
+            headers,
+        })
+    }
+
+    /// The endpoint spec decision: a bare URL only when nothing rides the
+    /// endpoint; request headers alone keep it `Detailed` (a headers-only
+    /// endpoint never collapses to `Url`, which could not carry them).
+    #[test]
+    fn endpoint_spec_keeps_a_headers_only_endpoint_detailed() {
+        let url = "https://example.invalid".to_string();
+        assert!(matches!(
+            endpoint_spec(url.clone(), Vec::new(), None, BTreeMap::new()),
+            ProviderEndpointSpec::Url(_)
+        ));
+        let headers_only = endpoint_spec(url.clone(), Vec::new(), None, headers(&[("X-A", "1")]));
+        let ProviderEndpointSpec::Detailed(detail) = headers_only else {
+            panic!("a headers-only endpoint must stay Detailed");
+        };
+        assert_eq!(detail.headers.get("X-A").map(String::as_str), Some("1"));
+        assert!(matches!(
+            endpoint_spec(url, vec!["claude".to_string()], None, BTreeMap::new()),
+            ProviderEndpointSpec::Detailed(_)
+        ));
+    }
+
+    /// The headers carry-over: the form's open-time header snapshot loses to
+    /// the fresh disk read at BOTH levels — the provider-level map and each
+    /// endpoint's map (keyed by wire), rebuilt onto the form's edited
+    /// fields. A headers-only endpoint survives as Detailed.
+    #[test]
+    fn carry_over_restores_fresh_headers_at_both_levels() {
+        let mut collected = CxConfig {
+            providers: vec![ProviderConfig {
+                name: "p1".into(),
+                apikey_source: None,
+                models: ProviderModels::Inline(Default::default()),
+                endpoints: [
+                    (
+                        "anthropic".to_string(),
+                        detailed(
+                            "https://stale.invalid",
+                            Vec::new(),
+                            headers(&[("X-Stale", "old")]),
+                        ),
+                    ),
+                    // A headers-only endpoint whose form snapshot collapsed
+                    // to Url (the snapshot predates the disk edit): the
+                    // carry-over must rebuild it WITH headers.
+                    (
+                        "responses".to_string(),
+                        ProviderEndpointSpec::Url("https://stale.invalid".into()),
+                    ),
+                    // A form-added endpoint: no fresh record, untouched.
+                    (
+                        "completions".to_string(),
+                        ProviderEndpointSpec::Url("https://new.invalid".into()),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                headers: headers(&[("X-Stale", "old")]),
+                env: Default::default(),
+            }],
+            agents: Vec::new(),
+            chatgpt_app: None,
+            vscode_app: None,
+            subagents: Default::default(),
+        };
+        let fresh = CxConfig {
+            providers: vec![ProviderConfig {
+                name: "p1".into(),
+                apikey_source: None,
+                models: ProviderModels::Inline(Default::default()),
+                endpoints: [
+                    (
+                        "anthropic".to_string(),
+                        detailed(
+                            "https://fresh.invalid",
+                            Vec::new(),
+                            headers(&[("X-Fresh", "new")]),
+                        ),
+                    ),
+                    (
+                        "responses".to_string(),
+                        detailed("https://fresh.invalid", Vec::new(), headers(&[("X-H", "v")])),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                headers: headers(&[("X-Provider", "fresh")]),
+                env: Default::default(),
+            }],
+            agents: Vec::new(),
+            chatgpt_app: None,
+            vscode_app: None,
+            subagents: Default::default(),
+        };
+
+        carry_over_unmodeled_sections(&mut collected, &fresh);
+        let provider = &collected.providers[0];
+        assert_eq!(
+            provider.headers.get("X-Provider").map(String::as_str),
+            Some("fresh"),
+            "provider-level headers restore from fresh"
+        );
+        let ProviderEndpointSpec::Detailed(anthropic) =
+            &provider.endpoints["anthropic"]
+        else {
+            panic!("a fresh endpoint with headers stays Detailed");
+        };
+        assert_eq!(
+            anthropic.url, "https://stale.invalid",
+            "the endpoint's edited fields stay the form's"
+        );
+        assert_eq!(
+            anthropic.headers.get("X-Fresh").map(String::as_str),
+            Some("new"),
+            "endpoint-level headers restore from fresh"
+        );
+        let ProviderEndpointSpec::Detailed(responses) = &provider.endpoints["responses"] else {
+            panic!("a headers-only endpoint must not collapse to Url");
+        };
+        assert_eq!(
+            responses.headers.get("X-H").map(String::as_str),
+            Some("v"),
+            "the fresh headers-only endpoint carries its headers"
+        );
+        assert!(
+            matches!(
+                &provider.endpoints["completions"],
+                ProviderEndpointSpec::Url(url) if url == "https://new.invalid"
+            ),
+            "a form-added endpoint is untouched"
+        );
+    }
+
+    /// Header removals propagate: an endpoint fresh demoted to a bare URL
+    /// (headers deleted on disk) loses the form's stale snapshot too, and a
+    /// form-added provider keeps its snapshot (nothing to restore from).
+    #[test]
+    fn carry_over_propagates_header_removals_and_leaves_new_providers() {
+        let mut collected = CxConfig {
+            providers: vec![
+                ProviderConfig {
+                    name: "p1".into(),
+                    apikey_source: None,
+                    models: ProviderModels::Inline(Default::default()),
+                    endpoints: [(
+                        "anthropic".to_string(),
+                        detailed(
+                            "https://stale.invalid",
+                            vec!["claude".to_string()],
+                            headers(&[("X-Stale", "old")]),
+                        ),
+                    )]
+                    .into_iter()
+                    .collect(),
+                    headers: headers(&[("X-Stale", "old")]),
+                    env: Default::default(),
+                },
+                ProviderConfig {
+                    name: "added".into(),
+                    apikey_source: None,
+                    models: ProviderModels::Inline(Default::default()),
+                    endpoints: Default::default(),
+                    headers: headers(&[("X-New", "kept")]),
+                    env: Default::default(),
+                },
+            ],
+            agents: Vec::new(),
+            chatgpt_app: None,
+            vscode_app: None,
+            subagents: Default::default(),
+        };
+        let fresh = CxConfig {
+            providers: vec![ProviderConfig {
+                name: "p1".into(),
+                apikey_source: None,
+                models: ProviderModels::Inline(Default::default()),
+                endpoints: [(
+                    "anthropic".to_string(),
+                    ProviderEndpointSpec::Url("https://fresh.invalid".into()),
+                )]
+                .into_iter()
+                .collect(),
+                headers: BTreeMap::new(),
+                env: Default::default(),
+            }],
+            agents: Vec::new(),
+            chatgpt_app: None,
+            vscode_app: None,
+            subagents: Default::default(),
+        };
+
+        carry_over_unmodeled_sections(&mut collected, &fresh);
+        let p1 = &collected.providers[0];
+        assert!(p1.headers.is_empty(), "provider-level removal propagates");
+        assert!(
+            matches!(
+                &p1.endpoints["anthropic"],
+                ProviderEndpointSpec::Detailed(d)
+                    if d.headers.is_empty() && d.agents == vec!["claude".to_string()]
+            ),
+            "endpoint headers drop; the form's agent filter survives"
+        );
+        assert_eq!(
+            collected.providers[1]
+                .headers
+                .get("X-New")
+                .map(String::as_str),
+            Some("kept"),
+            "a form-added provider has no fresh record and keeps its snapshot"
+        );
+    }
 
     /// The endpoint map's wire keys must reuse the picker's dedicated palette
     /// (Blue / Cyan / Amber), not fall through to the unknown-API gray.
