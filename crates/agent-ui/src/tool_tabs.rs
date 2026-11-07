@@ -735,6 +735,7 @@ pub(crate) fn spawn_agent_terminal(
     provider: &str,
     model: &str,
     wire: Option<String>,
+    prompt: Option<&str>,
     cx: &mut App,
 ) -> Result<SpawnedAgentTerminal, String> {
     let agent = match agent_id {
@@ -751,6 +752,13 @@ pub(crate) fn spawn_agent_terminal(
         .cwd(cwd.to_path_buf());
     if let Some(w) = wire {
         builder = builder.wire_api(w);
+    }
+    if let Some(prompt) = prompt {
+        // The launcher's composer text rides the argv as the CLI's initial
+        // prompt (AgentBuilder passthrough — no shell, no injection face),
+        // after the `--` separator: a draft starting with `-` must not
+        // parse as a flag.
+        builder = builder.passthrough(["--".to_string(), prompt.to_string()]);
     }
     let handle = Arc::new(builder.spawn().map_err(|e| e.to_string())?);
     // The REAL external session id: the cx session socket's `<id>.sock`
@@ -892,6 +900,7 @@ impl gpui::Render for AgentPicker {
                             &row.provider,
                             &row.config_id,
                             wire.clone(),
+                            None,
                             cx,
                         ) {
                             Ok(spawned) => {

@@ -120,7 +120,7 @@ async fn a_parked_sessions_stream_never_paints_the_bound_transcript(cx: &mut Tes
         "the parked turn routes to its own session's fold"
     );
     assert!(
-        store.update(&mut visual.cx, |s, _| s.book.chats.get("c-1").is_none()),
+        store.update(&mut visual.cx, |s, _| !s.book.chats.contains_key("c-1")),
         "the bound session's fold holds nothing of the parked stream"
     );
 

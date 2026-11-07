@@ -11,13 +11,7 @@
 
 sidebar-new-chat = New chat
 
-sidebar-section-projects = Projects
-
 sidebar-section-conversations = Conversations
-
-sidebar-new-session-label = New session
-
-sidebar-new-session-steer = Steer
 
 sidebar-new-terminal = New Terminal
 
@@ -554,8 +548,6 @@ workspace-ask-note-label = Supplement:
 
 workspace-ask-skipped = Skipped
 
-workspace-cancel = Cancel
-
 access-mode-sandbox-title = Sandbox access
 
 access-mode-full-access-title = Full access
@@ -566,15 +558,7 @@ workspace-mode-notice = { $mode ->
 }
 
 workspace-project-choose = Choose project
-
-workspace-project-new = New project
-
-workspace-project-blank = Create blank project
 workspace-project-unfiled = Conversations
-
-workspace-project-select-folder = Select folder
-
-workspace-project-name-prompt = Project folder name
 
 workspace-empty-prompt = What should we do?
 
@@ -639,8 +623,6 @@ exit-browser-closed = The browser is closed.
 exit-archiving = Archiving { $name }...
 
 exit-archived = The thread is archived.
-
-exit-bye = ByeBye!
 
 menu-settings = Settings…
 
@@ -909,6 +891,74 @@ plugins-notice-plugin-removed = Plugin removed. Restart steer to unload runtime 
 plugins-notice-plugin-enabled = Plugin enabled. Restart steer to load its tools, skills, agents, hooks, and MCP servers.
 
 plugins-notice-plugin-disabled = Plugin disabled. Restart steer to unload runtime registries loaded at startup.
+
+### agent-ui project_dialog.rs (the create/edit-project dialog, design §2.4;
+### a blank name follows the primary folder's basename until overridden)
+
+project-create-title = Create Project
+
+project-edit-title = Edit Project
+
+project-name-label = Name
+
+# The name field's fallback placeholder while no primary folder exists; with
+# one, the placeholder is its basename.
+project-name-placeholder = Project name
+
+project-roots-label = Source folders
+# The multi-root group header badge tooltip: every root, one per line.
+project-roots-tooltip = Source folders: {$roots}
+
+project-move-out = Remove from Project
+
+project-move-to = Move to Project…
+
+project-root-primary = Primary
+
+project-root-set-primary = Set as primary
+
+project-root-add = Add folder…
+
+project-cancel = Cancel
+
+project-create-confirm = Create Project
+
+project-save = Save
+
+project-remove = Remove Project
+
+# The sidebar footer's standing entry row.
+project-new-footer = New Project
+
+# The Chats-bucket group menu's entry item.
+project-new-menu = New Project…
+
+project-remove-confirm-title = Remove this project?
+
+project-remove-confirm-body = The project is deleted and its conversations return to Chats. The conversations themselves are untouched.
+
+project-remove-confirm-ok = Remove
+
+# The inline red line for a failed save (rare: the picker only yields
+# existing directories) — no popup.
+project-error-save = Couldn't save: {$err}
+
+# Launcher (the new-conversation launch pad, design §3)
+launcher-heading = New conversation
+
+launcher-project-none = No project
+
+launcher-open-folder = Open Other Folder…
+
+launcher-action-heading = Or open directly
+
+launcher-action-terminal = Ghostty Terminal
+
+launcher-action-unavailable = { $prog } not detected
+
+# The group menu's entry item (the per-agent cascades retired — the
+# launcher's action row is the one agent launch face).
+project-new-conversation = New Conversation
 
 ## steer-agent-chrome-ui (app shell: sidebar / toolbar / tabs / bottom dock)
 

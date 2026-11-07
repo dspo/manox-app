@@ -1,22 +1,25 @@
-//! FULL-WIRING regression: a thread created FOR a project (the sidebar's
-//! 新建会话 → Steer row hands `new_container` the project directory) must
-//! carry that directory on the session channel the composer's project chip
-//! reads — the user never picks the folder a second time.
+//! FULL-WIRING regression: a thread created FOR a project (the launcher's
+//! preset target — the group menu's 新建对话 hands `enter_launcher` the
+//! project directory) must carry that directory on the session channel the
+//! composer's project chip reads, and the launcher's picks must ride the
+//! create intent — the user never picks the folder a second time and the
+//! seed config lands verbatim.
 //!
 //! The regression class: a deferred create's channel must expose the
 //! intent before the journal exists. The host seeds it from the
 //! `createSession` intent and the object row; the client writes nothing.
-//! The first accepted Submit materializes the journal, whose rows are the
-//! durable witness of the same facts.
+//! The launcher send's flush Submit (the first accepted one) materializes
+//! the journal, whose rows are the durable witness of the same facts.
 //!
 //! Own test binary: the harness initializes process-global singletons (see
 //! `tests/common/mod.rs` — one `#[gpui::test]` per binary), and this one
 //! dials the REAL in-proc host, so the store's state root must be hermetic.
 #![cfg(feature = "test-support")]
 
+mod common;
+
 use agent_ui::Workspace;
-use agent_ui::workspace::SubmitBehavior;
-use gpui::{TestAppContext, VisualTestContext, px, size};
+use gpui::{AppContext as _, TestAppContext, px, size};
 use gpui_component::Root;
 use steer_agent_chrome_ui::register_fonts;
 
@@ -103,7 +106,6 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     let ws = ws_cell.borrow().clone().expect("workspace captured");
-    let mut visual = VisualTestContext::from_window(window.into(), cx);
 
     for _ in 0..PARK_ROUNDS {
         cx.run_until_parked();
@@ -116,44 +118,47 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
 
     let before = cx.update(|cx| ws.read(cx).diagnostic_foreground_session(cx));
 
-    // The project directory the sidebar row hands the new thread.
+    // The project directory the launcher's preset hands the new thread — a
+    // real project entity (the settings redirect keeps the create hermetic),
+    // so the membership write is covered too.
     let project = tempfile::tempdir().expect("project dir");
-    let project_path = project.path().to_path_buf();
+    // The registry canonicalizes roots at create time (macOS tempdirs gain
+    // the /private prefix) — compare everything against that form.
+    let project_path = project.path().canonicalize().expect("canonicalize");
     let project_string = project_path.to_string_lossy().into_owned();
-
-    // The draft row's picks ARE the create intent's config: `new_container`
-    // refills an unspoken row under this project, and its row wins over
-    // inheritance. Non-default picks (the second model, full access, max
-    // effort) make a dropped intent visible in the journal and the chip.
-    let draft_id = uuid::Uuid::new_v4().to_string();
-    let objects = manox_agent::object_store::ObjectStore::try_global().expect("object store");
-    objects.create_conversation(&draft_id, Some(project_string.as_str()));
-    objects.set_model(&draft_id, Some("test-anthropic"), Some("t-model-2"));
-    objects.set_access_mode(&draft_id, Some("full-access"));
-    objects.set_reasoning_effort(&draft_id, Some("max"));
-
-    let mut created = None;
-    visual.update(|window, cx| {
-        ws.update(cx, |ws, cx| {
-            created = Some(ws.new_container(Some(project_path.clone()), window, cx));
-        });
+    let settings = tempfile::tempdir().expect("settings dir");
+    let settings_file = settings.path().join("settings.toml");
+    cx.update(|_cx| {
+        agent_ui::projects::diagnostic_redirect_settings_file(Some(settings_file.clone()));
     });
-    assert_eq!(
-        created.as_deref(),
-        Some(draft_id.as_str()),
-        "the create refills the project's draft row"
-    );
-    let sid = created.expect("the create returns its session id");
-    let journal = manox_agent::paths::core_session_file(Some(&project_path), &sid)
-        .expect("the session journal path");
+    let project_entity = cx.update(|_cx| {
+        agent_ui::projects::create_project(Some("P".into()), vec![project_path.clone()], None)
+            .expect("create the project entity")
+    });
 
-    // Lazy materialization: the create seeds the channel from the intent and
-    // the object row, and no journal file exists until the first turn.
-    assert!(
-        !journal.exists(),
-        "a deferred create must not write its journal before the first turn: {}",
-        journal.display()
-    );
+    // Non-default picks (the second model, full access, max effort) make a
+    // dropped intent visible in the journal and the chip. The folder preset
+    // stays unlocked (the inherit shape — the target remains an explicit
+    // pre-creation pick).
+    cx.update_window(window.into(), |_, window, cx| {
+        let ws = ws.clone();
+        ws.update(cx, |ws, cx| {
+            ws.enter_launcher(
+                Some(agent_ui::launcher::LauncherTarget::Folder(
+                    project_path.clone(),
+                )),
+                false,
+                window,
+                cx,
+            );
+            ws.diagnostic_launcher_picks(Some("test-anthropic/t-model-2"), true, Some("max"), cx);
+        });
+    })
+    .expect("window live");
+
+    // ⏎: the mint + the attach + the flush submit — the first accepted
+    // Submit materializes the journal.
+    common::launcher_send(cx, &ws, window.into(), "hello");
 
     let mut landed = None;
     for _ in 0..PARK_ROUNDS {
@@ -168,6 +173,18 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
     assert!(
         landed.is_some(),
         "the new thread must bind a foreground session"
+    );
+    let sid = landed.expect("foreground moved");
+    let journal = manox_agent::paths::core_session_file(Some(&project_path), &sid)
+        .expect("the session journal path");
+
+    // The container's membership lands with the mint (design §2.1's write
+    // timing) — the grouping fact source Step-4's sidebar reads.
+    assert_eq!(
+        cx.update(|_cx| agent_ui::projects::membership_of(&sid))
+            .as_deref(),
+        Some(project_entity.id.as_str()),
+        "the launcher mint must attach the container to the project"
     );
 
     // The directory must land on the session channel the composer chip
@@ -209,14 +226,9 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
         "the model segment must carry the wire-api tint (label {label:?})"
     );
 
-    // The journal is the durable witness: the first accepted Submit
-    // materializes the deferred session, and the create intent's facts land
-    // as rows — no client-side channel writes needed.
-    visual.update(|_window, cx| {
-        ws.update(cx, |ws, cx| {
-            ws.gallery_submit("hello", SubmitBehavior::Send, cx);
-        });
-    });
+    // The journal is the durable witness: the flush Submit (the first
+    // accepted one) materialized the session, and the create intent's facts
+    // land as rows — no client-side channel writes needed.
     let mut rows: Vec<serde_json::Value> = Vec::new();
     for _ in 0..PARK_ROUNDS {
         cx.run_until_parked();
@@ -280,6 +292,9 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
         Some("max"),
         "the effort pick lands its level"
     );
+    cx.update(|_cx| {
+        agent_ui::projects::diagnostic_redirect_settings_file(None);
+    });
     manox_agent::thread_store::drop_global_for_test();
     agent_ui::dispatch::clear_globals_for_test();
 }

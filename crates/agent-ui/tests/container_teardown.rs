@@ -87,7 +87,6 @@ fn spawn_external(
                     cx_session_id: String::new(),
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
-                    project: None,
                     cwd: std::path::PathBuf::from("/tmp"),
                     handle,
                 },
@@ -172,6 +171,32 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
         1,
         "the route is owned by the external container"
     );
+    // The membership: the container was minted into a project (the
+    // launcher's gestures write it at the same seam) — the death must prune
+    // it, an external container has no revival to keep the fact for. The
+    // redirect keeps the registry writes hermetic (the boot's projection
+    // reads already settled; the redirect drops the cache onto the test
+    // file before the first write).
+    let settings_dir = tempfile::tempdir().expect("settings dir");
+    let settings_file = settings_dir.path().join("settings.toml");
+    let project_root = tempfile::tempdir().expect("project root");
+    agent_ui::projects::diagnostic_redirect_settings_file(Some(settings_file.clone()));
+    let project = agent_ui::projects::create_project(
+        Some("Teardown".into()),
+        vec![project_root.path().to_path_buf()],
+        None,
+    )
+    .expect("create the project");
+    agent_ui::projects::set_membership(&row2, &project.id);
+    // A foreign container's membership (the keyed-prune witness — it names
+    // no container that dies here).
+    let foreign_member_key = "external:codex:membership-survivor";
+    agent_ui::projects::set_membership(foreign_member_key, &project.id);
+    assert_eq!(
+        agent_ui::projects::membership_of(&row2).as_deref(),
+        Some(project.id.as_str()),
+        "the membership is planted"
+    );
     // The 0 号 exits: the death predicate flips and the workspace's own
     // subscription runs the ONE teardown.
     row2_probe.probe.exit(Some(0));
@@ -182,6 +207,16 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
         !ws.read_with(cx, |ws, _| ws.external_session_foreground()),
         "the dead container was foreground — the main column falls back to the conversation"
     );
+    assert!(
+        agent_ui::projects::membership_of(&row2).is_none(),
+        "the death pruned the container's membership"
+    );
+    assert_eq!(
+        agent_ui::projects::membership_of(foreign_member_key).as_deref(),
+        Some(project.id.as_str()),
+        "the prune is keyed — a foreign container's membership survives"
+    );
+    agent_ui::projects::diagnostic_redirect_settings_file(None);
     assert!(
         wait_child_dead(cx, cat2),
         "the death reclaimed the container's CLI-tab child"
@@ -224,8 +259,8 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
         let foreign_route = ws.update(cx, |ws, cx| {
             ws.diagnostic_register_browser_route(foreign, cx)
         });
-        common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
-            .expect("/exit lands a fresh conversation");
+        common::run_slash(cx, &ws, window, "/exit");
+        assert!(common::wait_launcher(cx, &ws), "/exit lands the launcher");
         assert!(
             ws.read_with(cx, |ws, _| ws
                 .diagnostic_container_browser_tabs(foreign)
@@ -235,8 +270,8 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
-        common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
-            .expect("/exit lands a fresh conversation");
+        common::run_slash(cx, &ws, window, "/exit");
+        assert!(common::wait_launcher(cx, &ws), "/exit lands the launcher");
     }
 
     // ── the dock/right stash is keyed per container ─────────────────────

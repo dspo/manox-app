@@ -38,7 +38,7 @@ async fn the_mention_chip_hints_its_registry_key_on_hover(cx: &mut TestAppContex
         visual.update(|window, cx| window.draw(cx).clear(cx));
     }
 
-    let (input_bounds, caret_y) = workspace.read_with(&mut visual.cx, |ws, cx| {
+    let (input_bounds, caret_y) = workspace.read_with(&visual.cx, |ws, cx| {
         let geo = ws
             .diagnostic_chat_input(cx)
             .read(cx)
@@ -57,7 +57,7 @@ async fn the_mention_chip_hints_its_registry_key_on_hover(cx: &mut TestAppContex
     }
 
     let (key, chip_bounds) = workspace
-        .read_with(&mut visual.cx, |ws, cx| ws.diagnostic_mention_hover(cx))
+        .read_with(&visual.cx, |ws, cx| ws.diagnostic_mention_hover(cx))
         .expect("the pointer over the chip raises the hover state");
     assert_eq!(key, "some-registry-key");
     assert!(
@@ -80,7 +80,7 @@ async fn the_mention_chip_hints_its_registry_key_on_hover(cx: &mut TestAppContex
         visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     assert!(
-        workspace.read_with(&mut visual.cx, |ws, cx| ws
+        workspace.read_with(&visual.cx, |ws, cx| ws
             .diagnostic_mention_hover(cx)
             .is_none()),
         "leaving the chip clears the hover state"
@@ -100,7 +100,7 @@ async fn the_mention_chip_hints_its_registry_key_on_hover(cx: &mut TestAppContex
     }
     assert!(
         workspace
-            .read_with(&mut visual.cx, |ws, cx| ws.diagnostic_mention_hover(cx))
+            .read_with(&visual.cx, |ws, cx| ws.diagnostic_mention_hover(cx))
             .is_some(),
         "the hover state is up again before the deletion leg"
     );
@@ -114,7 +114,7 @@ async fn the_mention_chip_hints_its_registry_key_on_hover(cx: &mut TestAppContex
         visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     assert!(
-        workspace.read_with(&mut visual.cx, |ws, cx| ws
+        workspace.read_with(&visual.cx, |ws, cx| ws
             .diagnostic_mention_hover(cx)
             .is_none()),
         "a content change retires the hover state with the chip"

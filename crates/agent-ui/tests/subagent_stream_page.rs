@@ -298,7 +298,6 @@ async fn a_subagent_line_opens_that_childs_transcript(cx: &mut TestAppContext) {
                     cx_session_id: "probe-ext".into(),
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
-                    project: None,
                     cwd: std::path::PathBuf::from("/tmp"),
                     handle: None,
                 },

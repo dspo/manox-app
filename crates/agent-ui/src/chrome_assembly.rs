@@ -67,6 +67,55 @@ pub fn leave_settings_layout(cx: &mut App) {
     shell.update(cx, |shell, cx| shell.set_sidebar_surface(None, cx));
 }
 
+/// The sidebar's selection follows the foreground container: the attach and
+/// the external-spawn paths push it whenever the main column changes hands.
+/// Highlight only — the select hook (the click's open route) does not fire.
+pub fn select_container(id: &str, cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    shell.update(cx, |shell, _| shell.set_active(id));
+}
+
+/// The launcher owns the main column: no row wears the selection.
+pub fn clear_container_selection(cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    shell.update(cx, |shell, _| shell.clear_active());
+}
+
+/// Open the create-project dialog, or the edit variant for `edit_of` — the
+/// sidebar footer's ＋ 新建项目 row and the Chats bucket's menu entry both
+/// land here. The dialog entity is the mounted view; closing it is
+/// [`close_project_dialog`]. A missing project id (deleted meanwhile) opens
+/// nothing.
+pub fn open_project_dialog(edit_of: Option<&str>, window: &mut Window, cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    let dialog: Entity<crate::project_dialog::ProjectDialogState> = match edit_of {
+        None => cx.new(|cx| crate::project_dialog::ProjectDialogState::for_create(window, cx)),
+        Some(id) => {
+            let Some(project) = crate::projects::get_project(id) else {
+                return;
+            };
+            cx.new(|cx| crate::project_dialog::ProjectDialogState::for_edit(project, window, cx))
+        }
+    };
+    let view: gpui::AnyView = dialog.into();
+    shell.update(cx, |shell, cx| shell.set_dialog_surface(Some(view), cx));
+}
+
+/// Close (unmount) the project dialog. The dialog's own dismissals — ✕ /
+/// 取消 / Escape, a successful save, a confirmed removal — route here.
+pub fn close_project_dialog(cx: &mut App) {
+    let Some(shell) = shell_handle() else {
+        return;
+    };
+    shell.update(cx, |shell, cx| shell.set_dialog_surface(None, cx));
+}
+
 /// Open (or focus) a host-built tool tab in the live right pane. `false` when
 /// no shell or window is live — the caller's gesture has no surface then.
 pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) -> bool {
@@ -327,52 +376,40 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .detach();
         }
         let rows = mux.read(cx).container_list(cx);
-        let folders = mux.read(cx).project_folders(cx);
-        let removed = crate::project_registry::removed_projects();
+        // The grouping data source is the project registry (design §2.3):
+        // projects in sidebar order + each container's membership. Rows
+        // without a membership (ad-hoc folders, external containers,
+        // other clients' sessions) all fall to the loose bucket.
+        let projects = crate::projects::list_projects();
         let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
-            crate::sidebar_projection::project_groups(&rows, &folders, &removed)
-                .into_iter()
-                .flat_map(steer_agent_chrome_ui::shell::SessionRow::from_group)
-                .collect();
+            crate::sidebar_projection::project_groups(&rows, &projects, &|id| {
+                crate::projects::membership_of(id)
+            })
+            .into_iter()
+            .flat_map(steer_agent_chrome_ui::shell::SessionRow::from_group)
+            .collect();
         // Launched external sessions (project-menu agents/terminals) merge
-        // into the snapshot as sidebar rows; the shell regroups them under
-        // their project's header.
+        // into the snapshot as sidebar rows, keyed by their own membership.
         sessions.extend(ws.read(cx).external_session_rows());
-        // The registry stamps first-seen projects (the default order's
-        // newest-added-first clock) and resolves the display order: the
-        // manual drag order, with unrecorded projects newest-first on top.
-        let heads: Vec<(String, String)> = folders
+        // The project skeleton (id, display name, roots — the roots feed
+        // the header's count badge + tooltip) and the display order: the
+        // registry's position order, the loose bucket trailing.
+        let heads: Vec<(String, String, Vec<String>)> = projects
             .iter()
-            .filter(|(path, _)| !removed.contains(path))
-            .map(|(path, alias)| {
-                let label = alias
-                    .clone()
-                    .filter(|a| !a.trim().is_empty())
-                    .unwrap_or_else(|| crate::sidebar_projection::project_label(path));
-                (path.clone(), label)
+            .map(|project| {
+                (
+                    project.id.clone(),
+                    crate::projects::display_name(project),
+                    project
+                        .roots
+                        .iter()
+                        .map(|root| root.path.to_string_lossy().into_owned())
+                        .collect(),
+                )
             })
             .collect();
-        let keys: Vec<String> = {
-            let mut seen: Vec<String> = Vec::new();
-            let mut all: Vec<String> = Vec::new();
-            for path in heads.iter().map(|(path, _)| path) {
-                if !all.contains(path) {
-                    all.push(path.clone());
-                }
-                seen.push(path.clone());
-            }
-            for s in &sessions {
-                let key = s.project.clone().unwrap_or_else(|| s.workspace.clone());
-                if s.project.is_some() && !seen.contains(&s.project.clone().unwrap()) {
-                    seen.push(s.project.clone().unwrap());
-                }
-                if !all.contains(&key) {
-                    all.push(key);
-                }
-            }
-            crate::project_registry::note_seen_projects(&seen);
-            crate::project_registry::order_groups(&all)
-        };
+        let mut keys: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
+        keys.push(steer_agent_chrome_ui::session_list::LOOSE_BUCKET_KEY.to_string());
         // The sidebar highlight follows the FOREGROUND thread, not the last
         // click: new-thread landings, /exit replacements and successor
         // hand-offs all switch without a sidebar click; a stale
@@ -626,12 +663,14 @@ fn shell_config(
             on_set_tag: Some(Box::new(|id, tag, _w, _cx| {
                 manox_agent::thread_store_global().with_mut(|st| st.set_thread_tag(id, tag));
             })),
-            // The workspace's own new-container path (park + fresh landing).
+            // The New button / ⌘N lands the LAUNCHER (design §3.3) — the
+            // pre-container launch pad. Nothing is minted here; repeated New
+            // is idempotent (focus the composer). Bare: no preset, unlocked.
             on_new_session: Some(Box::new({
                 let ws = ws.clone();
                 move |w, cx| {
                     ws.update(cx, |ws, cx| {
-                        ws.new_container(None, w, cx);
+                        ws.enter_launcher(None, false, w, cx);
                         cx.notify();
                     });
                 }
@@ -738,19 +777,40 @@ fn shell_config(
                 })
                 .detach();
             })),
-            // The project group's action menu: agent/terminal/editor launches
-            // rooted at the group's directory + 移除项目. The host builds the
-            // menu entity; the chrome mounts and dismisses it.
+            // The project group's action menu (the host builds the menu
+            // entity; the chrome mounts and dismisses it). `project` is the
+            // group's PROJECT ID — `None` on the loose bucket — the menu
+            // resolves launch targets and the edit/delete actions from it.
             on_group_menu: Some(Box::new({
                 let ws = ws.downgrade();
                 move |_key, project, _anchor, window, cx| {
                     Some(crate::project_menu::group_menu(project, &ws, window, cx))
                 }
             })),
-            // The drag-reorder write-back: the key list the shell recorded
-            // is the registry's manual order, verbatim.
+            // The drag-reorder write-back: the key list the shell recorded,
+            // verbatim — project ids take positions 0..n, the loose bucket's
+            // key names no project and is ignored by the reorder.
             on_group_order: Some(Box::new(|keys, _cx| {
-                crate::project_registry::set_manual_order(keys.to_vec());
+                crate::projects::reorder(keys);
+            })),
+            // The group header's hover ＋: the new-conversation entry
+            // preselecting that group's project — LOCKED (the target is the
+            // entry's intent; the chip renders display-only). The loose
+            // bucket is not a project: its ＋ lands the bare unlocked
+            // no-project default.
+            on_group_new: Some(Box::new({
+                let ws = ws.downgrade();
+                move |key, window, cx| {
+                    // The group key IS the project id — no path find (root
+                    // overlap is allowed to be ambiguous).
+                    let preset = (key != steer_agent_chrome_ui::session_list::LOOSE_BUCKET_KEY)
+                        .then(|| crate::launcher::LauncherTarget::Project(key.to_string()));
+                    let locked = preset.is_some();
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.enter_launcher(preset, locked, window, cx);
+                        cx.notify();
+                    });
+                }
             })),
             // The external row menu's 关闭会话: drop the session (its
             // terminal view dies with the record) and fall back to the
@@ -769,6 +829,52 @@ fn shell_config(
                 let ws = ws.downgrade();
                 move |id, title, _w, cx| {
                     let _ = ws.update(cx, |ws, cx| ws.set_external_title(id, title, cx));
+                }
+            })),
+            // The sidebar footer's ＋ 新建项目 row: open the project dialog.
+            // (The Chats bucket's group menu is the other entry; the
+            // Launcher chip menu joins in Step-3.)
+            on_new_project: Some(Box::new(|window, cx| {
+                open_project_dialog(None, window, cx);
+            })),
+            // The row-drag membership drop: a project group key attaches the
+            // container to that project, the loose bucket's key detaches.
+            // The notify runs the projection, the next snapshot re-files the
+            // row.
+            on_drop_row_to_group: Some(Box::new({
+                let ws = ws.clone();
+                move |group, row, _w, cx| {
+                    if group == steer_agent_chrome_ui::session_list::LOOSE_BUCKET_KEY {
+                        crate::projects::remove_membership(row);
+                    } else {
+                        crate::projects::set_membership(row, group);
+                    }
+                    ws.update(cx, |_, cx| cx.notify());
+                }
+            })),
+            // The row menu's 移动到项目… submenu: the registry in display
+            // order.
+            project_list: Some(Box::new(|_cx| {
+                crate::projects::list_projects()
+                    .into_iter()
+                    .map(|project| {
+                        let name = crate::projects::display_name(&project);
+                        (project.id, name)
+                    })
+                    .collect()
+            })),
+            on_move_row_to_project: Some(Box::new({
+                let ws = ws.clone();
+                move |row, project, _w, cx| {
+                    crate::projects::set_membership(row, project);
+                    ws.update(cx, |_, cx| cx.notify());
+                }
+            })),
+            on_remove_row_from_project: Some(Box::new({
+                let ws = ws.clone();
+                move |row, _w, cx| {
+                    crate::projects::remove_membership(row);
+                    ws.update(cx, |_, cx| cx.notify());
                 }
             })),
         },
@@ -910,18 +1016,19 @@ pub fn diagnostic_right_pane_snapshot(container_id: &str) -> Option<String> {
     load_right_pane(container_id)
 }
 
-/// The foreground thread's PROJECT path, refreshed by the assembly's observer
-/// on every projection — "open in editor" and the project menu's no-project
-/// fallback read it rather than silently opening `$HOME`. (The dock/right
-/// spawn cwd no longer rides a static: it reads the foreground container's
-/// attrs through [`crate::Workspace::container_attrs`] at spawn time.)
+/// The foreground thread's PROJECT directory, refreshed by the assembly's
+/// observer on every projection — "open in editor" and the project menu's
+/// no-project fallback read it rather than silently opening `$HOME`. The
+/// membership is the primary voice (the project entity's primary root); the
+/// wire row's bound path stays the fallback for a session with a directory
+/// but no membership. (The dock/right spawn cwd no longer rides a static:
+/// it reads the foreground container's attrs through
+/// [`crate::Workspace::container_attrs`] at spawn time.)
 fn refresh_foreground_project(
     ws: &Entity<Workspace>,
     rows: &[crate::sidebar_projection::ContainerRow],
     cx: &App,
 ) {
-    // The thread's working directory is its PROJECT path — the wire row's
-    // `project` column, the same source the sidebar groups by.
     let fg = ws
         .read(cx)
         .chat
@@ -931,11 +1038,23 @@ fn refresh_foreground_project(
         .map(|(_, sid)| sid.clone());
     let project = fg
         .as_ref()
-        .and_then(|id| rows.iter().find(|r| &r.id == id))
-        .and_then(|r| r.project.clone())
-        .filter(|p| !p.is_empty());
-    *FOREGROUND_PROJECT.lock().expect("foreground project lock") =
-        project.map(std::path::PathBuf::from);
+        .and_then(|id| crate::projects::membership_of(id))
+        .and_then(|project_id| crate::projects::get_project(&project_id))
+        .and_then(|project| {
+            project
+                .roots
+                .iter()
+                .find(|root| root.primary)
+                .map(|root| root.path.clone())
+        })
+        .or_else(|| {
+            fg.as_ref()
+                .and_then(|id| rows.iter().find(|r| &r.id == id))
+                .and_then(|r| r.project.clone())
+                .filter(|p| !p.is_empty())
+                .map(std::path::PathBuf::from)
+        });
+    *FOREGROUND_PROJECT.lock().expect("foreground project lock") = project;
 }
 
 /// The container teardown's shell half: reclaim the LIVE dock view and the

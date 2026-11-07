@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use gpui::{
     Bounds, Entity, FocusHandle, FollowMode, ListState, Pixels, SharedString, Subscription,
 };
-use gpui_component::input::{InputState, TextareaState};
+use gpui_component::input::TextareaState;
 use gpui_component::menu::PopupMenu;
 
 use ai_elements::AskState;
@@ -431,10 +431,6 @@ pub struct ChatColumn {
     /// like the project chip's menu.
     pub send_menu: Option<Entity<PopupMenu>>,
     pub send_menu_sub: Option<Subscription>,
-    /// Project-chip dropdown (recent projects + new project submenu).
-    pub project_chip_open: bool,
-    pub project_chip_menu: Option<Entity<PopupMenu>>,
-    pub project_chip_menu_sub: Option<Subscription>,
     /// Composer typeahead completion popover (`/` commands, `@` skills/agents).
     /// `None` when no trigger token is active at the caret. A pure render
     /// overlay — it never grabs focus, so the `InputState` keeps focus and the
@@ -512,14 +508,6 @@ pub struct ChatColumn {
     /// attachments these persist across submits (they track session-level tool
     /// activation); removing a chip deactivates the suite.
     pub active_browser_suites: Vec<manox_agent::engine::BrowserSuite>,
-    /// True while a native directory picker is open from the "Choose project" row.
-    /// Guards against the user submitting a message before the picker resolves
-    /// (which would make `set_project` a silent no-op once `messages` is non-empty).
-    pub project_picker_pending: bool,
-    /// Parent directory selected for "Create blank project"; waiting for name input.
-    pub blank_project_parent: Option<PathBuf>,
-    /// Input state for the blank project folder name overlay.
-    pub blank_project_name_input: Option<Entity<InputState>>,
     pub thread_sub: Option<Subscription>,
     /// Observes the foreground leaf store itself (beyond `thread_sub`'s
     /// events): a projection-only frame (mid-session `SetModel` →

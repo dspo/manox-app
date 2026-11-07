@@ -1,14 +1,15 @@
-//! FULL-WIRING regression for the project group menu's Steer row: clicking
-//! 新建会话 → Steer must land a NEW foreground session on the REAL
-//! workspace + AHP host.
+//! FULL-WIRING regression for the project group menu's 新建对话 row: clicking
+//! it must land the LAUNCHER with the group's project preselected — on the
+//! REAL workspace + AHP host — and mint nothing (design §3.3; the per-agent
+//! cascades retired from the menu, so this row is now the menu's one flat
+//! conversation entry).
 //!
 //! The regression class: the row's click closure used to rebuild the
 //! `&mut Window` through `dispatch::window_global().update(...)` — inside a
 //! click dispatch the window is already leased, so the re-entrant update
 //! fails as "window not found" (swallowed by `let _ =`), and the row did
-//! NOTHING: no session created, no conversation landing. The fix routes the
-//! click's own `&mut Window` through a plain workspace update, exactly like
-//! the sibling terminal/agent rows.
+//! NOTHING. The fix routes the click's own `&mut Window` through a plain
+//! workspace update, exactly like the sibling terminal/VS Code rows.
 //!
 //! Own test binary: the harness initializes process-global singletons (see
 //! `tests/common/mod.rs` — one `#[gpui::test]` per binary), and this one
@@ -96,10 +97,10 @@ async fn steer_row_click_lands_a_new_thread(cx: &mut TestAppContext) {
         .debug_bounds("chrome-group-menu")
         .expect("the group menu paints");
 
-    // The mouse flow the menu is built for: hover the 新建会话 row (the
-    // first row; panel p_1 padding + half a 26px row) to open its submenu,
-    // then click the submenu's first row — Steer — anchored to the row's
-    // right.
+    // The mouse flow the menu is built for: the 新建对话 row is the menu's
+    // first row for a real project group (the Chats bucket's 新建项目 row is
+    // not in play here) — a flat row, no submenu; panel p_1 padding + half a
+    // 26px row.
     let row0 = gpui::point(
         menu.origin.x + menu.size.width / 2.,
         menu.origin.y + px(17.),
@@ -109,26 +110,29 @@ async fn steer_row_click_lands_a_new_thread(cx: &mut TestAppContext) {
         cx.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
     }
-    let steer = gpui::point(menu.origin.x + menu.size.width + px(60.), row0.y);
-    visual.simulate_click(steer, gpui::Modifiers::default());
+    visual.simulate_click(row0, gpui::Modifiers::default());
     for _ in 0..3 {
         cx.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
     }
 
-    let mut after = None;
+    // The row lands the LAUNCHER with the group's project preselected and
+    // mints nothing: the foreground stays pinned.
+    let mut landed = false;
     for _ in 0..PARK_ROUNDS {
         cx.run_until_parked();
-        after = cx.update(|cx| ws.read(cx).diagnostic_foreground_session(cx));
-        if after.as_deref() != Some(before.as_str()) {
+        if cx.update(|cx| ws.read(cx).diagnostic_view_mode_is_launcher()) {
+            landed = true;
             break;
         }
         std::thread::sleep(PARK_STEP);
     }
-    assert_ne!(
-        Some(before),
-        after,
-        "the Steer menu row must start a new foreground thread"
+    assert!(landed, "the 新建对话 menu row must land the launcher");
+    assert_eq!(
+        cx.update(|cx| ws.read(cx).diagnostic_foreground_session(cx))
+            .as_deref(),
+        Some(before.as_str()),
+        "the menu row mints nothing — the foreground stays pinned"
     );
     manox_agent::thread_store::drop_global_for_test();
     agent_ui::dispatch::clear_globals_for_test();

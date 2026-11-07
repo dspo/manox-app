@@ -39,7 +39,7 @@ async fn the_completion_anchor_rides_the_live_caret_geometry(cx: &mut TestAppCon
         visual.update(|window, cx| window.draw(cx).clear(cx));
     }
 
-    let geo = workspace.read_with(&mut visual.cx, |ws, cx| {
+    let geo = workspace.read_with(&visual.cx, |ws, cx| {
         ws.diagnostic_chat_input(cx)
             .read(cx)
             .prepaint_caret_geometry()

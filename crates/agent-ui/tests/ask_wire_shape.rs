@@ -325,14 +325,13 @@ async fn the_ask_wire_parses_and_folds_into_the_interactive_card(cx: &mut TestAp
     assert_eq!(ask.questions[0].header, "编辑器面板");
     assert_eq!(ask.questions[0].question, "编辑器面板用什么方案？");
     assert!(!ask.questions[0].multi_select);
-    assert_eq!(
+    assert!(
         ask.questions[0]
             .options
             .iter()
             .find(|o| o.label == "Monaco")
             .expect("Monaco survives the fold")
-            .recommended,
-        true
+            .recommended
     );
     assert!(
         ask.questions[1].multi_select,

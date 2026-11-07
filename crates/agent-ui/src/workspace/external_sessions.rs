@@ -55,11 +55,6 @@ pub(crate) struct ExternalSessionRecord {
     /// restores; the OSC stream's default, never the rename editor's concern.
     pub default_label: String,
     pub svg: &'static str,
-    /// The project directory the session was launched in — the sidebar
-    /// group it merges into; `None` → the loose Chats bucket. The
-    /// container's project association for this home (pure app memory,
-    /// §2.2 — the projection reads the record field directly).
-    pub project: Option<PathBuf>,
     pub created_at: i64,
     pub view: gpui::Entity<steer_ghostty::GhosttyView>,
     /// The CLI agent's session handle — the owner's independent clone for
@@ -91,7 +86,6 @@ pub struct ExternalSessionLaunch<'a> {
     pub cx_session_id: String,
     pub label: String,
     pub svg: &'static str,
-    pub project: Option<PathBuf>,
     /// The directory the terminal was spawned in: the D10 attrs snapshot's
     /// cwd until the program claims one via OSC 7.
     pub cwd: PathBuf,
@@ -105,21 +99,21 @@ impl Workspace {
     /// focused, so the TUI takes keyboard input immediately. The record
     /// itself (identity, attrs snapshot, the PTY subscriptions) lands
     /// through the unified container entry; what remains here is the
-    /// foreground hand-off.
+    /// foreground hand-off. Returns the container id (the routing string the
+    /// launcher's membership write keys on).
     pub fn spawn_external_session(
         &mut self,
         launch: ExternalSessionLaunch<'_>,
         view: gpui::Entity<steer_ghostty::GhosttyView>,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
-    ) {
+    ) -> String {
         let id = self.create_container(
             container::ContainerSeed::External(container::ExternalContainerSeed {
                 agent_id: launch.agent_id,
                 cx_session_id: launch.cx_session_id,
                 label: launch.label,
                 svg: launch.svg,
-                project: launch.project,
                 cwd: launch.cwd.clone(),
                 view: view.clone(),
                 handle: launch.handle,
@@ -131,10 +125,13 @@ impl Workspace {
         // column — so the hand-off drops it (and its refresh poll with it);
         // `open_subagent_stream` is the only way back.
         self.subagent_stream = None;
-        self.active_external = Some(id);
+        self.active_external = Some(id.clone());
         self.view_mode = super::ViewMode::ExternalSession;
         focus_terminal(&view, window, cx);
+        // The sidebar row wears the selection: the terminal owns the column.
+        crate::chrome_assembly::select_container(&id, cx);
         cx.notify();
+        id
     }
 
     /// Bring a parked session back into the main column (the sidebar row's
@@ -246,18 +243,25 @@ impl Workspace {
 
     /// The sidebar rows: one per live session, stamped with the external
     /// kind (brand-mark leading slot, close-session menu on the chrome
-    /// side) and the project grouping key. The `alive` belt (A8): a record
-    /// whose death bit flipped but whose teardown (the event subscription
-    /// → the ONE teardown) has not landed yet projects no row — the
-    /// Died→teardown window stays invisible in the sidebar.
+    /// side) and the group face from the registry membership — the
+    /// container's project id + that project's display name, or the loose
+    /// bucket when the launch carried no project. The `alive` belt (A8): a
+    /// record whose death bit flipped but whose teardown (the event
+    /// subscription → the ONE teardown) has not landed yet projects no row —
+    /// the Died→teardown window stays invisible in the sidebar.
     pub(crate) fn external_session_rows(&self) -> Vec<SessionRow> {
         self.externals
             .iter()
             .filter(|s| s.alive)
             .map(|s| {
-                let project = s.project.as_ref().map(|p| p.to_string_lossy().to_string());
-                let workspace =
-                    crate::sidebar_projection::project_label(project.as_deref().unwrap_or(""));
+                let member = crate::projects::membership_of(&s.id)
+                    .and_then(|project_id| crate::projects::get_project(&project_id))
+                    .map(|project| {
+                        let name = crate::projects::display_name(&project);
+                        (Some(project.id), name)
+                    });
+                let (project, workspace) = member
+                    .unwrap_or_else(|| (None, crate::sidebar_projection::loose_bucket_name()));
                 SessionRow {
                     id: s.id.clone(),
                     // The chip shows the uuid SEGMENT (the row id's

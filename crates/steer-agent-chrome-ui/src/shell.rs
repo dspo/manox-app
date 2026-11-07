@@ -21,8 +21,8 @@ use crate::main_surface::MainSurfaceHandle;
 use crate::panel::{PanelSlot, PanelSurface};
 use crate::right_pane::{RightPane, ToolTabFactory};
 use crate::session_list::{
-    CustomizationRow, FixedRow, SessionGroup, SessionList, SessionRowData, SessionRowKind,
-    SessionStatus, SidebarGrouping,
+    CustomizationRow, DraggedRow, FixedRow, LOOSE_BUCKET_KEY, SessionGroup, SessionList,
+    SessionRowData, SessionRowKind, SessionStatus, SidebarGrouping,
 };
 use crate::theme::{
     CARD_BG, CARD_BORDER, FG_DIM, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
@@ -39,11 +39,12 @@ pub struct SessionRow {
     /// The id chip's short form (host-supplied; see SessionRowData).
     pub short_id: String,
     pub title: String,
-    /// Workspace (project) display name — the grouping key.
+    /// The group's display name — the picker's sub-line and the loose
+    /// bucket's label.
     pub workspace: String,
-    /// The group's project directory (the host's launch target for the
-    /// project menu); `None` on no-project rows — the menu falls back to the
-    /// host's cwd rules and hides the remove-project row.
+    /// The row's group key: the project id when the row carries a project
+    /// membership, `None` on the loose bucket ([`session_list::
+    /// LOOSE_BUCKET_KEY`]) — the shell files the row by it.
     pub project: Option<String>,
     pub status: SessionStatus,
     /// What the row is (thread vs live external session) — the leading slot
@@ -124,14 +125,17 @@ pub type HookOnUnit = Box<dyn Fn(&mut Window, &mut App)>;
 pub type HookOnSetTag = Box<dyn Fn(&str, Option<String>, &mut Window, &mut App)>;
 /// External-session title write-back (row id, new title).
 pub type HookOnSetTitle = Box<dyn Fn(&str, String, &mut Window, &mut App)>;
-/// Host-built group menu (state key, the group's project path when it is a
-/// workspace group, open position) → the menu entity to mount, or `None` to
+/// Host-built group menu (state key, the group's project id when it is a
+/// project group, open position) → the menu entity to mount, or `None` to
 /// open nothing. The chrome supplies the surface (anchor + dismissal); the
 /// content is host semantics — the project actions are not the chrome's to
 /// invent.
 pub type HookOnGroupMenu = Box<
     dyn Fn(&str, Option<&str>, gpui::Point<Pixels>, &mut Window, &mut App) -> Option<MenuEntity>,
 >;
+/// Row-onto-project write-back (row id, project id — the row menu's 移动到
+/// 项目 pick).
+pub type HookOnRowProject = Box<dyn Fn(&str, &str, &mut Window, &mut App)>;
 /// Group-order write-back (the full key list, in the user's drag order). The
 /// host persists it; the chrome never learns where the order lives.
 pub type HookOnGroupOrder = Box<dyn Fn(&[String], &mut App)>;
@@ -203,10 +207,46 @@ pub struct HostHooks {
     /// host retitles its record — the sidebar row and the main-column
     /// titlebar both read it. Absent → the item fires nothing.
     pub on_set_external_title: Option<HookOnSetTitle>,
+    /// Open the create-project dialog (the sidebar footer's ＋ 新建项目
+    /// row). The host owns the dialog entity; absent → the footer row does
+    /// not render at all (a host without a project surface owes no fake
+    /// affordance).
+    pub on_new_project: Option<HookOnUnit>,
+    /// The group header's hover ＋ (the group key): the host's
+    /// new-conversation entry preselecting that group's project. Absent →
+    /// the ＋ does not render.
+    pub on_group_new: Option<HookOnId>,
+    /// A row dropped on a group (group key, row id — the membership
+    /// gesture): the host writes the membership, the next snapshot re-files
+    /// the row. Absent → rows are not drag sources at all.
+    pub on_drop_row_to_group: Option<HookOnRowGroup>,
+    /// The project list the row menu's 移动到项目… submenu offers: (project
+    /// id, display name) pairs in display order. Absent → the submenu does
+    /// not render.
+    pub project_list: Option<HookQuery<Vec<(String, String)>>>,
+    /// The 移动到项目 pick (row id, project id). Absent → the submenu is
+    /// inert and does not render.
+    pub on_move_row_to_project: Option<HookOnRowProject>,
+    /// The 移出项目 pick (row id): detach from its project — the row falls
+    /// to the loose bucket. Absent → the item does not render.
+    pub on_remove_row_from_project: Option<HookOnId>,
 }
 
 /// Batch-ids callback (the selection bar's archive commit).
 pub type HookOnIds = Box<dyn Fn(&[String], &mut Window, &mut App)>;
+/// Row-onto-group callback (group key, row id — the membership gesture).
+pub type HookOnRowGroup = Box<dyn Fn(&str, &str, &mut Window, &mut App)>;
+
+/// The membership menu rows' payload (bundled — the call would otherwise
+/// arc past clippy's argument ceiling). See [`Shell::membership_menu_rows`].
+struct MembershipMenuRows {
+    row_id: String,
+    member_of: Option<String>,
+    projects: Vec<(String, String)>,
+    can_move: bool,
+    can_remove: bool,
+    shell: gpui::Entity<Shell>,
+}
 
 /// Everything the shell needs from its host at construction.
 pub struct ShellConfig {
@@ -261,13 +301,17 @@ pub struct Shell {
     /// Group (project) display order: the persisted result of drag
     /// reordering; unlisted groups trail in default order.
     group_order: Vec<String>,
-    /// Durable folder heads (project key + display name) the host
-    /// committed. A folder renders even when it holds no rows — archiving
-    /// every conversation never dissolves the project.
-    folder_heads: Vec<(String, String)>,
+    /// Durable project heads (project id + display name + root paths) the
+    /// host committed. A project renders even when it holds no rows —
+    /// archiving every conversation never dissolves it.
+    folder_heads: Vec<(String, String, Vec<String>)>,
     /// Live group-drag drop marker (dragged, target, before-edge?); drives
     /// the insertion line, cleared when the drag ends.
     group_drag_marker: Option<(String, String, bool)>,
+    /// The group key a ROW drag currently hovers (the header's drop
+    /// highlight); cleared by the root's capture-phase handler between
+    /// groups and on drop.
+    row_drag_marker: Option<String>,
     /// The hovered row id (marquee + title-weight trigger), mirrored from
     /// the list's hover events.
     hovered_row: Option<String>,
@@ -324,6 +368,10 @@ pub struct Shell {
     /// nav in the sidebar, detail in the main card). `None` is the normal
     /// conversation face.
     pub sidebar_surface: Option<gpui::AnyView>,
+    /// Host-injected modal dialog (the project dialog's state machine rides
+    /// here). Rendered as a dimmed full-window overlay with the view centered
+    /// in a card; the view itself owns its dismissal. `None` = no dialog.
+    pub dialog_surface: Option<gpui::AnyView>,
     /// The app brand mark factory (the titlebar avatar slot's content).
     brand: Option<Arc<dyn Fn() -> gpui::AnyElement>>,
     /// Sidebar grouping mode (the sort button's toggle).
@@ -372,6 +420,16 @@ impl Shell {
         cx.notify();
     }
 
+    /// Mount/unmount the modal dialog overlay (the host-side seam of the
+    /// project dialog; the view carries its own state and dismissal).
+    pub fn set_dialog_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        let changed = self.dialog_surface.is_some() != surface.is_some();
+        self.dialog_surface = surface;
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let right = cx.new(|_| RightPane::new(config.tool_kinds));
         let panel = config.panel_surface.map(|surface| PanelSlot {
@@ -389,6 +447,7 @@ impl Shell {
             group_order: Vec::new(),
             folder_heads: Vec::new(),
             group_drag_marker: None,
+            row_drag_marker: None,
             hovered_row: None,
             row_focus: HashMap::new(),
             title_box_w: Rc::new(RefCell::new(HashMap::new())),
@@ -407,6 +466,7 @@ impl Shell {
             sidebar_pinned_was: true,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
             sidebar_surface: None,
+            dialog_surface: None,
             brand: config.brand,
             grouping: SidebarGrouping::default(),
             sidebar_filter_open: false,
@@ -451,6 +511,21 @@ impl Shell {
         if let Some(on_select) = &self.hooks.on_select {
             on_select(id, window, cx);
         }
+    }
+
+    /// The programmatic face of [`Self::select`]: the highlight only — no
+    /// `on_select` fires. The host pushes this from its own open/attach/spawn
+    /// paths, where routing back through the select hook would re-enter the
+    /// very path that pushed it. Row clicks still go through
+    /// [`Self::select`].
+    pub fn set_active(&mut self, id: &str) {
+        self.active = Some(id.to_string());
+    }
+
+    /// No container owns the main column (the launcher is up): no row wears
+    /// the selection.
+    pub fn clear_active(&mut self) {
+        self.active = None;
     }
 
     /// The New button / ⌘N: default behavior is the empty state (no active
@@ -511,6 +586,14 @@ impl Shell {
         }
     }
 
+    /// The sidebar footer's ＋ 新建项目 row: open the host's project dialog.
+    /// No-op without a host face (the row does not render there either).
+    pub fn new_project(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(hook) = &self.hooks.on_new_project {
+            hook(window, cx);
+        }
+    }
+
     /// The brand-mark element for the titlebar's avatar slot, rebuilt for
     /// this frame (`None` → the titlebar renders its generic fallback).
     pub fn brand_element(&self) -> Option<gpui::AnyElement> {
@@ -522,6 +605,7 @@ impl Shell {
     /// where `on_drop` never fired) so it cannot resurface on the way back.
     pub fn toggle_grouping(&mut self) {
         self.group_drag_marker = None;
+        self.row_drag_marker = None;
         self.grouping = if self.grouping.is_time() {
             SidebarGrouping::Workspace
         } else {
@@ -594,6 +678,36 @@ impl Shell {
         }
     }
 
+    /// Row-drag drop highlight update (the group slot under the pointer).
+    pub fn set_row_drag_marker(&mut self, target: String) {
+        if self.row_drag_marker.as_deref() != Some(target.as_str()) {
+            self.row_drag_marker = Some(target);
+        }
+    }
+
+    /// Clear the row-drag highlight (capture-phase fallback + drop).
+    pub fn clear_row_drag_marker(&mut self) {
+        self.row_drag_marker = None;
+    }
+
+    /// The group header's ＋: the host's new-conversation entry with that
+    /// group's project preselected. No-op without a host face.
+    pub fn new_for_group(&mut self, key: &str, window: &mut Window, cx: &mut App) {
+        if let Some(hook) = &self.hooks.on_group_new {
+            hook(key, window, cx);
+        }
+    }
+
+    /// A row released on a group (the membership gesture): the host writes
+    /// the membership, the highlight clears, the next snapshot re-files the
+    /// row. No-op without a host face.
+    pub fn drop_row_to_group(&mut self, group: &str, row: &str, window: &mut Window, cx: &mut App) {
+        self.row_drag_marker = None;
+        if let Some(hook) = &self.hooks.on_drop_row_to_group {
+            hook(group, row, window, cx);
+        }
+    }
+
     /// Host-seeded group order (the persisted manual order with the
     /// unrecorded defaults resolved); `move_group` re-orders within it and
     /// the host re-seeds the same list on the next snapshot.
@@ -601,17 +715,18 @@ impl Shell {
         self.group_order = keys;
     }
 
-    /// Host-seeded folder skeleton: ordered (project key, display name)
-    /// pairs, one per durable project object — empty included.
-    pub fn set_folder_heads(&mut self, heads: Vec<(String, String)>) {
+    /// Host-seeded project skeleton: ordered (project id, display name,
+    /// root paths) triples, one per durable project object — empty included.
+    pub fn set_folder_heads(&mut self, heads: Vec<(String, String, Vec<String>)>) {
         self.folder_heads = heads;
     }
 
     /// Group reorder: insert `dragged` before/after `target`'s edge
     /// (same-key / same-place drops are ignored). Committing clears the
     /// marker and hands the full new key list to
-    /// [`HostHooks::on_group_order`]. A no-op in time grouping — drag order
-    /// is a workspace-mode concept only.
+    /// [`HostHooks::on_group_order`]. Only PROJECT groups participate — the
+    /// loose bucket has no position of its own — and a no-op in time
+    /// grouping: drag order is a workspace-mode concept only.
     pub fn move_group(&mut self, dragged: &str, target: &str, before: bool, cx: &mut App) {
         self.group_drag_marker = None;
         if dragged == target || self.grouping.is_time() {
@@ -621,11 +736,12 @@ impl Shell {
         // (unrecorded groups trail in default order), then move, so a first
         // drag never loses the existing relative order.
         let all: Vec<&SessionRow> = self.sessions.iter().collect();
-        let current: Vec<String> = self
-            .workspace_groups(&all)
-            .iter()
-            .map(|g| g.key.clone())
-            .collect();
+        let groups = self.workspace_groups(&all);
+        let is_project = |key: &str| groups.iter().any(|g| g.key == key && g.project.is_some());
+        if !is_project(dragged) || !is_project(target) {
+            return;
+        }
+        let current: Vec<String> = groups.iter().map(|g| g.key.clone()).collect();
         if self.group_order.is_empty() {
             self.group_order = current.clone();
         }
@@ -674,18 +790,35 @@ impl Shell {
         let Some(sess) = self.sessions.iter().find(|s| s.id == id) else {
             return;
         };
+        // The row's current membership key (its group's project id) — the
+        // 移出项目 gate and the submenu's own entry filter both read it.
+        let member_of = sess.project.clone();
+        // The host faces for the membership rows, resolved HERE (open_row_menu
+        // holds the shell lease; the menu build must not re-read the shell).
+        let (move_projects, can_move, can_remove) = (
+            self.hooks
+                .project_list
+                .as_ref()
+                .map(|list| list(cx))
+                .unwrap_or_default(),
+            self.hooks.on_move_row_to_project.is_some(),
+            self.hooks.on_remove_row_from_project.is_some(),
+        );
         // The external-session branch: 关闭会话 (the hook reaps the row AND
         // closes its tab), 重命名 (retitle the host record — the row and the
         // main-column titlebar follow) + copy id. No thread semantics on a
         // PTY.
         if let crate::session_list::SessionRowKind::External { .. } = sess.kind {
             let this = cx.entity();
+            let shell = this.clone();
             let this_rename = this.clone();
             let id_close = id.to_string();
             let id_rename = id.to_string();
             let id_copy = id.to_string();
-            let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
-                menu.max_w(gpui::px(220.))
+            let id_row = id.to_string();
+            let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+                let menu = menu
+                    .max_w(gpui::px(220.))
                     .item(
                         PopupMenuItem::new(steer_i18n::t("sidebar-close-external"))
                             .icon(crate::theme::icons::CLOSE)
@@ -707,17 +840,27 @@ impl Shell {
                                     this.begin_title_edit(id_rename.clone(), window, cx);
                                 });
                             }),
-                    )
-                    .separator()
-                    .item(
-                        PopupMenuItem::new(steer_i18n::t("chrome-row-copy-id"))
-                            .icon(crate::theme::icons::COPY)
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    id_copy.clone(),
-                                ));
-                            }),
-                    )
+                    );
+                let menu = Self::membership_menu_rows(
+                    menu,
+                    window,
+                    cx,
+                    MembershipMenuRows {
+                        row_id: id_row,
+                        member_of,
+                        projects: move_projects,
+                        can_move,
+                        can_remove,
+                        shell,
+                    },
+                );
+                menu.separator().item(
+                    PopupMenuItem::new(steer_i18n::t("chrome-row-copy-id"))
+                        .icon(crate::theme::icons::COPY)
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(id_copy.clone()));
+                        }),
+                )
             });
             let sub = cx.subscribe(&menu, |this, _menu, _: &gpui::DismissEvent, cx| {
                 this.close_row_menu(cx);
@@ -731,6 +874,7 @@ impl Shell {
         let archived = sess.archived;
         let has_tag = sess.tag.is_some();
         let this = cx.entity();
+        let shell = this.clone();
 
         let id_pin = id.to_string();
         let id_pin2 = id_pin.clone();
@@ -740,13 +884,14 @@ impl Shell {
         let id_tag_clear = id.to_string();
         let id_copy = id.to_string();
         let id_select = id.to_string();
+        let id_row = id.to_string();
         let this_pin = this.clone();
         let this_archive = this.clone();
         let this_select = this.clone();
         let this_tag = this.clone();
         let this_tag2 = this.clone();
 
-        let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
+        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
             let menu = menu
                 .max_w(gpui::px(220.))
                 .item(
@@ -837,6 +982,19 @@ impl Shell {
             } else {
                 menu
             };
+            let menu = Self::membership_menu_rows(
+                menu,
+                window,
+                cx,
+                MembershipMenuRows {
+                    row_id: id_row,
+                    member_of,
+                    projects: move_projects,
+                    can_move,
+                    can_remove,
+                    shell,
+                },
+            );
             menu.separator().item(
                 PopupMenuItem::new(steer_i18n::t("chrome-row-copy-id"))
                     .icon(crate::theme::icons::COPY)
@@ -853,6 +1011,83 @@ impl Shell {
         self.row_menu_sub = Some(sub);
         self.row_menu = Some((id.to_string(), anchor, menu));
         cx.notify();
+    }
+
+    /// The row menu's membership rows, shared by both row kinds: 移动到项目…
+    /// (the host's project list, the row's own project dropped) and 移出项目
+    /// (only on a row that currently carries a membership). The host faces
+    /// are resolved by the CALLER — the build runs inside the menu entity's
+    /// context while the shell is leased, so nothing may read the shell
+    /// here; the handle is only for the click closures, which fire after
+    /// the lease ends. Absent faces render nothing, the same contract the
+    /// archive/tag rows keep.
+    fn membership_menu_rows(
+        menu: gpui_component::menu::PopupMenu,
+        window: &mut Window,
+        cx: &mut gpui::Context<gpui_component::menu::PopupMenu>,
+        rows: MembershipMenuRows,
+    ) -> gpui_component::menu::PopupMenu {
+        use gpui_component::menu::PopupMenuItem;
+        let MembershipMenuRows {
+            row_id,
+            member_of,
+            projects,
+            can_move,
+            can_remove,
+            shell,
+        } = rows;
+        let menu = if can_move && !projects.is_empty() {
+            // The submenu builder is an Fn — every capture must be per-call
+            // owned, never moved out of the loop's state.
+            menu.submenu(steer_i18n::t("project-move-to"), window, cx, {
+                let row_id = row_id.clone();
+                let member_of = member_of.clone();
+                let shell = shell.clone();
+                move |submenu, _w, _cx| {
+                    let mut submenu = submenu;
+                    for (project_id, name) in projects.iter() {
+                        if member_of.as_deref() == Some(project_id.as_str()) {
+                            continue;
+                        }
+                        let project_id = project_id.clone();
+                        let name = name.clone();
+                        let this = shell.clone();
+                        let row_id = row_id.clone();
+                        submenu = submenu.item(PopupMenuItem::new(name).on_click(
+                            move |_, window, cx| {
+                                this.update(cx, |this, cx| {
+                                    if let Some(hook) = &this.hooks.on_move_row_to_project {
+                                        hook(&row_id, &project_id, window, cx);
+                                    }
+                                    this.close_row_menu(cx);
+                                });
+                            },
+                        ));
+                    }
+                    submenu
+                }
+            })
+        } else {
+            menu
+        };
+        if can_remove && member_of.is_some() {
+            menu.item(
+                PopupMenuItem::new(steer_i18n::t("project-move-out"))
+                    // The loose-bucket glyph — the destination the pick sends
+                    // the row to.
+                    .icon(crate::theme::icons::CIRCLE)
+                    .on_click(move |_, window, cx| {
+                        shell.update(cx, |this, cx| {
+                            if let Some(hook) = &this.hooks.on_remove_row_from_project {
+                                hook(&row_id, window, cx);
+                            }
+                            this.close_row_menu(cx);
+                        });
+                    }),
+            )
+        } else {
+            menu
+        }
     }
 
     // ── batch selection ───────────────────────────────────────────────
@@ -1357,34 +1592,33 @@ impl Shell {
         (self.fixed_rows.clone(), groups, self.customizations.clone())
     }
 
-    /// Workspace grouping (the default): one group per project display name,
-    /// keyed by the project path (the loose bucket keys by its display name —
-    /// "Chats" — which is also its drag/persist identity), ordered by the
-    /// recorded drag order, unrecorded groups trailing. The group's project
-    /// path rides the rows (the host stamps every row of a group with it).
-    ///
-    /// Rows merge into heads by KEY, never by display name: an aliased
-    /// folder absorbs its rows by path (a name match would leave an empty
-    /// alias head beside a basename-headed row bucket), and two paths that
-    /// share a basename stay two groups.
+    /// Workspace grouping (the default): one group per project, keyed by the
+    /// project id (the loose bucket keys by [`session_list::
+    /// LOOSE_BUCKET_KEY`]), ordered by the recorded drag order, unrecorded
+    /// groups trailing. The row's `project` carries its membership key; the
+    /// loose bucket's display name rides `workspace`.
     fn workspace_groups(&self, sessions: &[&SessionRow]) -> Vec<SessionGroup> {
-        // The durable skeleton first: every committed folder renders, empty
-        // or not; rows of the same project path merge into them.
+        // The durable skeleton first: every committed project renders, empty
+        // or not; rows of the same project merge into it.
         let mut groups: Vec<SessionGroup> = self
             .folder_heads
             .iter()
-            .map(|(key, name)| SessionGroup {
+            .map(|(key, name, roots)| SessionGroup {
                 name: name.clone(),
                 key: key.clone(),
                 collapsed: self.collapsed.iter().any(|k| k == key),
                 project: Some(key.clone()),
+                roots: roots.clone(),
                 rows: Vec::new(),
                 hidden: 0,
                 expanded: false,
             })
             .collect();
         for s in sessions {
-            let key = s.project.clone().unwrap_or_else(|| s.workspace.clone());
+            let key = s
+                .project
+                .clone()
+                .unwrap_or_else(|| LOOSE_BUCKET_KEY.to_string());
             let collapsed = self.collapsed.iter().any(|k| k == &key);
             if let Some(g) = groups.iter_mut().find(|g| g.key == key) {
                 g.rows.push(s.row_data());
@@ -1395,6 +1629,7 @@ impl Shell {
                     key,
                     collapsed,
                     project: s.project.clone(),
+                    roots: Vec::new(),
                     rows: vec![s.row_data()],
                     hidden: 0,
                     expanded: false,
@@ -1445,6 +1680,7 @@ impl Shell {
                     key: key.to_string(),
                     collapsed: self.collapsed.iter().any(|k| k == key),
                     project: None,
+                    roots: Vec::new(),
                     rows: Vec::new(),
                     hidden: 0,
                     expanded: false,
@@ -1613,6 +1849,8 @@ impl Shell {
 impl gpui::Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let picker_open = self.session_picker_open;
+        // The modal dialog surface (the host-owned project dialog).
+        let dialog = self.dialog_surface.clone();
         // Row-menu anchor snapshot (mounted on the deferred layer in window
         // space).
         let row_menu = self
@@ -1695,6 +1933,21 @@ impl gpui::Render for Shell {
                     }
                 },
             ))
+            // Row-drag fallback: the same capture-phase shape for the
+            // membership gesture's highlight (a pointer outside every group
+            // slot clears it).
+            .on_drag_move::<DraggedRow>(cx.listener(
+                |this, _: &gpui::DragMoveEvent<DraggedRow>, _w, cx| {
+                    if this.row_drag_marker.take().is_some() {
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_drop::<DraggedRow>(cx.listener(|this, _: &DraggedRow, _w, cx| {
+                if this.row_drag_marker.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .child(titlebar)
             .child(content)
             // Picker open: a full-window transparent capture layer; any
@@ -1724,6 +1977,24 @@ impl gpui::Render for Shell {
                         .offset(gpui::point(px(0.), px(4.)))
                         .child(titlebar::picker_panel(self, cx)),
                 ))
+            })
+            // The modal dialog: a full-window dimmed overlay with the view
+            // centered in a card. The card occludes (no click-through to the
+            // shell beneath); dismissal is the view's own business (the
+            // project dialog's ✕ / 取消 / Escape) — the chrome invents no
+            // backdrop-click semantics.
+            .when_some(dialog, |this, surface| {
+                this.child(
+                    div()
+                        .id("dialog-overlay")
+                        .absolute()
+                        .inset_0()
+                        .bg(crate::theme::DIALOG_SCRIM)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(div().id("dialog-card").occlude().child(surface)),
+                )
             })
             // Row menu (kebab / right-click): an anchored floating layer;
             // PopupMenu handles its own focus and outside-click dismissal.
@@ -1913,6 +2184,16 @@ impl Shell {
             this.new_session(w, cx);
             cx.notify();
         });
+        // The footer's project entry rides the host hook; a host without the
+        // face gets no row at all (same contract as the group menu's None).
+        let on_new_project = self.hooks.on_new_project.is_some().then(|| {
+            let cb = cx.listener(|this, _: &ClickEvent, w, cx| {
+                this.new_project(w, cx);
+                cx.notify();
+            });
+            let cb: crate::session_list::OnUnit = std::rc::Rc::new(move |e, w, cx| cb(e, w, cx));
+            cb
+        });
         let on_hover_row = cx.listener(|this, (id, entered): &(String, bool), _w, cx| {
             // A leave retracts only its OWN row: crossing directly from one
             // row into the next delivers the new row's enter and the old
@@ -1976,6 +2257,37 @@ impl Shell {
                 cx.notify();
             },
         );
+        // The group header's ＋ and the row-drag membership drop ride the
+        // host hooks; a host without the faces gets no controls (the same
+        // contract as the group menu's None).
+        let on_group_new = self.hooks.on_group_new.is_some().then(|| {
+            let listener = cx.listener(|this, key: &String, w, cx| {
+                this.new_for_group(key, w, cx);
+                cx.notify();
+            });
+            let cb: crate::session_list::OnGroupNew =
+                std::rc::Rc::new(move |key, w, cx| listener(&key.to_string(), w, cx));
+            cb
+        });
+        let (on_drop_row, on_row_drag_over) = if self.hooks.on_drop_row_to_group.is_some() {
+            let drop_listener = cx.listener(|this, (group, row): &(String, String), w, cx| {
+                this.drop_row_to_group(group, row, w, cx);
+                cx.notify();
+            });
+            let over_listener = cx.listener(|this, group: &String, _w, cx| {
+                this.set_row_drag_marker(group.clone());
+                cx.notify();
+            });
+            let drop: crate::session_list::OnRowToGroup =
+                std::rc::Rc::new(move |group: &String, row: &String, w, cx| {
+                    drop_listener(&(group.clone(), row.clone()), w, cx)
+                });
+            let over: crate::session_list::OnRowDragOver =
+                std::rc::Rc::new(move |group, w, cx| over_listener(&group.clone(), w, cx));
+            (Some(drop), Some(over))
+        } else {
+            (None, None)
+        };
         let on_toggle_grouping = cx.listener(|this, _: &ClickEvent, _w, cx| {
             this.toggle_grouping();
             cx.notify();
@@ -2025,6 +2337,7 @@ impl Shell {
                 on_select: std::rc::Rc::new(move |id, w, cx| on_select(id, w, cx)),
                 on_toggle_group: std::rc::Rc::new(move |name, w, cx| on_toggle_group(name, w, cx)),
                 on_new: std::rc::Rc::new(move |e, w, cx| on_new(e, w, cx)),
+                on_new_project,
                 on_hover_row: std::rc::Rc::new(move |id, entered, w, cx| {
                     on_hover_row(&(id.clone(), entered), w, cx)
                 }),
@@ -2062,6 +2375,10 @@ impl Shell {
                     on_drag_move_group(&(dragged.clone(), target.clone(), before), w, cx)
                 }),
                 group_drag_marker: marker,
+                on_group_new,
+                on_drop_row,
+                on_row_drag_over,
+                row_drag_marker: self.row_drag_marker.clone(),
                 on_show_more: std::rc::Rc::new(move |key, w, cx| on_show_more(key, w, cx)),
                 selection,
                 on_selection_toggle: std::rc::Rc::new(move |id, w, cx| {

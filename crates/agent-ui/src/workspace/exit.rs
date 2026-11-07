@@ -1,20 +1,19 @@
 //! The `/exit` teardown sequence: stop everything this container owns, then
-//! archive it and land on a fresh container — the same end state as the
-//! sidebar's archive action, reached through a force path that also works
-//! while a turn is running.
+//! archive it and land on the launcher — the end state of every archive
+//! gesture, reached through a force path that also works while a turn is
+//! running.
 //!
 //! The sequence plays as progress notes in the conversation (the
 //! annotation-card face `add_info_message` writes), one beat per action so
 //! the teardown is legible: the subagent observation panels, the right
 //! pane's terminals + CLI-agent tabs + the dock's terminal, the container's
 //! own browser tabs (other containers' tabs survive — the reclaim is keyed,
-//! not a global nuke), and then the landing beat: ONE
-//! container teardown (archive mode — the `x-manox/teardown` command, whose
-//! host waterfall cancels the turn, interrupts the live runs, settles the
-//! background tasks and cascades the archive; the path's optimistic half has
-//! already emptied the container's UI) plus the fresh container through the
-//! unified creation entry. Notes pushed before the switch land on the
-//! archived container's journal; the closing pair lands on the fresh one.
+//! not a global nuke), and then the landing beat: ONE container teardown
+//! (archive mode — the `x-manox/teardown` command, whose host waterfall
+//! cancels the turn, interrupts the live runs, settles the background tasks
+//! and cascades the archive) and the launcher landing — no fresh sibling is
+//! minted (design §3.3). Notes pushed before the switch land on the archived
+//! container's journal; the closing word rides the window notification face.
 
 use super::*;
 
@@ -162,7 +161,7 @@ impl Workspace {
                     beat(cx).await;
                 }
             }
-            // ── the container teardown + the fresh container ──────────
+            // ── the container teardown + the launcher landing ──────────
             // One teardown (archive mode) through THE container archive
             // path — the command's host waterfall cancels the turn,
             // interrupts the live runs, settles the background tasks and
@@ -180,24 +179,14 @@ impl Workspace {
                 ws.archive_containers(std::slice::from_ref(&sid), cx);
             })
             .ok();
-            // The switch lands on the fresh container; the closing pair
-            // rides it. The attach is asynchronous (`new_container` returns
-            // the minted id without switching), so the pair is ADDRESSED to
-            // that id — a foreground-targeted note here would journal onto
-            // the container just archived.
-            let landed = this.update_in(cx, |ws, window, cx| ws.new_container(None, window, cx));
-            let fresh_sid = match landed {
-                Ok(sid) => sid,
-                Err(_) => {
-                    tracing::warn!("/exit: the workspace died before the fresh-thread landing");
-                    return;
-                }
-            };
-            this.update(cx, |ws, cx| {
-                ws.note_for(&fresh_sid, "exit-archived", &[], cx);
-                ws.note_for(&fresh_sid, "exit-bye", &[], cx);
-            })
-            .ok();
+            // The landing is the LAUNCHER (design §3.3): the archive completes
+            // on the pad, no fresh sibling container is minted. The closing
+            // word rides the window notification face — there is no fresh
+            // container left to journal the closing pair onto.
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.enter_launcher(None, false, window, cx);
+                window.push_notification(Notification::info(steer_i18n::t("exit-archived")), cx);
+            });
         })
         .detach();
     }
@@ -206,19 +195,6 @@ impl Workspace {
     /// face — durable on the current session's journal, displayed live).
     fn note(&mut self, key: &str, args: &[(&str, &str)], cx: &mut Context<Self>) {
         self.add_info_message(i18n::t_str(key, args).to_string(), cx);
-    }
-
-    /// The session-addressed note: same card, but journaled on `sid` rather
-    /// than the live foreground — for beats that must land on a thread the
-    /// workspace has not switched to yet.
-    fn note_for(&mut self, sid: &str, key: &str, args: &[(&str, &str)], cx: &mut Context<Self>) {
-        self.append_ui_note_for(
-            sid,
-            manox_agent::db::UiNoteKind::Notice,
-            i18n::t_str(key, args).to_string(),
-            cx,
-        );
-        cx.notify();
     }
 
     /// The running subagents' display names (task description, falling back

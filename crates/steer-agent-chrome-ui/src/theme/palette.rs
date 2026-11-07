@@ -45,6 +45,8 @@ pub const GRADIENT_TINT: Rgba = c(0x0069CC); // agentsGradient.tintColor = butto
 // ---- lines and strokes ----
 pub const BORDER: Rgba = c(0xE3E3E6); // baseline border (light gray)
 pub const CARD_BORDER: Rgba = ca(0x20202026); // foreground at 15% ≈ 38/255
+/// The modal dialog's dimming backdrop over the shell (foreground at 30%).
+pub const DIALOG_SCRIM: Rgba = ca(0x2020204D);
 
 // ---- text ----
 pub const FG: Rgba = c(0x202020); // foreground / editor.foreground
