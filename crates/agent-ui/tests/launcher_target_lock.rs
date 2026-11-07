@@ -75,7 +75,7 @@ fn the_preset_locks_and_the_bare_entry_lands_no_project(cx: &mut TestAppContext)
 
     // Leaving the launcher and re-entering bare resets both: no carried
     // target, no leftover lock.
-    cx.update_window(window, |_, window, cx| {
+    cx.update_window(window, |_, _, cx| {
         ws.update(cx, |ws, cx| ws.focus_conversation(cx));
     })
     .expect("window live");

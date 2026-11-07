@@ -16,7 +16,6 @@
 
 mod common;
 
-use agent_ui::Workspace;
 use agent_ui::launcher::LauncherTarget;
 use gpui::{AppContext as _, TestAppContext};
 

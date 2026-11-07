@@ -191,7 +191,7 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     // A foreign container's membership (the keyed-prune witness — it names
     // no container that dies here).
     let foreign_member_key = "external:codex:membership-survivor";
-    agent_ui::projects::set_membership(&foreign_member_key, &project.id);
+    agent_ui::projects::set_membership(foreign_member_key, &project.id);
     assert_eq!(
         agent_ui::projects::membership_of(&row2).as_deref(),
         Some(project.id.as_str()),
