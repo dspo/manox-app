@@ -171,14 +171,27 @@ impl crate::Workspace {
     /// either leg, an unbound foreground store, a failed agent spawn — a
     /// user-initiated send is never swallowed. `restore_text` fills only an
     /// empty composer, so a refund never clobbers input submitted during
-    /// the flight.
+    /// the flight. The re-entry carries the launcher's own target when the
+    /// attach tail already flipped the column away: a bare re-entry there
+    /// would land the no-project default OVER the user's pick (the submit
+    /// never cleared the launcher's target). Already on the launcher, the
+    /// bare entry is the no-op branch — the preset write would clear a
+    /// locked page's lock bit.
     pub(crate) fn refund_first_turn(
         &mut self,
         text: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.enter_launcher(None, false, window, cx);
+        let already = matches!(self.view_mode, ViewMode::Launcher);
+        let preset = if already {
+            None
+        } else {
+            self.launcher
+                .as_ref()
+                .map(|launcher| launcher.read(cx).snapshot().0)
+        };
+        self.enter_launcher(preset, false, window, cx);
         if let Some(launcher) = &self.launcher {
             launcher.update(cx, |state, cx| state.restore_text(text, window, cx));
         }
@@ -260,7 +273,9 @@ impl crate::Workspace {
 
     /// The terminal pill: no intermediate step — the existing standalone-PTY
     /// path (the retired group menu's 新建终端), rooted at the target. The
-    /// composer text is ignored.
+    /// composer text is left alone — the terminal takes no initial prompt,
+    /// and the draft stays in the launcher for the user's return (never
+    /// silently dropped).
     pub(crate) fn launch_terminal_from_launcher(
         &mut self,
         window: &mut Window,

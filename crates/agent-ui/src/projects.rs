@@ -618,22 +618,28 @@ fn persist(reg: &Registry) -> anyhow::Result<()> {
     persist_at(&path, reg)
 }
 
-/// The write half: parse-edit-serialize keeps every other key intact; a
-/// corrupt file is replaced rather than allowed to block the write (the same
-/// recovery the ui_language accessor uses). The swap is ATOMIC — serialize
-/// fully, write a sibling temp file, rename over the target — so a crash
-/// mid-write leaves the previous content intact instead of a truncated file
-/// the next load would treat as empty (silently wiping every project and
-/// membership alongside the runtime tables sharing the file). No
+/// The write half: parse-edit-serialize keeps every other key intact — the
+/// runtime tables share this file, so a file that cannot be read or parsed
+/// must NOT be rewritten from an empty doc (that would silently wipe every
+/// sibling key alongside the projects and membership). Such a write bails and
+/// the dirty flag keeps the retry channel alive (the next write re-attempts;
+/// a transient torn read heals instead of amplifying into data loss). A
+/// missing file is the first-boot shape — an empty doc is the whole truth
+/// there. The swap is ATOMIC — serialize fully, write a sibling temp file,
+/// rename over the target — so a crash mid-write leaves the previous content
+/// intact instead of a truncated file the next load would treat as empty. No
 /// cross-process lock: the file's other writer
 /// (`manox_agent::settings::save`) is itself unfile-locked, so locking on
 /// this side alone would not close the race — closing it needs an upstream
 /// counterpart.
 fn persist_at(path: &Path, reg: &Registry) -> anyhow::Result<()> {
-    let mut doc: toml::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| toml::from_str(&raw).ok())
-        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+    let mut doc: toml::Value = match std::fs::read_to_string(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            toml::Value::Table(toml::map::Map::new())
+        }
+        raw => toml::from_str(&raw.context("read settings.toml")?)
+            .context("settings.toml does not parse; refusing an empty-doc rewrite")?,
+    };
     let Some(table) = doc.as_table_mut() else {
         anyhow::bail!("settings.toml is not a table; refusing to overwrite it");
     };
@@ -1167,5 +1173,35 @@ mod tests {
 
         *TEST_SETTINGS_FILE.lock().expect("lock") = None;
         *REGISTRY.lock().expect("lock") = None;
+    }
+
+    /// A file that does not parse must never be rewritten from an empty doc:
+    /// the runtime tables share settings.toml, and the empty-doc start would
+    /// silently wipe them. persist_at refuses (the dirty-retry channel keeps
+    /// retrying), the corrupt bytes stay untouched; a missing file is the
+    /// first-boot shape and persists fine.
+    #[test]
+    fn persist_refuses_an_unparseable_file_instead_of_wiping_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = dir.path().join("settings.toml");
+        let corrupt = "ui_language = \"zh-CN\"\n[host\nport =";
+        std::fs::write(&settings, corrupt).expect("seed");
+        let (_dir_a, root_a) = temp_root("a");
+        let mut reg = Registry::default();
+        create_in(&mut reg, None, vec![root_a], None).expect("create");
+
+        assert!(
+            persist_at(&settings, &reg).is_err(),
+            "an unparseable file blocks the write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&settings).expect("read"),
+            corrupt,
+            "the corrupt file is never replaced"
+        );
+
+        let missing = dir.path().join("absent").join("settings.toml");
+        std::fs::create_dir(missing.parent().expect("parent")).expect("mkdir");
+        persist_at(&missing, &reg).expect("a missing file is the first-boot shape");
     }
 }
