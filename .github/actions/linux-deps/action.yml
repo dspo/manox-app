@@ -1,8 +1,8 @@
 name: linux deps
 description: >-
-  System libraries for a headless build of the app (GTK3/Wayland/WebKit2GTK for
-  wry, plus the X libs gpui links against) and `lld`, which the workflow selects
-  as the linker.
+  System libraries for a headless build of the app (Wayland + xkbcommon + ALSA +
+  fontconfig for gpui's Wayland-only Linux backend) and `lld`, which the
+  workflow selects as the linker.
 
 runs:
   using: composite
@@ -24,7 +24,7 @@ runs:
       with:
         path: /var/cache/apt/archives
         # Bump the version when the package list below changes.
-        key: apt-debs-${{ runner.os }}-v4
+        key: apt-debs-${{ runner.os }}-v5
         restore-keys: apt-debs-${{ runner.os }}-
 
     - name: Install system dependencies
@@ -35,15 +35,7 @@ runs:
           pkg-config
           libasound2-dev
           libfontconfig1-dev
-          libx11-dev
-          libxcb1-dev
-          libxrender-dev
-          libxrandr-dev
           libxkbcommon-dev
-          libxkbcommon-x11-dev
-          libxi-dev
-          libxcursor-dev
-          libxinerama-dev
           libwayland-dev
           # `tar -xJf` for the pinned zig toolchain that crates/steer-ghostty's
           # build script extracts (the Fedora twin lists the same tool).

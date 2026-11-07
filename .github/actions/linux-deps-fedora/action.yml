@@ -21,8 +21,6 @@ runs:
         dnf install -y
         gcc python3 file rpm-build openssl-devel zlib-devel
         pkgconf-pkg-config alsa-lib-devel
-        fontconfig-devel libX11-devel libxcb-devel libXrender-devel
-        libXrandr-devel libxkbcommon-devel libxkbcommon-x11-devel
-        libXi-devel libXcursor-devel libXinerama-devel
+        fontconfig-devel libxkbcommon-devel
         wayland-devel
         xz

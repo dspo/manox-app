@@ -1,9 +1,10 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
@@ -202,6 +203,60 @@ pub fn probe_result_key(provider_name: &str, model_id: &str, wire_api: WireApi) 
     format!("{}\0{}\0{}", provider_name, wire_api.display(), model_id)
 }
 
+/// Session id stand-in for one probe process: config headers templated with
+/// `{{ session_id }}` (e.g. `x-opencode-session`) render against it, so a
+/// session-aware endpoint receives the header shape it expects. Production
+/// pins the persisted session id per conversation; a probe run is its own
+/// one-session cohort.
+fn probe_session_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
+
+/// Replace every whitespace-tolerant `{{ session_id }}` interpolation with
+/// `session_id`. Other template constructs pass through untouched (the
+/// caller drops values that still look templated).
+fn render_session_id_template(value: &str, session_id: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("{{") {
+        let Some(end) = rest[start..].find("}}").map(|offset| start + offset + 2) else {
+            // Unclosed braces: keep the tail verbatim; the caller drops it.
+            out.push_str(rest);
+            return out;
+        };
+        let inner = rest[start + 2..end - 2].trim();
+        if inner == "session_id" {
+            out.push_str(&rest[..start]);
+            out.push_str(session_id);
+        } else {
+            out.push_str(&rest[..end]);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Render the merged provider/endpoint header map for the wire. Values
+/// carrying `{{ session_id }}` render against [`probe_session_id`]; any
+/// other Tera construct (filters, unknown variables, block syntax) drops
+/// the header — the same drop-on-unrenderable rule the runtime applies,
+/// and the probe cannot mint values it does not have.
+fn render_probe_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    headers
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let rendered = render_session_id_template(&value, probe_session_id());
+            if rendered.contains("{{") || rendered.contains("{%") {
+                None
+            } else {
+                Some((name, rendered))
+            }
+        })
+        .collect()
+}
+
 /// 解析 model_id，处理 [1m], [3m] 等后缀。复用 lib 的 `parse_model_context_suffix`，
 /// 仅取剥除后缀的 base id（上下文 token 数由 launch 路径使用）。
 fn resolve_api_model_id(model_id: &str) -> Cow<'_, str> {
@@ -290,7 +345,9 @@ pub fn do_probe(
                 }),
                 _ => unreachable!(),
             };
-            probe_endpoint(&url, &api_key, wire_api, auth, body)
+            // Same merged map the runtime uses for real traffic.
+            let config_headers = render_probe_headers(provider.request_headers(wire_api));
+            probe_endpoint(&url, &api_key, wire_api, auth, body, config_headers)
         }
         WireApi::Unavailable => Ok(ProbeCellResult {
             status: ProbeStatus::NotApplicable,
@@ -308,35 +365,67 @@ fn probe_endpoint(
     wire_api: WireApi,
     auth: CopilotAuth,
     body: serde_json::Value,
+    config_headers: BTreeMap<String, String>,
 ) -> Result<ProbeCellResult> {
     let start = Instant::now();
 
     runtime().block_on(async {
-        let mut request = http_client()
-            .post(url)
-            .header("Content-Type", "application/json")
-            .json(&body);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        // Config headers first; the probe's own headers are inserted after
+        // and therefore win same-name collisions — insert semantics,
+        // mirroring the runtime (its auth header must replace a same-name
+        // config entry, never be duplicated by it).
+        for (name, value) in config_headers {
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(&value),
+            ) {
+                headers.insert(name, value);
+            }
+        }
 
         // 认证头由协议决定：
         // - OpenAI 协议（responses/completions）统一使用 Authorization: Bearer
         // - Anthropic 协议默认使用 x-api-key，并补充 anthropic-version 头；
         //   若端点显式配置 copilot_auth: bearer_token，则改用 Bearer
-        request = match wire_api {
-            WireApi::Responses | WireApi::Completions => request.bearer_auth(api_key),
-            WireApi::Anthropic => {
-                let request = request.header("anthropic-version", "2023-06-01");
-                match auth {
-                    CopilotAuth::BearerToken => request.bearer_auth(api_key),
-                    CopilotAuth::ApiKey => request.header("x-api-key", api_key),
+        match wire_api {
+            WireApi::Responses | WireApi::Completions => {
+                if let Ok(value) = HeaderValue::from_str(&format!("Bearer {api_key}")) {
+                    headers.insert(header::AUTHORIZATION, value);
                 }
             }
-            WireApi::Unavailable => match auth {
-                CopilotAuth::BearerToken => request.bearer_auth(api_key),
-                CopilotAuth::ApiKey => request.header("x-api-key", api_key),
-            },
-        };
+            WireApi::Anthropic => {
+                headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+                let (name, value) = match auth {
+                    CopilotAuth::BearerToken => (
+                        header::AUTHORIZATION,
+                        HeaderValue::from_str(&format!("Bearer {api_key}")),
+                    ),
+                    CopilotAuth::ApiKey => (
+                        HeaderName::from_static("x-api-key"),
+                        HeaderValue::from_str(api_key),
+                    ),
+                };
+                if let Ok(value) = value {
+                    headers.insert(name, value);
+                }
+            }
+            // Never reached (do_probe routes Unavailable to NotApplicable
+            // before building a request); auth headers make no sense here.
+            WireApi::Unavailable => {}
+        }
 
-        let response = request.send().await.context("调用 API 失败")?;
+        let response = http_client()
+            .post(url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .context("调用 API 失败")?;
 
         let status = response.status();
         let latency_ms = start.elapsed().as_millis() as u64;
@@ -404,5 +493,54 @@ mod tests {
 
         let key = probe_result_key("anthropic", "claude-3", WireApi::Anthropic);
         assert_eq!(key, "anthropic\0anthropic\0claude-3");
+    }
+
+    #[test]
+    fn session_id_interpolation_renders_whitespace_insensitively() {
+        assert_eq!(render_session_id_template("{{ session_id }}", "S"), "S");
+        assert_eq!(render_session_id_template("{{session_id}}", "S"), "S");
+        assert_eq!(
+            render_session_id_template("pre {{  session_id  }} post", "S"),
+            "pre S post"
+        );
+        assert_eq!(
+            render_session_id_template("no template", "S"),
+            "no template"
+        );
+        // Unrelated constructs pass through untouched (the caller drops them).
+        assert_eq!(
+            render_session_id_template("{{ model }}", "S"),
+            "{{ model }}"
+        );
+        assert_eq!(
+            render_session_id_template("{{ session_id ", "S"),
+            "{{ session_id "
+        );
+    }
+
+    #[test]
+    fn probe_renders_session_headers_and_drops_unrenderable_templates() {
+        let id = probe_session_id();
+        let headers = BTreeMap::from([
+            ("x-static".to_string(), "gateway".to_string()),
+            ("x-session".to_string(), "{{ session_id }}".to_string()),
+            (
+                "x-filter".to_string(),
+                "sess-{{ session_id | truncate(length=8) }}".to_string(),
+            ),
+            ("x-unknown".to_string(), "{{ model }}".to_string()),
+            ("x-unclosed".to_string(), "{{ session_id ".to_string()),
+            ("x-block".to_string(), "{% if x %}y{% endif %}".to_string()),
+        ]);
+        let rendered = render_probe_headers(headers);
+        assert_eq!(
+            rendered.get("x-static").map(String::as_str),
+            Some("gateway")
+        );
+        assert_eq!(rendered.get("x-session").map(String::as_str), Some(id));
+        assert!(!rendered.contains_key("x-filter"));
+        assert!(!rendered.contains_key("x-unknown"));
+        assert!(!rendered.contains_key("x-unclosed"));
+        assert!(!rendered.contains_key("x-block"));
     }
 }

@@ -122,7 +122,7 @@ exe_name="${pkg_name}"
 # dpkg-shlibdeps is unusable here (it demands a debian/control build context),
 # so map each NEEDED shared object to its owning package via ldd + dpkg -S.
 # This covers the direct link set of both binaries (GTK3, WebKit2GTK, JSC,
-# X11/Wayland, …); the cx CLI links only the C runtime today, but reading it too
+# Wayland, …); the cx CLI links only the C runtime today, but reading it too
 # keeps the mapping honest if that changes.
 # dlopen-only modules are resolved by their parent library's own dependencies.
 # dpkg -S only matches the canonical path (dpkg's db records /usr/lib/...,

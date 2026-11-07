@@ -434,6 +434,10 @@ settings-models-apikey-shell = Shell command
 
 settings-models-section-env = Environment variables
 
+settings-models-section-headers = Request headers
+
+settings-models-headers-empty = No custom headers yet
+
 settings-models-section-endpoints = Endpoint config
 
 settings-models-add-endpoint = Add endpoint
@@ -500,6 +504,10 @@ settings-models-err-model-dup = Provider "{$name}": duplicate model "{$id}"
 settings-models-err-number = Provider "{$name}", model "{$id}": "{$field}" must be a whole number of tokens
 
 settings-models-err-env-key = Provider "{$name}": environment variable name is required
+
+settings-models-err-header-name = Provider "{$name}": header name is required
+
+settings-models-err-header-dup = Provider "{$name}": duplicate header {$key} (header names are case-insensitive)
 
 ### views/settings.rs — Personalization panel
 
