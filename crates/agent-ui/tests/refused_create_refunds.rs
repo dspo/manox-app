@@ -80,6 +80,15 @@ async fn a_refused_create_reopens_the_launcher_with_the_text_back(cx: &mut TestA
         before,
         "a refused create attaches nothing"
     );
+    // The refund re-enters the page it came from: the target the send was
+    // minted against survives (a bare re-entry would land the no-project
+    // default over the user's pick), and since the refusal leg never left
+    // the launcher, the entry's lock bit survives with it.
+    assert_eq!(
+        cx.update(|cx| ws.read(cx).diagnostic_launcher_target(cx)),
+        Some((LauncherTarget::Project(project.id.clone()), true)),
+        "the refund keeps the target and its lock bit"
+    );
 
     // The durable witness: no membership key may point at the id that never
     // became a session. The remembered default target is allowed (the chip's
