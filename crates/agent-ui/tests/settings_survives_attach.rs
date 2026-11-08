@@ -102,7 +102,6 @@ async fn a_stale_attach_never_flips_past_settings_or_an_external_session(cx: &mu
                     cx_session_id: "cx-session-1234".into(),
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
-                    project: None,
                     cwd: std::path::PathBuf::from("/tmp"),
                     handle: None,
                 },

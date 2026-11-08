@@ -22,12 +22,14 @@ pub mod chatgpt_app;
 pub mod chrome_assembly;
 pub mod dispatch;
 pub mod i18n;
+pub mod launcher;
 pub mod menu;
 pub mod model_catalog;
 pub mod multiplexer;
 pub mod preview_host;
+pub mod project_dialog;
 pub mod project_menu;
-pub mod project_registry;
+pub mod projects;
 /// The registry's working faces are crate-internal; only the test-support
 /// diagnostics are externally visible (the integration regressions read it).
 pub mod resource_registry;

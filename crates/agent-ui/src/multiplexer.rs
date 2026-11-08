@@ -309,32 +309,6 @@ impl SessionMultiplexer {
         container_rows(&view.book, focused_sid.as_deref())
     }
 
-    /// The durable project objects (path + user alias), in the host's
-    /// committed folder order — the skeleton the sidebar renders folders
-    /// from, including projects whose every conversation is archived.
-    pub fn project_folders(&self, cx: &App) -> Vec<(String, Option<String>)> {
-        self.store
-            .read(cx)
-            .book
-            .catalogues
-            .get(manox_ahp::ext::channels::WORKSPACES)
-            .and_then(|state| state.get("workspaces"))
-            .and_then(serde_json::Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| {
-                        let path = row.get("path")?.as_str()?.to_string();
-                        let alias = row
-                            .get("alias")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string);
-                        Some((path, alias))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// The root agents catalogue: one row per provider with its models.
     pub fn agents(&self, cx: &App) -> Vec<AgentInfo> {
         self.store.read(cx).book.root.agents.clone()

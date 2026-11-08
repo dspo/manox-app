@@ -29,7 +29,7 @@ use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, Theme,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState, RopeExt, Textarea, TextareaState},
+    input::{InputEvent, RopeExt, Textarea, TextareaState},
     speech::{SpeechButton, SpeechEvent, SpeechState},
     tab::{Tab, TabBar},
     v_flex,
@@ -212,6 +212,7 @@ mod composer;
 pub mod container;
 mod external;
 pub mod external_sessions;
+mod launcher_entry;
 mod lifecycle;
 mod right_diff;
 mod subagent;
@@ -474,14 +475,23 @@ pub struct Workspace {
     /// resources; native ids ride the archive paths' explicit teardown —
     /// a native container's death IS the archive gesture).
     _died_sub: Option<Subscription>,
+    /// The launcher page state (the pre-container launch pad, design §3);
+    /// created with the workspace — the composer draft and the picks live
+    /// for the process lifetime (no persistence across restarts, by design).
+    pub(crate) launcher: Option<Entity<crate::launcher::LauncherState>>,
+    /// The launcher send's staged first message (design §3.2): the container
+    /// does not exist when ⏎ lands, so the text waits here; the attach
+    /// completion flushes it through the ordinary submit path, and a failed
+    /// create refunds it to the launcher.
+    pub(crate) pending_first_turn: Option<String>,
 }
 
-/// Top-level rendering mode of the app page. `Settings` and the two
+/// Top-level rendering mode of the app page. `Settings` and the three
 /// conversation-replacing pages are main-column swaps: `ExternalSession`
-/// (a launched TUI / plain terminal) and `SubagentStream` (one running
-/// sub-agent's own transcript). Every other surface (browser, sub-agent
-/// panel, dock) is a shell surface — a right-pane tab or the bottom dock —
-/// and never a view mode.
+/// (a launched TUI / plain terminal), `SubagentStream` (one running
+/// sub-agent's own transcript) and `Launcher` (the pre-container launch pad).
+/// Every other surface (browser, sub-agent panel, dock) is a shell surface —
+/// a right-pane tab or the bottom dock — and never a view mode.
 #[derive(Default)]
 enum ViewMode {
     #[default]
@@ -501,6 +511,11 @@ enum ViewMode {
     /// it). Switching away drops the page: it is a live view of a child
     /// chat, and reopening re-subscribes that chat's channel.
     SubagentStream,
+    /// The launcher — the pre-container launch pad (design §3): the
+    /// New gestures land here instead of minting a draft container; the
+    /// composer's ⏎ mints the Manox container, the action row mints the
+    /// external ones. No container backs this mode.
+    Launcher,
 }
 
 /// The main card's `border_1` on both edges; width budgets that measure
@@ -927,6 +942,8 @@ impl Workspace {
         let conversation = cx.new(|_| ConversationState::new(manox_agent::MessageAuthor::Lead));
 
         let weak_ws = cx.weak_entity();
+        // The launcher page's back-reference to the workspace (its gestures).
+        let weak_ws_for_launcher = weak_ws.clone();
         let chat_host: steer_agent_chat_ui::host::ChatHostHandle =
             std::sync::Arc::new(crate::WorkspaceChatHost::new(weak_ws));
         // The rail's background writers (git refresh, subagent progress,
@@ -976,6 +993,8 @@ impl Workspace {
             live_right_owner: None,
             kill_handles: HashMap::new(),
             _died_sub: None,
+            launcher: None,
+            pending_first_turn: None,
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             browser_views: BTreeMap::new(),
             view_mode: ViewMode::default(),
@@ -1010,9 +1029,6 @@ impl Workspace {
                 model_menu_sub: None,
                 send_menu: None,
                 send_menu_sub: None,
-                project_chip_open: false,
-                project_chip_menu: None,
-                project_chip_menu_sub: None,
                 completion: None,
                 mention_hover: None,
                 recall_index: -1,
@@ -1042,9 +1058,6 @@ impl Workspace {
                 composer_placeholder_mode: ComposerPlaceholderMode::Normal,
                 pending_attachments: Vec::new(),
                 active_browser_suites: Vec::new(),
-                project_picker_pending: false,
-                blank_project_parent: None,
-                blank_project_name_input: None,
                 thread_sub: None,
                 store_observe: None,
                 pending_successor: None,
@@ -1068,6 +1081,18 @@ impl Workspace {
                 transcript_press: Default::default(),
             }),
         };
+        // Boot lands on the LAUNCHER (design §3.3): the landing session stays
+        // the workspace's construction-time data anchor (the store binding,
+        // the catalogue fetch, the GW5 focus) but remains the hidden
+        // never-spoken empty container it always was — the New gestures mint
+        // nothing, the first launcher send does. The launcher entity carries
+        // the draft and picks for the process lifetime.
+        let launcher = cx.new(|cx| {
+            crate::launcher::LauncherState::new(weak_ws_for_launcher.clone(), window, cx)
+        });
+        launcher.update(cx, |state, cx| state.focus(window, cx));
+        ws.launcher = Some(launcher);
+        ws.view_mode = ViewMode::Launcher;
         let (thread_events, store_changes) = ws.subscribe_thread(cx);
         ws.chat.update(cx, |chat, cx| {
             chat.thread_sub = Some(thread_events);
@@ -1095,8 +1120,14 @@ impl Workspace {
                 this.teardown_container(id, cx);
             }
         }));
-        // Focus the composer so typing works immediately on the hero screen.
-        ws.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
+        // Focus follows the boot view mode: the launcher owns the first
+        // keystrokes (it focused above), so its composer is NOT armed here —
+        // `Window::focus` is last-writer-wins, and an armed landing composer
+        // would route the boot typing into the hidden conversation's draft.
+        // A non-launcher boot (none exists today) would arm its composer.
+        if !matches!(ws.view_mode, ViewMode::Launcher) {
+            ws.chat_input(cx).update(cx, |s, cx| s.focus(window, cx));
+        }
         ws
     }
 
@@ -1205,6 +1236,86 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_turn_rail_hover(&self, cx: &App) -> Option<usize> {
         self.chat.read(cx).turn_rail_hover
+    }
+
+    /// Whether the launcher owns the main column (the New gestures' landing —
+    /// no foreground move accompanies it, so this is the read the /new and
+    /// /exit regressions poll). Test-support.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_view_mode_is_launcher(&self) -> bool {
+        matches!(self.view_mode, ViewMode::Launcher)
+    }
+
+    /// Type into the launcher composer, replacing whatever it carries.
+    /// Test-support: the driver face for the ⏎-send regressions.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_launcher_type(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(launcher) = &self.launcher {
+            launcher.update(cx, |state, cx| state.set_text(text.to_string(), window, cx));
+        }
+    }
+
+    /// The launcher composer's current text (the refund regressions' read
+    /// face). Test-support.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_launcher_text(&self, cx: &App) -> String {
+        self.launcher
+            .as_ref()
+            .map(|launcher| launcher.read(cx).text(cx))
+            .unwrap_or_default()
+    }
+
+    /// The launcher page's target and lock bit (the entry-gesture
+    /// regressions' read face: the project-item presets lock the page, a
+    /// bare ⌘N lands the unlocked no-project default). Test-support.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_launcher_target(
+        &self,
+        cx: &App,
+    ) -> Option<(crate::launcher::LauncherTarget, bool)> {
+        self.launcher
+            .as_ref()
+            .map(|launcher| launcher.read(cx).target_lock())
+    }
+
+    /// Fire the launcher's ⏎ gesture directly (the mint path the New
+    /// gestures no longer take). Test-support.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_launcher_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        let Some(payload) = launcher.update(cx, |state, cx| state.submit_payload(window, cx))
+        else {
+            return;
+        };
+        self.submit_launcher(payload, cx);
+    }
+
+    /// Preset the launcher's picks — the create-intent coverage (picks ride
+    /// the seed config and land in the object row). Test-support.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_launcher_picks(
+        &mut self,
+        model: Option<&str>,
+        access_full: bool,
+        effort: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(launcher) = &self.launcher {
+            launcher.update(cx, |state, _| {
+                state.set_picks(
+                    model.map(str::to_string),
+                    access_full,
+                    effort.map(str::to_string),
+                );
+            });
+        }
     }
 
     /// Attach a thread through the production switch path. Diagnostic-only
@@ -2398,27 +2509,9 @@ impl Workspace {
         self.completion_confirm(ix, window, cx);
     }
 
-    /// Close the project-chip dropdown.
-    fn close_project_chip_menu(&mut self, cx: &mut Context<Self>) {
-        self.chat.update(cx, |chat, cx| {
-            chat.project_chip_open = false;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.project_chip_menu = None;
-            cx.notify();
-        });
-        self.chat.update(cx, |chat, cx| {
-            chat.project_chip_menu_sub = None;
-            cx.notify();
-        });
-    }
-
     fn blocking_overlay_active(&self, cx: &App) -> bool {
         let chat = self.chat.read(cx);
-        chat.pending_ask.is_some()
-            || chat.pending_confirmation.is_some()
-            || chat.blank_project_parent.is_some()
+        chat.pending_ask.is_some() || chat.pending_confirmation.is_some()
     }
 
     fn toggle_turn_navigator(&mut self, window: &mut Window, cx: &mut Context<Self>) {

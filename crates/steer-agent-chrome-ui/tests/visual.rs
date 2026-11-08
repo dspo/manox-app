@@ -7,8 +7,12 @@
 //! (no PTY/webview — those need a real window), `CHROME_SELECT=1` the
 //! sidebar's batch-selection mode with two rows checked, `CHROME_PANEL=1` the bottom
 //! dock, `CHROME_PICKER=1` the titlebar session picker with its dropdown
-//! open. macOS-only: the readback is a Metal texture and the harness's
-//! imports (`VisualTestAppContext`) exist only on that platform.
+//! open, `CHROME_PROJECT_DIALOG=1` the modal project dialog over the shell,
+//! `CHROME_LAUNCHER=1` the launcher as the main card's content,
+//! `CHROME_PROJECT_GROUPS=1` the sidebar's project groups (two deterministic
+//! heads, the first multi-root). macOS-only: the readback is a Metal texture
+//! and the harness's imports (`VisualTestAppContext`) exist only on that
+//! platform.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -69,18 +73,114 @@ mod macos {
         let mut shell_slot = None;
         let handle = cx
             .open_offscreen_window(size(px(1280.), px(820.)), |window, cx| {
-                let main: AnyView = cx.new(ChatPreviewStub::new).into();
+                // CHROME_LAUNCHER=1 swaps the main card for the launcher (the
+                // real component with static props — a project target, a
+                // full-access switch, the terminal pill live and the Codex pill
+                // grayed with its unavailable tooltip; the gestures are
+                // agent-ui's, not the shot's).
+                let launcher = std::env::var("CHROME_LAUNCHER").is_ok();
+                let main: AnyView = if launcher {
+                    cx.new(|cx| LauncherPreview::new(window, cx)).into()
+                } else {
+                    cx.new(ChatPreviewStub::new).into()
+                };
                 let shell = cx.new(|cx| Shell::new(shell_config(main), window, cx));
                 shell_slot = Some(shell.clone());
                 shell.update(cx, |shell, _cx| {
                     shell.set_sessions(snapshot_rows());
                 });
+                // CHROME_PROJECT_GROUPS=1: the sidebar's project-group face.
+                // The rows are SYNTHESIZED (the machine's thread store and
+                // its project registry, if any, are never consulted): two
+                // project heads — the first multi-root, so the count badge
+                // and its full-roots tooltip are in the shot — two rows
+                // each, and two loose rows trailing. Fully deterministic.
+                if std::env::var("CHROME_PROJECT_GROUPS").is_ok() {
+                    // The loose bucket's display name rides the same localized
+                    // key the host projection uses (the shot runs in the
+                    // default locale, like the baseline).
+                    let loose = steer_i18n::t("chrome-sidebar-chats").to_string();
+                    let grouped = |(id, title): (&str, &str),
+                                   project: Option<&str>,
+                                   workspace: &str,
+                                   rank: i64| {
+                        SessionRow {
+                            id: id.to_string(),
+                            short_id: "abcd1234".into(),
+                            title: title.to_string(),
+                            workspace: workspace.to_string(),
+                            project: project.map(str::to_string),
+                            status: SessionStatus::Idle,
+                            kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
+                            updated_at: 1_700_000_000 + rank * 60,
+                            sort_stamp: 1_700_000_000 + rank * 60,
+                            rank,
+                            pinned: false,
+                            archived: false,
+                            tag: None,
+                            team_leader: false,
+                            last_message_at: Some(1_700_000_000 + rank * 60),
+                        }
+                    };
+                    shell.update(cx, |shell, _cx| {
+                        shell.set_sessions(vec![
+                            grouped(
+                                ("row-1", "设计定稿：项目实体与新对话入口"),
+                                Some("proj-alpha"),
+                                "Steer.app",
+                                0,
+                            ),
+                            grouped(
+                                ("row-2", "侧栏分组换代"),
+                                Some("proj-alpha"),
+                                "Steer.app",
+                                1,
+                            ),
+                            grouped(
+                                ("row-3", "共享行模型的度量对齐"),
+                                Some("proj-beta"),
+                                "lib",
+                                2,
+                            ),
+                            grouped(("row-4", "码表面 A/B 契约"), Some("proj-beta"), "lib", 3),
+                            grouped(("row-5", "临时调研：拖拽基建"), None, &loose, 4),
+                            grouped(("row-6", "跑门禁"), None, &loose, 5),
+                        ]);
+                        shell.set_folder_heads(vec![
+                            (
+                                "proj-alpha".to_string(),
+                                "Steer.app".to_string(),
+                                vec![
+                                    "/Users/dev/projects/manox".to_string(),
+                                    "/Users/dev/projects/manox-app".to_string(),
+                                ],
+                            ),
+                            (
+                                "proj-beta".to_string(),
+                                "lib".to_string(),
+                                vec!["/Users/dev/projects/lib".to_string()],
+                            ),
+                        ]);
+                    });
+                }
                 if std::env::var("CHROME_PICKER").is_ok() {
                     shell.update(cx, |shell, cx| {
                         shell.toggle_session_picker(window, cx);
                         cx.notify();
                     });
                 }
+                // CHROME_PROJECT_DIALOG=1: the modal project dialog over the
+                // shell (the real ProjectDialog component in the real overlay
+                // slot, with static props — the agent-ui state machine is the
+                // unit tests' business, not the shot's).
+                if std::env::var("CHROME_PROJECT_DIALOG").is_ok() {
+                    shell.update(cx, |shell, cx| {
+                        let preview = cx.new(|cx| ProjectDialogPreview::new(window, cx));
+                        shell.set_dialog_surface(Some(preview.into()), cx);
+                        cx.notify();
+                    });
+                }
+
                 // CHROME_SELECT=1: the sidebar's batch-selection mode with the
                 // first two thread rows checked — the check circles, the
                 // accent stroke and the bottom action bar.
@@ -219,6 +319,13 @@ mod macos {
                     back: true,
                     forward: false,
                 })),
+                // The dialog shot lights the footer's new-project row too (a
+                // no-op hook — the row's presence is the acceptance face; the
+                // open action is the state machine's, not the shot's).
+                on_new_project: std::env::var("CHROME_PROJECT_DIALOG").is_ok().then(|| {
+                    Box::new(|_w: &mut gpui::Window, _cx: &mut gpui::App| {})
+                        as steer_agent_chrome_ui::shell::HookOnUnit
+                }),
                 ..Default::default()
             },
         }
@@ -230,7 +337,13 @@ mod macos {
     /// carries — running wins over unread wins over idle. `Pending` has no
     /// store face (it lives on the live fold), so the second row is
     /// synthesized to keep the amber question mark in the shot.
+    ///
+    /// Grouping: the rows carry NO project key — this crate cannot see the
+    /// app's project registry, so the honest baseline face is the
+    /// registry-less machine's: everything in the loose bucket (the
+    /// multi-group face is the `CHROME_PROJECT_GROUPS` shot's business).
     fn snapshot_rows() -> Vec<SessionRow> {
+        let loose = steer_i18n::t("chrome-sidebar-chats").to_string();
         let store = manox_agent::thread_store::global();
         let mut rows: Vec<SessionRow> = store.read(|st| {
             st.summaries()
@@ -246,14 +359,8 @@ mod macos {
                         .clone()
                         .or_else(|| t.title.clone())
                         .unwrap_or_else(|| t.summary.clone()),
-                    workspace: t
-                        .project
-                        .rsplit('/')
-                        .next()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("Chats")
-                        .to_string(),
-                    project: (!t.project.is_empty()).then(|| t.project.clone()),
+                    workspace: loose.clone(),
+                    project: None,
                     kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
                     status: if st.is_running(&t.id) {
                         SessionStatus::Running
@@ -625,6 +732,154 @@ mod macos {
     //
     // A PTY in the harness trips gpui's leak detection and a wry subview never
     // reads back offscreen, so the shot exercises the tab chrome only.
+
+    /// The project-dialog shot's static host: a real [`ProjectDialog`] with
+    /// fixed props (two roots, one primary) and inert callbacks — the form's
+    /// layout, the badge/row chrome and the shell's overlay slot are the
+    /// acceptance face; the state machine behind the real dialog is
+    /// agent-ui's unit tests.
+    struct ProjectDialogPreview {
+        name: gpui::Entity<gpui_component::input::InputState>,
+    }
+
+    impl ProjectDialogPreview {
+        fn new(window: &mut gpui::Window, cx: &mut gpui::App) -> Self {
+            let name = cx.new(|cx| {
+                gpui_component::input::InputState::new(window, cx)
+                    .placeholder(steer_i18n::t("project-name-placeholder"))
+            });
+            Self { name }
+        }
+    }
+
+    impl gpui::Render for ProjectDialogPreview {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let noop: steer_agent_chrome_ui::session_list::OnUnit = std::rc::Rc::new(|_, _, _| {});
+            let noop_root: steer_agent_chrome_ui::project_dialog::OnRootPath =
+                std::rc::Rc::new(|_, _, _| {});
+            let noop_cancel: steer_agent_chrome_ui::session_list::OnWindowApp =
+                std::rc::Rc::new(|_, _| {});
+            steer_agent_chrome_ui::ProjectDialog {
+                edit: false,
+                name_input: self.name.clone(),
+                roots: vec![
+                    steer_agent_chrome_ui::ProjectRootRow {
+                        path: "/Users/dev/projects/manox".into(),
+                        label: "manox".into(),
+                        primary: true,
+                    },
+                    steer_agent_chrome_ui::ProjectRootRow {
+                        path: "/Users/dev/projects/manox-app".into(),
+                        label: "manox-app".into(),
+                        primary: false,
+                    },
+                ],
+                error: None,
+                confirm_disabled: false,
+                on_add_folder: noop.clone(),
+                on_set_primary: noop_root.clone(),
+                on_remove_root: noop_root,
+                on_cancel: noop_cancel,
+                on_confirm: noop,
+                on_remove: None,
+            }
+        }
+    }
+
+    /// The launcher shot's static host: a real [`steer_agent_chrome_ui::
+    /// Launcher`] with fixed props — a project target chip, a picked model +
+    /// full-access switch, the composer with seeded text, the terminal pill
+    /// live and the Codex pill grayed with its unavailable tooltip (the
+    /// point-graying face needs a verdict to render). The gestures and the
+    /// target/pick state are agent-ui's launcher state machine; the shot
+    /// accepts the page's chrome.
+    struct LauncherPreview {
+        input: gpui::Entity<gpui_component::input::TextareaState>,
+    }
+
+    impl LauncherPreview {
+        fn new(window: &mut gpui::Window, cx: &mut gpui::App) -> Self {
+            let input = cx.new(|cx| {
+                gpui_component::input::TextareaState::new(window, cx)
+                    .auto_grow(4, 12)
+                    .submit_on_enter(true)
+                    .placeholder(steer_i18n::t("workspace-input-placeholder"))
+            });
+            Self { input }
+        }
+    }
+
+    impl gpui::Render for LauncherPreview {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let noop: steer_agent_chrome_ui::session_list::OnUnit = std::rc::Rc::new(|_, _, _| {});
+            let noop_root: steer_agent_chrome_ui::session_list::OnWindowApp =
+                std::rc::Rc::new(|_, _| {});
+            let noop_access: steer_agent_chrome_ui::launcher::OnAccessPick =
+                std::rc::Rc::new(|_, _, _| {});
+            steer_agent_chrome_ui::Launcher {
+                project_label: "Steer.app".into(),
+                project_menu_open: false,
+                project_menu: None,
+                input: self.input.clone(),
+                model_label: "Test · T Model 2 · max".into(),
+                model_menu_open: false,
+                model_menu: None,
+                access_full: true,
+                on_project_chip: Some(noop_root.clone()),
+                on_model_pick: noop_root,
+                on_access_pick: noop_access,
+                actions: vec![
+                    steer_agent_chrome_ui::LauncherAction {
+                        id: "terminal",
+                        icon: steer_agent_chrome_ui::theme::icons::TERMINAL,
+                        label: steer_i18n::t("launcher-action-terminal").into(),
+                        enabled: true,
+                        unavailable: None,
+                        cascade: None,
+                        on_click: noop.clone(),
+                    },
+                    steer_agent_chrome_ui::LauncherAction {
+                        id: "claude",
+                        icon: steer_agent_chrome_ui::theme::IconAsset("icons/claude.svg"),
+                        label: "Claude Code".into(),
+                        enabled: true,
+                        unavailable: None,
+                        cascade: None,
+                        on_click: noop.clone(),
+                    },
+                    steer_agent_chrome_ui::LauncherAction {
+                        id: "codex",
+                        icon: steer_agent_chrome_ui::theme::IconAsset("icons/codex.svg"),
+                        label: "Codex".into(),
+                        enabled: false,
+                        unavailable: Some(
+                            steer_i18n::t_str("launcher-action-unavailable", &[("prog", "Codex")])
+                                .into(),
+                        ),
+                        cascade: None,
+                        on_click: noop.clone(),
+                    },
+                    steer_agent_chrome_ui::LauncherAction {
+                        id: "copilot",
+                        icon: steer_agent_chrome_ui::theme::IconAsset("icons/githubcopilot.svg"),
+                        label: "GitHub Copilot".into(),
+                        enabled: true,
+                        unavailable: None,
+                        cascade: None,
+                        on_click: noop,
+                    },
+                ],
+            }
+        }
+    }
 
     struct DummyKind;
 

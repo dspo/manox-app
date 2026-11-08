@@ -11,13 +11,7 @@
 
 sidebar-new-chat = 新对话
 
-sidebar-section-projects = 项目
-
 sidebar-section-conversations = 对话
-
-sidebar-new-session-label = 新建会话
-
-sidebar-new-session-steer = Steer
 
 sidebar-new-terminal = 新建终端
 
@@ -537,8 +531,6 @@ workspace-ask-note-label = 补充：
 
 workspace-ask-skipped = 已跳过
 
-workspace-cancel = 取消
-
 access-mode-sandbox-title = 沙箱访问
 
 access-mode-full-access-title = 完全访问
@@ -549,15 +541,7 @@ workspace-mode-notice = { $mode ->
 }
 
 workspace-project-choose = 选择项目
-
-workspace-project-new = 新建项目
-
-workspace-project-blank = 新建空白项目
 workspace-project-unfiled = 对话
-
-workspace-project-select-folder = 选择文件夹
-
-workspace-project-name-prompt = 项目文件夹名称
 
 workspace-empty-prompt = 我们该做什么？
 
@@ -622,8 +606,6 @@ exit-browser-closed = 浏览器已关闭。
 exit-archiving = 正在归档 { $name }……
 
 exit-archived = 会话已归档。
-
-exit-bye = 拜拜！
 
 menu-settings = Settings…
 
@@ -888,6 +870,71 @@ plugins-notice-plugin-removed = 插件已移除。重启 steer 后会卸载启�
 plugins-notice-plugin-enabled = 插件已启用。重启 steer 后会加载其工具、技能、agent、hook 和 MCP 服务器。
 
 plugins-notice-plugin-disabled = 插件已禁用。重启 steer 后会卸载启动时加载的运行时注册表。
+
+### agent-ui project_dialog.rs（创建/编辑项目对话框，设计 §2.4；名称留空时
+### 显示名跟随主要文件夹的 basename，改过即固定）
+
+project-create-title = 创建项目
+
+project-edit-title = 编辑项目
+
+project-name-label = 名称
+
+# 名称框在尚无主要文件夹时的兜底 placeholder；有主要文件夹时显示其 basename。
+project-name-placeholder = 项目名称
+
+project-roots-label = 源文件夹
+# The multi-root group header badge tooltip: every root, one per line.
+project-roots-tooltip = 源文件夹：{$roots}
+
+project-move-out = 移出项目
+
+project-move-to = 移动到项目…
+
+project-root-primary = 主要
+
+project-root-set-primary = 设为主要
+
+project-root-add = 添加文件夹…
+
+project-cancel = 取消
+
+project-create-confirm = 创建项目
+
+project-save = 保存
+
+project-remove = 移除项目
+
+# 侧栏底部常驻入口行
+project-new-footer = 新建项目
+
+# Chats 桶组头菜单的入口项
+project-new-menu = 新建项目…
+
+project-remove-confirm-title = 移除项目？
+
+project-remove-confirm-body = 项目会被删除，其中的会话将回到「对话」列表；会话与历史本身不受影响。
+
+project-remove-confirm-ok = 移除
+
+# 保存失败（理论少见：picker 只给现存目录）的行内红字提示，不弹窗。
+project-error-save = 保存失败：{$err}
+
+# Launcher（新对话发射台，设计 §3）
+launcher-heading = 新对话
+
+launcher-project-none = 无项目
+
+launcher-open-folder = 打开其他文件夹…
+
+launcher-action-heading = 或直接打开
+
+launcher-action-terminal = Ghostty 终端
+
+launcher-action-unavailable = 未检测到 {$prog}
+
+# 组菜单的入口项（agent 级联已退役——Launcher 动作行是唯一 agent 启动面）
+project-new-conversation = 新建对话
 
 ## steer-agent-chrome-ui（应用壳：侧栏/标题栏/页签/底部面板）
 

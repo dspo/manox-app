@@ -83,7 +83,6 @@ fn spawn_external(
                     cx_session_id: String::new(),
                     label: "Claude Code".into(),
                     svg: "icons/claude.svg",
-                    project: None,
                     cwd: std::path::PathBuf::from("/tmp"),
                     handle: Some(handle),
                 },
@@ -132,9 +131,9 @@ async fn exit_kills_its_own_resources_and_spares_background_externals(cx: &mut T
     assert!(alive);
 
     // Another container runs `/exit` — the full waterfall (subagent beat,
-    // turn beat, terminal beat, browser beat, teardown, fresh landing).
-    common::run_slash_until_foreground_moves(cx, &ws, window, "/exit")
-        .expect("/exit lands a fresh conversation");
+    // turn beat, terminal beat, browser beat, teardown, launcher landing).
+    common::run_slash(cx, &ws, window, "/exit");
+    assert!(common::wait_launcher(cx, &ws), "/exit lands the launcher");
 
     // The native container's resource died with it: the archive leg's
     // container teardown killed the CLI tab's child.

@@ -64,12 +64,22 @@ pub type OnWindowApp = Rc<dyn Fn(&mut Window, &mut App)>;
 pub type OnGroupDragMove = Rc<dyn Fn(&String, &String, bool, &mut Window, &mut App)>;
 /// Drop-commit callback for group reordering (dragged, target, before-half?).
 pub type OnGroupMove = Rc<dyn Fn(&String, &String, bool, &mut Window, &mut App)>;
-/// Group-menu callback (state key, the group's project path when it is a
-/// workspace group, open position). The HOST builds the menu — the project
+/// Group-menu callback (state key, the group's project id when it is a
+/// project group, open position). The HOST builds the menu — the project
 /// actions (launch agents / editor, remove project) are host semantics the
 /// chrome carries no opinion on; an absent callback leaves the header with
 /// no menu surface.
 pub type OnGroupMenu = Rc<dyn Fn(&str, Option<&str>, gpui::Point<Pixels>, &mut Window, &mut App)>;
+/// Group-header ＋ (the group key): the host opens its new-conversation
+/// entry with that group's project preselected.
+pub type OnGroupNew = Rc<dyn Fn(&String, &mut Window, &mut App)>;
+/// Row dropped on a group (group key, row id): the host writes the
+/// membership (project group) or detaches (loose bucket).
+pub type OnRowToGroup = Rc<dyn Fn(&String, &String, &mut Window, &mut App)>;
+/// Row drag moving over a group (the group key under the pointer): drives
+/// the drop highlight; the root's capture-phase handler clears it between
+/// groups.
+pub type OnRowDragOver = Rc<dyn Fn(&String, &mut Window, &mut App)>;
 
 /// One session row as projected by the host. The chrome owns only the
 /// interaction state around these (selection, collapse, order); it never
@@ -172,11 +182,15 @@ pub struct SessionGroup {
     /// must not become state).
     pub key: String,
     pub collapsed: bool,
-    /// The group's project directory, host-supplied — the project menu's
-    /// launch target. `None` on time buckets and on the no-project bucket;
-    /// the menu still opens there, scoped to the host's fallback cwd, minus
-    /// the remove-project row.
+    /// The group's project id, host-supplied — the host resolves launch
+    /// targets and project actions from it. `None` on time buckets and on
+    /// the loose bucket ([`LOOSE_BUCKET_KEY`]); the menu still opens there,
+    /// scoped to the host's fallback rules, minus the project-only rows.
     pub project: Option<String>,
+    /// The project's root directories, host-supplied verbatim. A single
+    /// root renders nothing extra; several render the count badge with the
+    /// full list on its tooltip.
+    pub roots: Vec<String>,
     /// The rows the group renders. The shell folds a long group at a fixed
     /// row limit (5): `hidden` counts the rows beyond the fold, and
     /// `expanded` marks a fold the user (or an active-row reveal) lifted —
@@ -185,6 +199,11 @@ pub struct SessionGroup {
     pub hidden: usize,
     pub expanded: bool,
 }
+
+/// The loose bucket's stable state key — every container without a project
+/// membership lands here (the display name is host-localized and must not
+/// become state).
+pub const LOOSE_BUCKET_KEY: &str = "Chats";
 
 /// A fixed sidebar row (Automations / Chats …) — labels come from the host.
 #[derive(Clone, PartialEq)]
@@ -299,6 +318,17 @@ pub struct SessionList {
     /// Current drop marker (dragged, target, before?); drives the 2px accent
     /// insertion line.
     pub group_drag_marker: Option<(String, String, bool)>,
+    /// The group header's hover ＋: the host's new-conversation entry
+    /// preselecting that group's project. Workspace grouping only.
+    pub on_group_new: Option<OnGroupNew>,
+    /// Row dropped on a group (the membership gesture). Workspace grouping
+    /// only; absent → rows are not drag sources.
+    pub on_drop_row: Option<OnRowToGroup>,
+    /// Row drag moving over a group slot (the drop highlight's source).
+    pub on_row_drag_over: Option<OnRowDragOver>,
+    /// The group key a row drag currently hovers (drives the header's drop
+    /// highlight); the root's capture handler clears it between groups.
+    pub row_drag_marker: Option<String>,
     /// The fold footer under a group (show more / show less); the payload is
     /// the group's key.
     pub on_show_more: OnId,
@@ -316,6 +346,9 @@ pub struct SessionList {
     pub on_selection_archive: OnUnit,
     /// The action bar's 取消 (leave selection mode with nothing archived).
     pub on_selection_cancel: OnUnit,
+    /// The sidebar footer's ＋ 新建项目 row (the host opens the project
+    /// dialog). `None` → the row does not render at all.
+    pub on_new_project: Option<OnUnit>,
 }
 
 impl RenderOnce for SessionList {
@@ -393,6 +426,9 @@ impl RenderOnce for SessionList {
                     ),
             )
             .child(customizations(&self.customizations))
+            .when_some(self.on_new_project.clone(), |this, on_new_project| {
+                this.child(new_project_footer(on_new_project))
+            })
             .when_some(self.selection.clone(), |this, selection| {
                 this.child(selection_bar(
                     selection.len(),
@@ -690,6 +726,30 @@ impl gpui::Render for DraggedGroup {
     }
 }
 
+/// Row drag payload — the membership gesture: dropping a row on a project
+/// group moves the container into that project, on the loose bucket it
+/// detaches. `id` is the drop's addressing key; `label` is only the ghost's
+/// display text (the row title reads better than an id chip).
+#[derive(Clone)]
+pub struct DraggedRow {
+    pub id: SharedString,
+    pub label: SharedString,
+}
+
+impl gpui::Render for DraggedRow {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(6.))
+            .py(px(2.))
+            .rounded(px(4.))
+            .bg(CARD_BG)
+            .border_1()
+            .border_color(BORDER)
+            .text_size(px(12.))
+            .child(self.label.clone())
+    }
+}
+
 /// Group header (chevron + folder + name, collapsible; drag-reorder source) +
 /// its rows. The drop target and insertion line hang on the **group
 /// container** (the whole group is droppable); the insert position comes from
@@ -700,6 +760,12 @@ impl gpui::Render for DraggedGroup {
 /// updates the marker. The header keeps its own padding — it is the one
 /// element that still expresses project hierarchy; session rows run full
 /// width beneath it.
+///
+/// Drag machinery splits by payload: a project group's header is a
+/// `DraggedGroup` source and its slot a `DraggedGroup` target (reorder —
+/// the loose bucket is neither, it has no position of its own); every group
+/// slot is a `DraggedRow` target (the membership gesture) and every row a
+/// `DraggedRow` source, in workspace grouping only.
 fn group(
     list: &SessionList,
     g: &SessionGroup,
@@ -711,19 +777,22 @@ fn group(
     let on_move = list.on_move_group.clone();
     let on_drag_move_cb = list.on_drag_move_group.clone();
     let marker = list.group_drag_marker.clone();
-    // Drag reorder is a workspace-mode concept: in time grouping the order
-    // is the recency sort, so the group header is not a drag source and the
-    // container is not a drop target — a live insertion line whose commit
-    // is silently discarded would be a fake control.
-    let draggable = !list.grouping.is_time();
+    let row_marker = list.row_drag_marker.clone();
+    // Drag reorder is a workspace-mode concept over PROJECT groups: in time
+    // grouping the order is the recency sort, and the loose bucket has no
+    // position to reorder — a live insertion line whose commit is silently
+    // discarded would be a fake control.
+    let reorderable = !list.grouping.is_time() && g.project.is_some();
 
     let header_key = g.key.clone();
     let bounds_key = g.key.clone();
     let mut header = div()
         .id(SharedString::from(format!("grp-{}", g.key)))
         .debug_selector(move || format!("chrome-group-header-{}", bounds_key))
+        // The hover scope for the header's reveal-on-hover ＋ control.
+        .group("grp-header")
         .on_click(move |_, w, cx| toggle(&key, w, cx));
-    if draggable {
+    if reorderable {
         header = header
             .on_drag(DraggedGroup(SharedString::from(header_key.as_str())), {
                 let payload = DraggedGroup(SharedString::from(header_key.as_str()));
@@ -752,8 +821,10 @@ fn group(
     }
     // The project menu surface rides the header in workspace grouping: the
     // ellipsis button and a right-click anywhere on the header both hand the
-    // host (key, project, open position) to build the menu from.
-    if draggable && let Some(on_group_menu) = list.on_group_menu.clone() {
+    // host (key, project id, open position) to build the menu from.
+    if !list.grouping.is_time()
+        && let Some(on_group_menu) = list.on_group_menu.clone()
+    {
         let menu_key = g.key.clone();
         let menu_project = g.project.clone();
         header = header.on_mouse_down(gpui::MouseButton::Right, move |e, w, cx| {
@@ -769,6 +840,11 @@ fn group(
         .py(px(4.))
         .px(px(6.))
         .text_size(px(12.5))
+        // A row drag hovering this group lights the header (the drop
+        // highlight — membership landing here on release).
+        .when(row_marker.as_deref() == Some(g.key.as_str()), |style| {
+            style.bg(CARD_BG)
+        })
         .hover(|style| style.bg(LIST_HOVER))
         .child(icon(
             if g.collapsed {
@@ -786,9 +862,66 @@ fn group(
                 .truncate()
                 .child(g.name.clone()),
         )
+        // Multi-root indicator: the root count rides the name — the tooltip
+        // names every root (the full-roots face of a multi-root project).
+        .when(g.roots.len() > 1, |el| {
+            let tip = g.roots.join("\n");
+            let badge_key = g.key.clone();
+            let badge_sel = g.key.clone();
+            el.child(
+                div()
+                    .id(SharedString::from(format!("grp-roots-{}", badge_key)))
+                    .debug_selector(move || format!("chrome-group-roots-{}", badge_sel))
+                    .py(px(1.))
+                    .px(px(4.))
+                    .rounded(px(4.))
+                    .bg(BADGE_BLUE_BG)
+                    .text_color(BADGE_BLUE_FG)
+                    .text_size(px(9.))
+                    .flex_shrink_0()
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(steer_i18n::t_str(
+                            "project-roots-tooltip",
+                            &[("roots", &tip)],
+                        ))
+                        .build(window, cx)
+                    })
+                    .child(g.roots.len().to_string()),
+            )
+        })
         .child(div().flex_1())
+        .when(!list.grouping.is_time(), |el| {
+            el.when_some(list.on_group_new.clone(), |el, on_new| {
+                let add_sel = g.key.clone();
+                el.child(
+                    div()
+                        .id(SharedString::from(format!("grp-add-{}", g.key)))
+                        .debug_selector(move || format!("chrome-group-add-{}", add_sel))
+                        .on_click({
+                            let add_key = g.key.clone();
+                            move |_e, w, cx| {
+                                cx.stop_propagation();
+                                (on_new)(&add_key, w, cx);
+                            }
+                        })
+                        .px(px(2.))
+                        .rounded(px(3.))
+                        // Hidden until the header is hovered — the ＋ is a
+                        // shortcut, not a resting control (transparent keeps
+                        // the header's hit layout stable).
+                        .opacity(0.)
+                        .group_hover("grp-header", |style| style.opacity(1.))
+                        .text_color(FG_FAINT)
+                        .hover(|style| style.text_color(FG).bg(LIST_HOVER))
+                        .tooltip(hover_tooltip("project-new-conversation"))
+                        .child(icon(icons::ADD, 13.)),
+                )
+            })
+        })
         .when_some(
-            list.on_group_menu.clone().filter(|_| draggable),
+            list.on_group_menu
+                .clone()
+                .filter(|_| !list.grouping.is_time()),
             |el, on_menu| {
                 let btn_key = g.key.clone();
                 let btn_selector = g.key.clone();
@@ -809,6 +942,8 @@ fn group(
                 )
             },
         );
+    // The hover ＋ scope is the header itself (`.group` above); no wrapper
+    // is needed.
 
     let mut items: Vec<gpui::AnyElement> = vec![header.into_any_element()];
     if !g.collapsed {
@@ -860,7 +995,7 @@ fn group(
         .flex()
         .flex_col()
         .relative();
-    if draggable {
+    if reorderable {
         slot = slot.on_drop::<DraggedGroup>({
             let target = g.key.clone();
             let on_move = on_move.clone();
@@ -879,6 +1014,34 @@ fn group(
                 (on_move)(&dragged.0.to_string(), &target, before, w, cx);
             }
         });
+    }
+    // The membership drop: a row released on this group moves into the
+    // project (the loose bucket detaches). The drop handler itself does NOT
+    // touch the highlight — the host's drop face clears it, and the root's
+    // capture-phase on_drop is the backstop; re-raising the drag-over face
+    // here would re-set the marker the drop just cleared.
+    if let Some(on_drop_row) = list.on_drop_row.clone() {
+        slot = slot
+            .on_drag_move::<DraggedRow>({
+                let target = g.key.clone();
+                let cb = list.on_row_drag_over.clone();
+                move |e: &gpui::DragMoveEvent<DraggedRow>, w, cx| {
+                    if e.event.position.y < e.bounds.origin.y
+                        || e.event.position.y > e.bounds.origin.y + e.bounds.size.height
+                    {
+                        return;
+                    }
+                    if let Some(cb) = cb.as_ref() {
+                        (cb)(&target, w, cx);
+                    }
+                }
+            })
+            .on_drop::<DraggedRow>({
+                let target = g.key.clone();
+                move |dragged: &DraggedRow, w, cx| {
+                    (on_drop_row)(&target, &dragged.id.to_string(), w, cx);
+                }
+            });
     }
     // The insertion line reads (dragged, target, before); in time grouping
     // the marker stays None because no header is a drag source there.
@@ -927,12 +1090,39 @@ fn session_row(
     // reaches it via slot + gap. Leader rows prepend the chevron slot.
     let text_indent = LEAD + GAP + if data.team_leader { CHEVRON_SLOT } else { 0. };
 
+    // The membership drag source: any row is draggable in workspace grouping
+    // (dropping it on a group writes the membership); time grouping has no
+    // project face to land on.
     let row = div()
         .id(SharedString::from(format!("sess-{}", data.id)))
         .debug_selector({
             let key = data.id.clone();
             move || format!("chrome-session-row-{key}")
         })
+        .when(
+            list.on_drop_row.is_some() && !list.grouping.is_time(),
+            |row| {
+                let (id, label) = (
+                    SharedString::from(data.id.as_str()),
+                    SharedString::from(single_line_title(&data.title).as_str()),
+                );
+                row.on_drag(
+                    DraggedRow {
+                        id: id.clone(),
+                        label: label.clone(),
+                    },
+                    move |_, _, _, cx| {
+                        use gpui::AppContext as _;
+                        cx.stop_propagation();
+                        let payload = DraggedRow {
+                            id: id.clone(),
+                            label: label.clone(),
+                        };
+                        cx.new(move |_| payload.clone())
+                    },
+                )
+            },
+        )
         .on_click({
             let on_select = list.on_select.clone();
             let on_toggle = list.on_selection_toggle.clone();
@@ -1452,6 +1642,32 @@ fn absolute_stamp(epoch: i64) -> String {
         .single()
         .map(|t| t.format("%m-%d %H:%M").to_string())
         .unwrap_or_default()
+}
+
+/// The sidebar footer's ＋ 新建项目 row: the standing create-project entry,
+/// styled like the Customizations rows but a REAL control (lit at rest,
+/// hover wash, no unimplemented tooltip). Lives under the Customizations
+/// block — the bottom-most slot that survives every mode (filtering shrinks
+/// the list above it, never the footer).
+fn new_project_footer(on_new: OnUnit) -> impl IntoElement {
+    div()
+        .id("sidebar-new-project")
+        .debug_selector(|| "chrome-sidebar-new-project".into())
+        .on_click(move |e, w, cx| on_new(e, w, cx))
+        .w_full()
+        .mx(px(14.))
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .py(px(3.))
+        .px(px(6.))
+        .text_size(px(12.))
+        .flex_shrink_0()
+        .text_color(FG_DIM)
+        .cursor_pointer()
+        .hover(|style| style.text_color(FG).bg(LIST_HOVER))
+        .child(icon(icons::ADD, 13.))
+        .child(steer_i18n::t("project-new-footer"))
 }
 
 /// The bottom Customizations block.

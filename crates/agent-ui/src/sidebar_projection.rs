@@ -27,11 +27,11 @@
 //! - `updated_at` / `archived` / the tag chip / the pinned flag ride the row
 //!   verbatim.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use ahp_types::state::{SessionStatus as WireStatus, SessionSummary};
 use steer_agent_chrome_ui::session_list::{
-    PendingKind, SessionGroup, SessionRowData, SessionRowKind, SessionStatus,
+    LOOSE_BUCKET_KEY, PendingKind, SessionGroup, SessionRowData, SessionRowKind, SessionStatus,
 };
 
 /// One sidebar row: one SESSION CONTAINER (plan D1) — the fields the chrome
@@ -271,94 +271,84 @@ pub fn project_forest(rows: &[ContainerRow]) -> Vec<SessionRowData> {
     out
 }
 
-/// Group a full wire list into chrome `SessionGroup`s keyed by project
-/// display name (the path's last segment; empty → "Chats"), applying
-/// `project_forest` per partition. `removed` is the client-side removal
-/// overlay ([`crate::project_registry`]): a row whose effective project sits
-/// in the set groups as loose, the v2 store's remove-project semantics — the
-/// folder dissolves, the history stays.
+/// Group a full wire list into chrome `SessionGroup`s keyed by project id
+/// (the loose bucket keys by [`steer_agent_chrome_ui::session_list::
+/// LOOSE_BUCKET_KEY`]), applying `project_forest` per partition. The data
+/// source is the project registry — `projects` in sidebar order and the
+/// membership resolver — never the wire rows' own project paths: grouping is
+/// an explicit fact (design §2.3), so a container without a membership (an
+/// ad-hoc folder, an external container, another client's session) falls to
+/// the loose bucket, and a membership naming a deleted project reads loose
+/// too. Empty project groups still render (the skeleton); the loose bucket
+/// renders only when something lands in it.
 pub fn project_groups(
     rows: &[ContainerRow],
-    folders: &[(String, Option<String>)],
-    removed: &HashSet<String>,
+    projects: &[crate::projects::Project],
+    membership: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<SessionGroup> {
-    // The effective grouping project: the row's own, minus removed paths (a
-    // removed row keeps its row data — it re-buckets, it does not vanish).
-    let effective = |row: &ContainerRow| -> Option<String> {
-        row.project
-            .clone()
-            .filter(|p| !p.is_empty() && !removed.contains(p))
-    };
-    let mut order: Vec<String> = Vec::new();
-    let mut buckets: HashMap<String, Vec<ContainerRow>> = HashMap::new();
-    let mut bucket_project: HashMap<String, Option<String>> = HashMap::new();
-    // The durable project skeleton first: a folder renders even with zero
-    // rows — archiving every conversation never dissolves the project. The
-    // alias is the folder's own name; the directory segment is the fallback.
-    // The path→name map is also the row-filing index: a row joins its
-    // project's folder by PATH, so a non-empty alias cannot split the
-    // project into an empty alias head plus a basename-headed row bucket.
-    let folder_name: HashMap<&str, String> = folders
+    let loose_name = loose_bucket_name();
+    let mut groups: Vec<(SessionGroup, Vec<ContainerRow>)> = projects
         .iter()
-        .filter(|(path, _)| !removed.contains(path))
-        .map(|(path, alias)| {
+        .map(|project| {
             (
-                path.as_str(),
-                alias
-                    .clone()
-                    .filter(|a| !a.trim().is_empty())
-                    .unwrap_or_else(|| project_label(path)),
+                SessionGroup {
+                    key: project.id.clone(),
+                    name: crate::projects::display_name(project),
+                    project: Some(project.id.clone()),
+                    roots: project
+                        .roots
+                        .iter()
+                        .map(|root| root.path.to_string_lossy().into_owned())
+                        .collect(),
+                    rows: Vec::new(),
+                    collapsed: false,
+                    hidden: 0,
+                    expanded: false,
+                },
+                Vec::new(),
             )
         })
         .collect();
-    for (path, _) in folders {
-        if removed.contains(path) {
-            continue;
-        }
-        let name = folder_name[path.as_str()].clone();
-        if !buckets.contains_key(&name) {
-            order.push(name.clone());
-            bucket_project.insert(name.clone(), Some(path.clone()));
-        }
-        buckets.entry(name).or_default();
-    }
+    let mut loose: Vec<ContainerRow> = Vec::new();
     for row in rows {
-        let project = effective(row);
-        let key = project
-            .as_ref()
-            .and_then(|p| folder_name.get(p.as_str()).cloned())
-            .unwrap_or_else(|| project_label(project.as_deref().unwrap_or("")));
-        if !buckets.contains_key(&key) {
-            order.push(key.clone());
-            bucket_project.insert(key.clone(), project);
+        let target = membership(&row.id)
+            .and_then(|project_id| groups.iter_mut().find(|(g, _)| g.key == project_id));
+        match target {
+            Some((_, bucket)) => bucket.push(row.clone()),
+            None => loose.push(row.clone()),
         }
-        buckets.entry(key).or_default().push(row.clone());
     }
-    order
+    if !loose.is_empty() {
+        groups.push((
+            SessionGroup {
+                key: LOOSE_BUCKET_KEY.to_string(),
+                name: loose_name,
+                project: None,
+                roots: Vec::new(),
+                rows: Vec::new(),
+                collapsed: false,
+                hidden: 0,
+                expanded: false,
+            },
+            loose,
+        ));
+    }
+    groups
         .into_iter()
-        .map(|name| SessionGroup {
-            rows: project_forest(buckets.get(&name).map(Vec::as_slice).unwrap_or(&[])),
-            key: name.clone(),
-            project: bucket_project.get(&name).cloned().flatten(),
-            name,
-            collapsed: false,
-            hidden: 0,
-            expanded: false,
+        .map(|(mut group, bucket)| {
+            group.rows = project_forest(bucket.as_slice());
+            group
         })
         .collect()
 }
 
-/// Project display name: the path's last segment; empty (quick chats) →
-/// "Chats".
-pub(crate) fn project_label(path: &str) -> String {
-    if path.is_empty() || path == "." {
-        return "Chats".into();
-    }
-    std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string())
+/// The loose bucket's display name (the localized "Chats" word); the state
+/// key stays the literal [`LOOSE_BUCKET_KEY`].
+pub(crate) fn loose_bucket_name() -> String {
+    crate::i18n::t(LOOSE_BUCKET_KEY_LOCALIZED).to_string()
 }
+
+const LOOSE_BUCKET_KEY_LOCALIZED: &str = "chrome-sidebar-chats";
 
 #[cfg(test)]
 mod tests {
@@ -573,73 +563,100 @@ mod tests {
     }
 
     #[test]
-    fn groups_key_by_project_tail_and_chats_bucket() {
+    fn groups_key_by_membership_and_the_loose_bucket_trails() {
+        let projects = vec![project("p1", "Steer.app", &["/p/steer"])];
         let mut rows = vec![
             row("a", MemberKind::Captain, None),
             row("b", MemberKind::Captain, None),
         ];
-        rows[1].project = None;
+        rows[0].project = Some("/p/steer".into());
         rows[1].tag = Some("mytag".into());
         rows[1].pinned = true;
-        let groups = project_groups(&rows, &[], &HashSet::new());
-        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(names, vec!["wire", "Chats"]);
-        let chats = &groups[1].rows[0];
-        assert_eq!(chats.tag.as_deref(), Some("mytag"));
-        assert!(chats.pinned);
+        let member = |id: &str| (id == "a").then(|| "p1".to_string());
+        let groups = project_groups(&rows, &projects, &member);
+        let keys: Vec<&str> = groups.iter().map(|g| g.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["p1", "Chats"],
+            "membership group first, loose last"
+        );
+        assert_eq!(groups[0].name, "Steer.app");
+        assert_eq!(groups[0].project.as_deref(), Some("p1"));
+        let chats = &groups[1];
+        assert_eq!(chats.project, None);
+        assert_eq!(chats.rows.len(), 1);
+        assert_eq!(chats.rows[0].tag.as_deref(), Some("mytag"));
+        assert!(chats.rows[0].pinned);
     }
 
-    /// The group carries its real project path (the menu's launch target),
-    /// a removed project re-buckets to loose WITHOUT losing its rows, and a
-    /// no-project group carries no path.
+    /// The project skeleton renders empty projects in the given (position)
+    /// order, the display name follows the registry's rule (override or the
+    /// primary root's basename), and a multi-root project carries its roots
+    /// for the header's count badge + tooltip.
     #[test]
-    fn folder_skeleton_renders_empty_projects_with_aliases() {
-        let mut rows = vec![row("a", MemberKind::Captain, None)];
-        rows[0].project = Some("/p/live".into());
-        let folders = vec![
-            ("/p/empty".to_string(), Some("空项目".to_string())),
-            ("/p/live".to_string(), None),
-        ];
-        let removed: HashSet<String> = HashSet::new();
-        let groups = project_groups(&rows, &folders, &removed);
+    fn skeleton_renders_empty_projects_with_names_and_roots() {
+        let multi = project("p1", "", &["/p/manox", "/p/manox-app"]);
+        let named = project("p2", "自定义名", &["/p/lib"]);
+        let projects = vec![multi, named];
+        let groups = project_groups(&[], &projects, &|_| None);
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].name, "空项目", "the alias is the folder's name");
-        assert_eq!(groups[0].rows.len(), 0, "an emptied project still renders");
-        assert_eq!(groups[0].project.as_deref(), Some("/p/empty"));
-        assert_eq!(groups[1].name, "live");
-        assert_eq!(groups[1].rows.len(), 1);
+        assert_eq!(
+            groups[0].name, "manox",
+            "uncustomized follows the primary basename"
+        );
+        assert_eq!(groups[0].roots, vec!["/p/manox", "/p/manox-app"]);
+        assert_eq!(groups[1].name, "自定义名");
+        assert_eq!(groups[1].roots.len(), 1);
+        assert!(
+            groups.iter().all(|g| g.rows.is_empty()),
+            "an emptied project still renders"
+        );
     }
 
-    /// A non-empty alias names the folder but never re-keys it: the
-    /// project's rows file under the alias head by PATH, not under a second
-    /// basename-headed bucket beside an empty alias head.
+    /// A membership naming a project that is not in the list (deleted
+    /// between the write and this projection) reads loose; with nothing
+    /// loose the bucket does not render at all.
     #[test]
-    fn an_aliased_folder_absorbs_its_rows_by_path() {
-        let mut rows = vec![
+    fn a_dangling_membership_reads_loose_and_an_empty_bucket_vanishes() {
+        let projects = vec![project("p1", "P", &["/p/one"])];
+        let rows = vec![row("a", MemberKind::Captain, None)];
+        let groups = project_groups(&rows, &projects, &|_| Some("gone".to_string()));
+        assert_eq!(groups.len(), 2, "the p1 skeleton stays, the row goes loose");
+        assert_eq!(groups[0].key, "p1");
+        assert!(groups[0].rows.is_empty());
+        assert_eq!(groups[1].key, LOOSE_BUCKET_KEY);
+        assert_eq!(groups[1].rows.len(), 1, "the row re-buckets, not vanishes");
+
+        let groups = project_groups(&rows, &projects, &|id: &str| {
+            (id == "a").then(|| "p1".to_string())
+        });
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].key, "p1", "no loose bucket with nothing loose");
+    }
+
+    /// Two projects whose roots overlap stay two groups: membership decides
+    /// the bucket, never the wire path (the same directory can sit in
+    /// several projects).
+    #[test]
+    fn overlapping_roots_stay_two_groups_by_membership() {
+        let projects = vec![
+            project("p1", "A", &["/p/shared"]),
+            project("p2", "B", &["/p/shared"]),
+        ];
+        let rows = vec![
             row("a", MemberKind::Captain, None),
             row("b", MemberKind::Captain, None),
         ];
-        rows[0].project = Some("/p/live".into());
-        rows[1].project = Some("/p/live".into());
-        let folders = vec![("/p/live".to_string(), Some("别名".to_string()))];
-        let groups = project_groups(&rows, &folders, &HashSet::new());
-        assert_eq!(groups.len(), 1, "one head, no basename twin");
-        assert_eq!(groups[0].name, "别名");
-        assert_eq!(groups[0].project.as_deref(), Some("/p/live"));
-        assert_eq!(groups[0].rows.len(), 2);
-    }
-
-    /// A skeleton folder whose project was client-removed dissolves; its
-    /// rows (if any) re-bucket loose.
-    #[test]
-    fn a_removed_skeleton_folder_dissolves() {
-        let mut rows = vec![row("a", MemberKind::Captain, None)];
-        rows[0].project = Some("/p/gone".into());
-        let folders = vec![("/p/gone".to_string(), None)];
-        let removed: HashSet<String> = ["/p/gone".to_string()].into_iter().collect();
-        let groups = project_groups(&rows, &folders, &removed);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].name, "Chats");
+        let groups = project_groups(&rows, &projects, &|id: &str| match id {
+            "a" => Some("p1".to_string()),
+            "b" => Some("p2".to_string()),
+            _ => None,
+        });
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].rows.len(), 1);
+        assert_eq!(groups[1].rows.len(), 1);
+        assert_eq!(groups[0].name, "A");
+        assert_eq!(groups[1].name, "B");
     }
 
     /// The chrome re-sorts by `(pinned, rank)` locally; the projection
@@ -667,37 +684,21 @@ mod tests {
         assert_eq!(projected[1].sort_stamp, 1_700_000_500);
     }
 
-    /// Removed project paths re-bucket their rows loose (the v2
-    /// remove-project semantics): the folder dissolves, the history stays.
-    #[test]
-    fn groups_carry_project_and_removed_paths_rebucket_to_loose() {
-        let mut rows = vec![
-            row("a", MemberKind::Captain, None),
-            row("b", MemberKind::Captain, None),
-            row("c", MemberKind::Captain, None),
-        ];
-        rows[0].project = None;
-        rows[1].project = Some("/p/wire".into());
-        rows[2].project = Some("/p/wire".into());
-        let removed: HashSet<String> = ["/p/wire".to_string()].into_iter().collect();
-        let groups = project_groups(&rows, &[], &removed);
-        // Everything loose: one "Chats" bucket, no project path on it.
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].name, "Chats");
-        assert_eq!(groups[0].project, None);
-        assert_eq!(
-            groups[0].rows.len(),
-            3,
-            "removed rows re-bucket, not vanish"
-        );
-
-        // Without the removal, the bucket is the project group with the path.
-        let groups = project_groups(&rows, &[], &HashSet::new());
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].name, "Chats");
-        assert_eq!(groups[0].project, None);
-        assert_eq!(groups[1].name, "wire");
-        assert_eq!(groups[1].project.as_deref(), Some("/p/wire"));
-        assert_eq!(groups[1].rows.len(), 2);
+    fn project(id: &str, name: &str, roots: &[&str]) -> crate::projects::Project {
+        crate::projects::Project {
+            id: id.to_string(),
+            name: name.to_string(),
+            name_overridden: !name.is_empty(),
+            roots: roots
+                .iter()
+                .enumerate()
+                .map(|(i, path)| crate::projects::ProjectRoot {
+                    path: std::path::PathBuf::from(path),
+                    primary: i == 0,
+                })
+                .collect(),
+            position: 0,
+            created_at: 0,
+        }
     }
 }

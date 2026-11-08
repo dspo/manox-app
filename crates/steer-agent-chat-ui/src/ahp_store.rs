@@ -25,7 +25,6 @@ use ahp_types::actions::{
     ChatInputCompletedAction, ChatPendingMessageRemovedAction, ChatPendingMessageSetAction,
     ChatToolCallConfirmedAction, ChatTurnCancelledAction, ChatTurnStartedAction,
     SessionActiveClientSetAction, SessionConfigChangedAction, SessionTitleChangedAction,
-    SessionWorkingDirectorySetAction,
 };
 use ahp_types::commands::{
     ChatSource, CreateChatParams, CreateSessionParams, FetchTurnsParams, ForkChatSource,
@@ -896,6 +895,22 @@ impl From<ahp::ClientError> for CreateSessionError {
     }
 }
 
+/// The subscribe answer a `subscribe_then` hook receives: `Answered` once
+/// the host answered the subscribe and its snapshot folded; `Failed` when
+/// the subscribe itself failed — the channel never opened, so a hook that
+/// would have dispatched onto it (the launcher send's first turn) must
+/// refund instead of firing into a closed channel.
+#[derive(Debug)]
+pub enum SubscribeThenOutcome {
+    Answered,
+    Failed(String),
+}
+
+/// The hook a queued `subscribe_then` runs once the replayed subscribe has
+/// been answered and its snapshot folded — or refused (see
+/// [`AhpStore::subscribe_then`]).
+type SubscribeThenHook = dyn FnOnce(SubscribeThenOutcome, &mut gpui::AsyncApp);
+
 /// A write issued before the handshake, replayed **in order** on connect —
 /// the landing createSession precedes its subscribes, and the subscribes
 /// precede the active-client claim, so the replay awaits each step before
@@ -908,7 +923,12 @@ enum PendingWrite {
         config: Option<serde_json::Map<String, Value>>,
         reply: async_channel::Sender<Result<Value, CreateSessionError>>,
     },
-    Subscribe(String),
+    /// A `subscribe_then` issued before the handshake: the hook rides the
+    /// queue on the variant, so it runs after the replayed subscribe has been
+    /// answered and its snapshot folded — never before the channel is open.
+    /// (The plain `Subscribe` write needs no variant: its connected path
+    /// delegates to `subscribe_then` with a no-op hook.)
+    SubscribeThen(String, Box<SubscribeThenHook>),
     Unsubscribe(String),
     Dispatch(String, Box<StateAction>),
     /// An extension command (`x-manox/*`) issued before the handshake:
@@ -1602,7 +1622,7 @@ impl AhpStore {
                         .await;
                         let _ = reply.send(result).await;
                     }
-                    PendingWrite::Subscribe(uri) => {
+                    PendingWrite::SubscribeThen(uri, then) => {
                         let folded = tokio_wait({
                             let client = client.clone();
                             let uri = uri.clone();
@@ -1621,20 +1641,39 @@ impl AhpStore {
                             }
                         })
                         .await;
-                        // Fold the snapshot the same way the direct path does:
-                        // without it a fresh landing session runs on the
+                        // Fold the snapshot the same way the direct path does
+                        // (without it a fresh landing session runs on the
                         // empty-session fallback whose `config` seat is None,
-                        // and every configChanged merge no-ops (the chip's
-                        // picked model never lands).
-                        if let Ok(result) = folded
-                            && let Some(snapshot) = result.snapshot
-                        {
-                            let _ = this.update(cx, |store, cx| {
-                                let uri = snapshot.resource.clone();
-                                if store.apply_snapshot_confirmed(&uri, snapshot.state) {
-                                    cx.notify();
-                                }
-                            });
+                        // and every configChanged merge no-ops), then run the
+                        // hook in a SEPARATE update — hooks call back into
+                        // the store (the launcher send dispatches its turn),
+                        // and re-entering the held borrow panics.
+                        // The hook learns the subscribe's fate: a failed
+                        // subscribe never opened the channel, so the hook
+                        // runs with `Failed` and its caller refunds whatever
+                        // it meant to dispatch — it never fires pre-open.
+                        match folded {
+                            Ok(result) => {
+                                // Fold the snapshot the same way the direct
+                                // path does (without it a fresh landing
+                                // session runs on the empty-session fallback
+                                // whose `config` seat is None, and every
+                                // configChanged merge no-ops), then run the
+                                // hook in a SEPARATE update — hooks call
+                                // back into the store (the launcher send
+                                // dispatches its turn), and re-entering the
+                                // held borrow panics.
+                                let _ = this.update(cx, |store, cx| {
+                                    if let Some(snapshot) = result.snapshot {
+                                        let uri = snapshot.resource.clone();
+                                        if store.apply_snapshot_confirmed(&uri, snapshot.state) {
+                                            cx.notify();
+                                        }
+                                    }
+                                });
+                                then(SubscribeThenOutcome::Answered, cx);
+                            }
+                            Err(err) => then(SubscribeThenOutcome::Failed(err), cx),
                         }
                     }
                     PendingWrite::Unsubscribe(uri) => {
@@ -1946,12 +1985,11 @@ impl AhpStore {
                     if own {
                         // Every own refusal is visible: a config write
                         // rolls its optimistic twin back by VALUE (see
-                        // `rollback_refused_config`), a cwd write rolls its
-                        // latest twin, and any other refused action — a
-                        // submit, an answer card, a plan verdict — at least
-                        // says so on the transcript. The composer pushes
-                        // its bubble optimistically, and a refusal IS the
-                        // echo, so silence here would strand the bubble
+                        // `rollback_refused_config`), and any other refused
+                        // action — a submit, an answer card, a plan verdict
+                        // — at least says so on the transcript. The composer
+                        // pushes its bubble optimistically, and a refusal IS
+                        // the echo, so silence here would strand the bubble
                         // with no reply and no explanation.
                         // The refusal speaks on the SESSION's bucket, not the
                         // channel's own id: a chat payload carries no URI of
@@ -1968,15 +2006,8 @@ impl AhpStore {
                             Some(id_of(&envelope.channel).to_string())
                         };
                         if let Some(session_id) = session_id {
-                            match config_values_of(&envelope.action) {
-                                Some(config) => {
-                                    self.rollback_refused_config(&session_id, config);
-                                }
-                                None => {
-                                    if let Some(keys) = touched_config_keys(&envelope.action) {
-                                        self.rollback_latest(&session_id, &keys);
-                                    }
-                                }
+                            if let Some(config) = config_values_of(&envelope.action) {
+                                self.rollback_refused_config(&session_id, config);
                             }
                             // The refusal speaks on the OWNING session's
                             // table (a chat payload carries no URI of its
@@ -2006,8 +2037,6 @@ impl AhpStore {
                 // confirmed value, not past it.
                 if own && let Some(config) = config_values_of(&envelope.action) {
                     self.confirm_config(id_of(&envelope.channel), config);
-                } else if own && let Some(keys) = touched_config_keys(&envelope.action) {
-                    self.confirm_latest(id_of(&envelope.channel), &keys);
                 }
                 let chat_id = if envelope.channel.starts_with("ahp-chat:/") {
                     Some(id_of(&envelope.channel).to_string())
@@ -2172,20 +2201,18 @@ impl AhpStore {
         // The object row's archived bit is written HERE, at the one app-side
         // choke point every archive decision (sidebar single, batch,
         // `/exit`'s teardown, the archive command) passes through. The row is
-        // the draft refill's source of truth: an archived conversation whose
-        // row stayed unarchived outlives its own archive as a zombie draft,
-        // and the next `new_container` refills it into a `createSession`
-        // the host can only answer "already exists".
+        // the client's durable retirement fact — it keeps a retired
+        // conversation retired across restarts (the container death
+        // predicate and the sidebar's archived read consult it).
         //
         // It is written unconditionally, before the dispatch: that is a
         // crash-ordering choice, not a causality between the two. A crash
-        // between them leaves the row retired — the conservative side, since
-        // the refill must not resurrect a draft the user just archived — and
+        // between them leaves the row retired — the conservative side — and
         // a refused dispatch leaves it retired too: the catalogue walk that
         // re-seeds a rejected batch restores the summary row, never the
-        // draft candidacy. Archives that never pass through this client (a
-        // host cascade, another client) do not write the bit; the refill's
-        // host-retired check is the guard for those.
+        // row's archived bit. Archives that never pass through this client
+        // (a host cascade, another client) do not write the bit; the host's
+        // own session status is the guard for those.
         if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
             for id in session_ids {
                 objects.set_archived(id, archived);
@@ -2338,13 +2365,39 @@ impl AhpStore {
     /// Subscribe one channel. The snapshot (state-bearing channels) folds
     /// into the book when the host answers.
     pub fn subscribe(&mut self, uri: impl Into<String>, cx: &mut gpui::Context<Self>) {
+        self.subscribe_then(uri, |_, _| {}, cx);
+    }
+
+    /// Subscribe one channel and run `then` once the host has ANSWERED the
+    /// subscribe — with NO store borrow held (the hook receives the app
+    /// handle only, because hooks call back into the store: the launcher
+    /// send dispatches its turn, and a store update on the hook's path would
+    /// re-enter the borrow). The ordering seam for writes that must trail a
+    /// channel's opening: the racing writes are independent tokio tasks with
+    /// no wire-order guarantee between them, and the launcher send's first
+    /// turn that lands before the host opened the fresh chat is answered
+    /// not-found and silently lost (the session's journal never
+    /// materializes).
+    ///
+    /// The hook carries the subscribe's outcome: `Answered` on success,
+    /// `Failed` when the subscribe itself failed — the channel never opened,
+    /// so the hook must NOT dispatch onto it; its caller refunds instead
+    /// (both this direct leg and the connect-replay leg behave alike).
+    pub fn subscribe_then(
+        &mut self,
+        uri: impl Into<String>,
+        then: impl FnOnce(SubscribeThenOutcome, &mut gpui::AsyncApp) + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) {
         let uri: String = uri.into();
         // A write issued while the pre-connect replay is running queues behind
         // it: racing the landing createSession/subscribe silently loses the
         // first message (the host answers not-found for a session still
-        // being created).
+        // being created). The hook rides the queue on the variant — it runs
+        // after the replayed subscribe has been answered and folded.
         if self.client.is_none() || self.replay_pending {
-            self.pending_writes.push(PendingWrite::Subscribe(uri));
+            self.pending_writes
+                .push(PendingWrite::SubscribeThen(uri, Box::new(then)));
             return;
         }
         let client = self.client.clone().expect("guard above");
@@ -2356,23 +2409,29 @@ impl AhpStore {
                     .map_err(|err| err.to_string())
             })
             .await;
-            let result: SubscribeResult = match value
-                .and_then(|v| serde_json::from_value(v).map_err(|err| err.to_string()))
-            {
-                Ok(result) => result,
+            let outcome = match value.and_then(|v| {
+                serde_json::from_value::<SubscribeResult>(v).map_err(|e| e.to_string())
+            }) {
+                Ok(result) => {
+                    let _ = this.update(cx, |store, cx| {
+                        if let Some(snapshot) = result.snapshot {
+                            let uri = snapshot.resource.clone();
+                            if store.apply_snapshot_confirmed(&uri, snapshot.state) {
+                                cx.notify();
+                            }
+                        }
+                    });
+                    SubscribeThenOutcome::Answered
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "subscribe failed");
-                    return;
+                    SubscribeThenOutcome::Failed(err)
                 }
             };
-            if let Some(snapshot) = result.snapshot {
-                let _ = this.update(cx, |store, cx| {
-                    let uri = snapshot.resource.clone();
-                    if store.apply_snapshot_confirmed(&uri, snapshot.state) {
-                        cx.notify();
-                    }
-                });
-            }
+            // The hook runs with NO store borrow held: hooks call back into
+            // the store (the launcher send dispatches its turn), so any
+            // store update on the hook's path would re-enter the borrow.
+            then(outcome, cx);
         })
         .detach();
     }
@@ -2703,33 +2762,6 @@ impl AhpStore {
         }
     }
 
-    /// Roll back the LATEST in-flight write for each named key — the
-    /// value-blind fallback for actions whose payload does not echo the
-    /// written value back comparable (the cwd write's directory URI).
-    fn rollback_latest(&mut self, session_id: &str, keys: &[String]) {
-        for key in keys {
-            if let Some(position) = self
-                .optimistic_undo
-                .iter()
-                .rposition(|(sid, k, _, _)| sid == session_id && k == key)
-            {
-                let (_, _, base, _) = self.optimistic_undo.remove(position);
-                if let Some(state) = self.book.sessions.get_mut(session_id)
-                    && let Some(seat) = &mut state.config
-                {
-                    match base {
-                        Some(v) => {
-                            seat.values.insert(key.clone(), v);
-                        }
-                        None => {
-                            seat.values.remove(key);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Spend a confirmed write's undo entry (matched by value) and every
     /// earlier entry it superseded: once the host echoed this exact write,
     /// its pre-write value is no longer a truth to restore — a later
@@ -2752,20 +2784,6 @@ impl AhpStore {
                 .map(|(_, entry)| entry)
                 .collect();
             self.optimistic_undo = keep;
-        }
-    }
-
-    /// Spend the latest entry per named key — the acceptance half for the
-    /// value-blind actions (see `rollback_latest`).
-    fn confirm_latest(&mut self, session_id: &str, keys: &[String]) {
-        for key in keys {
-            if let Some(position) = self
-                .optimistic_undo
-                .iter()
-                .rposition(|(sid, k, _, _)| sid == session_id && k == key)
-            {
-                self.optimistic_undo.remove(position);
-            }
         }
     }
 
@@ -2837,7 +2855,7 @@ impl AhpStore {
     pub fn diagnostic_queued_subscribes(&self) -> usize {
         self.pending_writes
             .iter()
-            .filter(|write| matches!(write, PendingWrite::Subscribe(_)))
+            .filter(|write| matches!(write, PendingWrite::SubscribeThen(..)))
             .count()
     }
 
@@ -3009,22 +3027,6 @@ impl AhpStore {
     /// Rename the session.
     pub fn set_title(&mut self, session_id: &str, title: String) {
         let action = StateAction::SessionTitleChanged(SessionTitleChangedAction { title });
-        self.dispatch(session_uri(session_id), action);
-    }
-
-    /// Replace the session's (single) working directory. The chip echoes
-    /// optimistically — the host's `configChanged` confirmation only lands
-    /// after the engine journals the change (the model picker's trade-off).
-    pub fn set_cwd(&mut self, session_id: &str, path: &str) {
-        let mut config = serde_json::Map::new();
-        config.insert(
-            config_keys::WORKING_DIRECTORY.to_string(),
-            Value::String(path.to_string()),
-        );
-        self.optimistic_config(session_id, &config);
-        let action = StateAction::SessionWorkingDirectorySet(SessionWorkingDirectorySetAction {
-            directory: format!("file://{path}"),
-        });
         self.dispatch(session_uri(session_id), action);
     }
 
@@ -3805,27 +3807,10 @@ pub fn pending_ask_from_ahp(
     })
 }
 
-/// The config keys a write-ahead action touches, for the reconciliation
-/// halves: a refusal (`rejectionReason`) rolls them back out of the client
-/// fold so a refused pick does not linger on the UI, and our own accepted
-/// echo spends their undo history so a later refusal restores to the
-/// confirmed value, not past it.
-fn touched_config_keys(action: &ahp_types::actions::StateAction) -> Option<Vec<String>> {
-    use ahp_types::actions::StateAction as A;
-    match action {
-        A::SessionConfigChanged(changed) => {
-            Some(changed.config.keys().map(|k| k.to_string()).collect())
-        }
-        // The cwd write is a dedicated action, not a config change.
-        A::SessionWorkingDirectorySet(_) => Some(vec![config_keys::WORKING_DIRECTORY.to_string()]),
-        _ => None,
-    }
-}
-
 /// The written values of a config action, when the action echoes them
-/// back comparable — the value-matched reconciliation half of
-/// `touched_config_keys` (the cwd write's payload is a file URI, not the
-/// config-seat string, so it stays on the value-blind path).
+/// back comparable — the value-matched reconciliation half (the refused
+/// pick rolls its optimistic twin out of the client fold, an accepted echo
+/// spends its undo entry).
 fn config_values_of(
     action: &ahp_types::actions::StateAction,
 ) -> Option<&serde_json::Map<String, Value>> {
@@ -3839,7 +3824,10 @@ fn config_values_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ahp_types::actions::{ChatDeltaAction, ChatTurnCompleteAction, SessionTitleChangedAction};
+    use ahp_types::actions::{
+        ChatDeltaAction, ChatTurnCompleteAction, SessionTitleChangedAction,
+        SessionWorkingDirectorySetAction,
+    };
     use gpui::AppContext as _;
 
     /// The sub-agent block's read face: the host's background-work subagent

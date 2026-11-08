@@ -86,19 +86,11 @@ impl Workspace {
             self.submit_pending_ask(cx);
             return;
         }
-        // Block submit on empty input or while the project picker is open.
-        // Setting the project after a message lands is a no-op (`set_project`
-        // guards on `!messages.is_empty()`), so the project would be silently
-        // dropped. A message submitted while a turn is running is *not* dropped
-        // here — it is routed through `send_user_turn`, which enqueues it as a
-        // follow-up instead of interrupting the running turn.
-        if (text.trim().is_empty() && attachments.is_empty())
-            || self.chat.read(cx).project_picker_pending
-        {
-            tracing::info!(
-                pending_picker = self.chat.read(cx).project_picker_pending,
-                "submit swallowed by composer guard"
-            );
+        // Block submit on empty input. A message submitted while a turn is
+        // running is *not* dropped here — it is routed through
+        // `send_user_turn`, which enqueues it as a follow-up instead of
+        // interrupting the running turn.
+        if text.trim().is_empty() && attachments.is_empty() {
             self.chat.update(cx, |chat, cx| {
                 chat.pending_attachments = attachments;
                 cx.notify();

@@ -34,17 +34,21 @@
 //! copy is app chrome by definition.
 
 pub mod divider;
+pub mod launcher;
 pub mod main_surface;
 pub mod panel;
 pub mod primitives;
+pub mod project_dialog;
 pub mod right_pane;
 pub mod session_list;
 pub mod shell;
 pub mod theme;
 pub mod titlebar;
 
+pub use launcher::{Launcher, LauncherAction};
 pub use main_surface::{MainSurface, MainSurfaceHandle};
 pub use panel::PanelSurface;
+pub use project_dialog::{ProjectDialog, ProjectRootRow};
 pub use right_pane::{RightPane, TabStore, ToolTab, ToolTabFactory};
 pub use session_list::{
     CustomizationRow, FixedRow, PendingKind, SessionGroup, SessionList, SessionRowData,
