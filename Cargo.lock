@@ -11150,6 +11150,7 @@ dependencies = [
  "steer-components",
  "steer-ext-agents",
  "steer-i18n",
+ "steer-updater",
  "supervisor",
  "toml 0.8.23",
  "tracing",

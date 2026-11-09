@@ -1002,3 +1002,18 @@ preview-unavailable = 无法渲染预览（文件可能已被移动或删除）
 # New-thread landing（宿主拒绝创建新会话时的落新失败提示）
 new-thread-create-failed = 新建会话失败：{ $err }
 new-thread-no-session = 会话尚未就绪
+
+## steer-updater（macOS 应用内更新：菜单项、About 更新区、通知）
+
+menu-check-updates = 检查更新…
+update-check = 检查更新…
+update-available = 发现新版本 { $version }
+update-install = 下载并安装
+update-downloading = 正在下载 { $version }…
+update-download-pending = 下载中…
+update-ready = 新版本已就绪，重启 Steer 后生效
+update-restart = 重启以更新
+update-failed = 更新失败：{ $err }
+update-retry = 重试
+update-uptodate = 已是最新版本
+update-not-bundle = 未以安装的 App 形态运行，无法自动更新

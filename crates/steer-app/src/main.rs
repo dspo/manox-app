@@ -9,6 +9,13 @@ use gpui::{WindowBounds, WindowOptions};
 // Serves the client-side-decoration request below; compiled out with it.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use gpui::WindowDecorations;
+// The manual update check's blocking HTTP call rides AsyncApp::background_spawn.
+#[cfg(target_os = "macos")]
+use gpui::AppContext as _;
+#[cfg(target_os = "macos")]
+use gpui_component::WindowExt as _;
+#[cfg(target_os = "macos")]
+use gpui_component::notification::Notification;
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use std::borrow::Cow;
 
@@ -20,6 +27,10 @@ mod tray;
 // The harness backend is selected at build time; exactly one must be active.
 
 actions!(steer, [Quit, ToggleFullscreen, OpenAbout]);
+// The updater surface is macOS-only: the action exists where a menu item can
+// dispatch it and nowhere else.
+#[cfg(target_os = "macos")]
+actions!(steer, [CheckUpdates]);
 
 /// Minimum window width budget, left to right:
 /// shell gutter (10 left + 4 right) + card borders (2) + sidebar (260) + a
@@ -131,6 +142,11 @@ fn main() {
         gpui_component::set_locale(steer_i18n::current().token());
 
         agent_ui::slash_command::init(cx);
+
+        // The updater's store must exist before any surface (About window,
+        // menu, notification path) reads it; the check schedule starts with
+        // the main window below.
+        steer_updater::init(cx);
 
         // Embedded OFL typefaces. Lilex ships only Light/Medium in upright and
         // italic cuts: message body inherits Light, markdown bold/headings and
@@ -274,6 +290,21 @@ fn main() {
         cx.on_action(|_: &OpenAbout, cx: &mut App| {
             about::open_about_window(cx);
         });
+        // The menu's 检查更新… entry: like the scheduled check but it answers
+        // the user — "up to date" lands as a notification, failures land in
+        // the About window's update section instead of staying silent.
+        #[cfg(target_os = "macos")]
+        cx.on_action(|_: &CheckUpdates, cx: &mut App| run_manual_update_check(cx));
+        // Update announcements ride the updater's store: any transition that
+        // lands on an unannounced `Available` pushes one notification into
+        // the main window. The marker is only recorded on actual delivery, so
+        // a discovery made while no window exists stays pending for the next
+        // window (re)open (see `announce_available_update`).
+        #[cfg(target_os = "macos")]
+        cx.observe_global::<steer_updater::UpdateStore>(|cx| {
+            announce_available_update(cx);
+        })
+        .detach();
         // macOS system menu items are evaluated against App-level on_action
         // handlers, not the view tree's local on_action listeners. Registering
         // the dispatch here keeps Settings… enabled when the Workspace is the
@@ -412,6 +443,12 @@ fn main() {
                 // badge is dock-affordance, not tray state, and the tray
                 // install failing must not take the badge with it.
                 badge::spawn_pump(cx);
+
+                // Auto-update schedule (macOS): one delayed pass clear of the
+                // first frame, then every 12h while the app lives. Silent —
+                // a found release announces through the store observer.
+                #[cfg(target_os = "macos")]
+                steer_updater::spawn_startup_check(cx);
             });
 
         })
@@ -438,6 +475,70 @@ fn main() {
             supervisor::global().terminate_all();
         }
     }
+}
+
+/// Push the "new version available" notification into the main window for
+/// the store's unannounced `Available` release, and mark it announced only
+/// on delivery — a window-less discovery (tray-parked) stays pending here
+/// for the next window (re)open. Returns whether a notice was delivered.
+#[cfg(target_os = "macos")]
+fn announce_available_update(cx: &mut App) -> bool {
+    let Some(release) = steer_updater::unnotified_release(cx) else {
+        return false;
+    };
+    let version = release.version.to_string();
+    let text = steer_i18n::t_str("update-available", &[("version", version.as_str())]);
+    let delivered = agent_ui::dispatch::window_global()
+        .map(|handle| {
+            handle
+                .update(cx, |_, window, cx| {
+                    window.push_notification(Notification::info(text), cx);
+                })
+                .is_ok()
+        })
+        .unwrap_or(false);
+    if delivered {
+        steer_updater::mark_notified(&release);
+    } else {
+        tracing::warn!(
+            "update to v{version} is available but no main window is open; announcing on the next window open"
+        );
+    }
+    delivered
+}
+
+/// The menu's 检查更新… / About-window check: like the scheduled check but it
+/// answers the user — "up to date" lands as a notification, failures land in
+/// the About window's update section instead of staying silent. A found
+/// release announces through the store observer like any other discovery.
+#[cfg(target_os = "macos")]
+fn run_manual_update_check(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let current = steer_updater::current_version();
+        let result = cx
+            .background_spawn(async move { steer_updater::check_latest(&current) })
+            .await;
+        cx.update(|cx| match result {
+            Ok(Some(release)) => {
+                steer_updater::UpdateStore::set_available(cx, Some(release));
+            }
+            Ok(None) => {
+                steer_updater::UpdateStore::set_state(cx, None);
+                if let Some(handle) = agent_ui::dispatch::window_global() {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        window.push_notification(
+                            Notification::info(steer_i18n::t("update-uptodate")),
+                            cx,
+                        );
+                    });
+                }
+            }
+            Err(err) => {
+                steer_updater::UpdateStore::set_failed(cx, None, err.to_string());
+            }
+        });
+    })
+    .detach();
 }
 
 /// Open the main window over the process-lifetime `Workspace`, creating the
@@ -484,6 +585,10 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
         .map_err(|e| anyhow::anyhow!("failed to open the main window: {e}"))?;
     agent_ui::dispatch::set_window(handle);
 
+    // An update discovered while parked (no window) announces here, once.
+    #[cfg(target_os = "macos")]
+    announce_available_update(cx);
+
     // A re-opened window starts unfocused; restore keyboard focus to the
     // conversation pane. The first open already focuses the composer inside
     // `Workspace::new`.
@@ -525,6 +630,7 @@ fn build_app_menus() -> Vec<Menu> {
         vec![
             Menu::new("Steer").items([
                 MenuItem::action(steer_i18n::t("menu-about"), OpenAbout),
+                MenuItem::action(steer_i18n::t("menu-check-updates"), CheckUpdates),
                 MenuItem::separator(),
                 MenuItem::action(steer_i18n::t("menu-settings"), agent_ui::OpenSettings),
                 MenuItem::separator(),

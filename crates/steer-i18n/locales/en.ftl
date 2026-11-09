@@ -1026,3 +1026,18 @@ preview-unavailable = Cannot render the preview (the file may have been moved or
 # New-thread landing (the fresh conversation the host refused to create)
 new-thread-create-failed = Failed to start a new conversation: { $err }
 new-thread-no-session = no session is bound yet
+
+## steer-updater (macOS in-app updates: the menu entry, the About section, notifications)
+
+menu-check-updates = Check for Updates…
+update-check = Check for Updates…
+update-available = New version { $version } is available
+update-install = Download && Install
+update-downloading = Downloading { $version }…
+update-download-pending = Downloading…
+update-ready = Ready — restart Steer to apply it
+update-restart = Restart to Update
+update-failed = Update failed: { $err }
+update-retry = Retry
+update-uptodate = Steer is up to date
+update-not-bundle = Not running from an installed app bundle; in-app updates are unavailable

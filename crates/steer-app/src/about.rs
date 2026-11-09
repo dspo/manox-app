@@ -1,6 +1,8 @@
 //! About window: centered floating dialog with the app icon, the headline
 //! `Steer.app v<version>+<short commit>` with the standard copy control riding
-//! beside it, and the provenance block — every row is a label/value pair laid
+//! beside it, the update section (macOS only — the updater's store projected
+//! into one status line plus its state-matched action button), and the
+//! provenance block — every row is a label/value pair laid
 //! out on one continuous vertical axis (the labels right-align onto it, the
 //! values left-align off it): the OS (with the chip's marketing name where the
 //! platform reports one), the rustc the binary was compiled by, and the
@@ -13,6 +15,11 @@
 use std::sync::Arc;
 
 use gpui::{prelude::*, *};
+// The update section's button pieces exist only where the section does.
+#[cfg(target_os = "macos")]
+use gpui_component::button::Button;
+#[cfg(target_os = "macos")]
+use gpui_component::{Disableable as _, Sizable as _};
 use gpui_component::{StyledExt as _, Theme, h_flex, v_flex};
 use manox_agent::version;
 use steer_components::copy_feedback::{CopiedRegistry, CopyFeedbackHost, copy_button};
@@ -20,9 +27,13 @@ use steer_i18n as i18n;
 
 use crate::pins;
 
-/// About dialog size. The height has to fit the icon, the headline and the
-/// provenance axis without clipping; `rows_fit_in_window` pins that.
+/// About dialog size. The height has to fit the icon, the headline, the
+/// update section (macOS only — the updater has no surface elsewhere), and
+/// the provenance axis without clipping; `rows_fit_in_window` pins that.
 const WINDOW_WIDTH: f32 = 440.;
+#[cfg(target_os = "macos")]
+const WINDOW_HEIGHT: f32 = 500.;
+#[cfg(not(target_os = "macos"))]
 const WINDOW_HEIGHT: f32 = 440.;
 
 /// One provenance row: a stack identifier label and its build-time value.
@@ -75,6 +86,123 @@ impl AboutWindow {
             rows: provenance_rows(),
             copied: CopiedRegistry::default(),
         }
+    }
+
+    /// The update section between the headline and the provenance axis: one
+    /// row per store state — a status line plus the matching action button
+    /// (下载并安装 / disabled 下载中… / 重启以更新 / 重试), and just the check
+    /// button while the store is idle. macOS only; the updater's seams bail
+    /// on every other platform, so the surface is gated to match.
+    #[cfg(target_os = "macos")]
+    fn update_section(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = Theme::global(cx);
+        let (status, action) = match steer_updater::UpdateStore::state(cx) {
+            None => (
+                None,
+                update_button(
+                    "update-action",
+                    i18n::t("update-check"),
+                    false,
+                    |_, _, cx| crate::run_manual_update_check(cx),
+                ),
+            ),
+            Some(steer_updater::UpdateState::Available(release)) => {
+                let version = release.version.to_string();
+                (
+                    Some(i18n::t_str(
+                        "update-available",
+                        &[("version", version.as_str())],
+                    )),
+                    update_button(
+                        "update-action",
+                        i18n::t("update-install"),
+                        false,
+                        |_, _, cx| steer_updater::start_update_download(cx),
+                    ),
+                )
+            }
+            Some(steer_updater::UpdateState::Downloading(release)) => {
+                let version = release.version.to_string();
+                (
+                    Some(i18n::t_str(
+                        "update-downloading",
+                        &[("version", version.as_str())],
+                    )),
+                    update_button(
+                        "update-action",
+                        i18n::t("update-download-pending"),
+                        true,
+                        |_, _, _| {},
+                    ),
+                )
+            }
+            Some(steer_updater::UpdateState::ReadyToInstall { .. }) => (
+                Some(i18n::t("update-ready")),
+                update_button(
+                    "update-action",
+                    i18n::t("update-restart"),
+                    false,
+                    |_, _, cx| {
+                        cx.restart();
+                    },
+                ),
+            ),
+            Some(steer_updater::UpdateState::Failed { release, message }) => {
+                let retry_download = release.is_some();
+                (
+                    Some(i18n::t_str("update-failed", &[("err", message.as_ref())])),
+                    update_button(
+                        "update-action",
+                        i18n::t("update-retry"),
+                        false,
+                        move |_, _, cx| {
+                            if retry_download {
+                                steer_updater::start_update_download(cx);
+                            } else {
+                                crate::run_manual_update_check(cx);
+                            }
+                        },
+                    ),
+                )
+            }
+        };
+        let row = h_flex()
+            .debug_selector(|| "about-update".into())
+            .max_w_full()
+            .items_center()
+            .gap_3()
+            .children(status.map(|text| {
+                div()
+                    .debug_selector(|| "about-update-status".into())
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(text)
+            }))
+            .child(action);
+        Some(row.into_any_element())
+    }
+
+    /// No update section off macOS.
+    #[cfg(not(target_os = "macos"))]
+    fn update_section(&mut self, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        None
+    }
+}
+
+/// The section's action button: one small outline button whose label and
+/// behavior track the store state. Disabled buttons carry no handler.
+#[cfg(target_os = "macos")]
+fn update_button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    disabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Button {
+    let button = Button::new(id).label(label).small().outline();
+    if disabled {
+        button.disabled(true)
+    } else {
+        button.on_click(on_click)
     }
 }
 
@@ -160,6 +288,9 @@ fn details_block(rows: &[InfoRow]) -> String {
 
 impl Render for AboutWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The update section is built before the theme borrow — it consults
+        // the theme itself.
+        let update_section = self.update_section(cx);
         let theme = Theme::global(cx);
 
         // The provenance block: labels right-align onto one continuous
@@ -227,6 +358,7 @@ impl Render for AboutWindow {
                     )
                     .child(copy_control),
             )
+            .children(update_section)
             .child(axis);
 
         div()
@@ -422,5 +554,70 @@ mod tests {
             axis.size.height > px(40.),
             "the axis spans the provenance rows: {axis:?}"
         );
+        // The update section rides between the headline and the axis
+        // (macOS only — the updater has no surface elsewhere) and must stay
+        // inside the same padding box.
+        #[cfg(target_os = "macos")]
+        {
+            let update = cx
+                .debug_bounds("about-update")
+                .expect("the update section must be laid out");
+            assert!(
+                update.bottom() <= dialog.bottom() - px(16.),
+                "the update section is pushed through the bottom padding: {update:?} vs {dialog:?}"
+            );
+            assert!(
+                update.top() >= dialog.top() + px(16.),
+                "the update section is pushed through the top padding: {update:?} vs {dialog:?}"
+            );
+        }
+    }
+
+    /// The section is always laid out on macOS (idle renders the check
+    /// button), and the status line appears exactly when the store carries
+    /// a state.
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn the_update_section_tracks_the_store(cx: &mut TestAppContext) {
+        let window_size = size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT));
+        cx.update(gpui_component::init);
+        let window = cx.open_window(window_size, |_, cx| AboutWindow::new(cx));
+
+        cx.update(|cx| {
+            steer_updater::UpdateStore::set_available(cx, Some(sample_release()));
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("about-update").is_some(),
+            "an Available state renders the section"
+        );
+        assert!(
+            cx.debug_bounds("about-update-status").is_some(),
+            "an Available state renders the status line"
+        );
+
+        cx.update(|_window, cx| steer_updater::UpdateStore::set_state(cx, None));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("about-update").is_some(),
+            "the idle state still renders the check button"
+        );
+        assert!(
+            cx.debug_bounds("about-update-status").is_none(),
+            "the idle state carries no status line"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sample_release() -> steer_updater::ReleaseInfo {
+        steer_updater::ReleaseInfo {
+            version: "0.4.0".parse().expect("valid semver"),
+            asset_name: "Steer_0.4.0_macos_arm64.dmg".into(),
+            asset_url: "https://github.com/dspo/manox-app/releases/download/v0.4.0/Steer_0.4.0_macos_arm64.dmg".into(),
+            asset_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            asset_size: 1024,
+            release_url: "https://github.com/dspo/manox-app/releases/tag/v0.4.0".into(),
+        }
     }
 }
