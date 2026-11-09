@@ -422,6 +422,20 @@ impl LauncherState {
         )
     }
 
+    /// Fire the composer's ⏎ exactly as the key path does — the InputEvent
+    /// emitted from the input's own update, so the `subscribe_in` handler
+    /// runs under THIS entity's lease. The lease-accurate driver for the
+    /// boundary regression. Test-support.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn diagnostic_emit_enter(&self, cx: &mut Context<Self>) {
+        self.input.update(cx, |_, cx| {
+            cx.emit(gpui_component::input::InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            })
+        });
+    }
+
     /// The send's payload, consumed out of this state — `None` for a blank
     /// draft (the composer stays untouched). The IN-FLIGHT check is the
     /// caller's peek ([`Self::first_turn_in_flight`], the PressEnter

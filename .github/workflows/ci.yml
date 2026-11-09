@@ -130,7 +130,7 @@ jobs:
   # The fast gate: everything below `needs` it, so a formatting slip or a
   # chrome/chat boundary regression fails in ~1 min instead of after a build.
   guards:
-    name: guards (fmt + deps)
+    name: guards (fmt + invariants)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -162,6 +162,13 @@ jobs:
       # executable definition of the decoupling).
       - name: Chat-crate dependency guard
         run: ./script/check-chat-crate-deps.sh
+
+      # Chrome/host boundary invariant: chrome state is written only by the
+      # projection pump, host actions only through the deferred command
+      # channel. A violation compiles cleanly and aborts at gesture time, so
+      # review alone cannot hold this line (AGENTS.md "chrome/host 边界").
+      - name: Chrome-boundary guard
+        run: ./script/check-chrome-boundary.sh
 
   verify_linux:
     name: verify (linux amd64)

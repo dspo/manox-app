@@ -1269,6 +1269,18 @@ impl Workspace {
         matches!(self.view_mode, ViewMode::Launcher)
     }
 
+    /// Press ⏎ on the launcher composer under the launcher's own lease (the
+    /// real gesture path: the input emits, the subscriber runs in
+    /// `LauncherState::update`). Test-support.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_launcher_press_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        launcher.update(cx, |state, cx| state.diagnostic_emit_enter(cx));
+        let _ = window;
+    }
+
     /// Type into the launcher composer, replacing whatever it carries.
     /// Test-support: the driver face for the ⏎-send regressions.
     #[cfg(feature = "test-support")]

@@ -188,8 +188,8 @@ fn selection_toggles_and_commits_the_batch_through_one_hook(cx: &mut TestAppCont
     assert_eq!(picked(&shell, cx), None, "the commit leaves selection mode");
     // The shell did NOT pre-drop: the confirmed archive's row drop is the
     // host path's optimistic half (which may confirm with the dependents
-    // first). Replaying that drop face (what the app's `drop_sidebar_row`
-    // calls) removes the batch's rows.
+    // first). Replaying that drop face (the app's archive path projects the
+    // archived bits out on its next snapshot) removes the batch's rows.
     assert!(
         visual.debug_bounds("chrome-session-row-t-2").is_some(),
         "the rows stay until the host path drops them"

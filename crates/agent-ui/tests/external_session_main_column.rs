@@ -108,7 +108,7 @@ async fn external_row_click_brings_the_session_to_the_main_column(cx: &mut TestA
         "the external session card paints in the main column after the resume click"
     );
     assert_eq!(
-        shell.read_with(cx, |s, _| s.active.clone()),
+        shell.read_with(cx, |s, cx| s.active_row(cx)),
         Some(row_id.clone()),
         "the shell's highlight follows the clicked external row"
     );

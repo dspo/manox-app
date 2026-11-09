@@ -266,7 +266,7 @@ impl NavFixture {
 
 /// Step the fixture pointer by `delta`; returns the landed id (`None` at an
 /// edge or with nothing loaded — never a no-op move).
-fn nav_step(delta: i32) -> () {
+fn nav_step(delta: i32) {
     let landed = NAV_FIXTURE.with(|cell| {
         let mut f = cell.borrow_mut();
         let i = f.index?;

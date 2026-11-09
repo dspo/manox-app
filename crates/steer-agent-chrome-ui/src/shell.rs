@@ -447,6 +447,12 @@ impl Shell {
         cx.notify();
     }
 
+    /// Whether the modal dialog slot is mounted (the host projection's read
+    /// face; the field itself is private to the render path).
+    pub fn has_dialog_surface(&self) -> bool {
+        self.dialog_surface.is_some()
+    }
+
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let right = cx.new(|_| RightPane::new(config.tool_kinds));
         let panel = config.panel_surface.map(|surface| PanelSlot {
