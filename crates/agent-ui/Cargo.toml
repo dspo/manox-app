@@ -101,6 +101,7 @@ required-features = ["test-support"]
 
 [dev-dependencies]
 manox-agent = { workspace = true, features = ["test-support"] }
+manox-ahp-runtime.workspace = true
 steer-ghostty = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 gpui_platform.workspace = true

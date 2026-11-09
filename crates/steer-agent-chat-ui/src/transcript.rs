@@ -433,6 +433,36 @@ fn push_turn(
     let mut has_segment = false;
     let usage = turn.usage.map(crate::transcript::usage_of);
     let mut segment_parts: Vec<(String, SegmentEntryNode)> = Vec::new();
+    // The turn's elicitation parts and its ask-shaped tool-call ids, both
+    // by id. The runtime's ask tool journals the AskUserQuestion TOOL CALL
+    // and the elicitation under the SAME id (`call_…`) inside ONE turn — it
+    // registers the card and returns from the tool call while the turn is
+    // still open — so an id in both families is ONE ask: exactly one
+    // top-level card, emitted at the tool-call part's position, in whatever
+    // order the parts arrived. The scan is per turn: an elicitation split
+    // into a later turn would project its own card again.
+    let ask_requests: std::collections::HashMap<&str, &ahp_types::state::InputRequestResponsePart> =
+        turn.parts
+            .iter()
+            .filter_map(|part| match part {
+                ResponsePart::InputRequest(input) => Some((input.request.id.as_str(), input)),
+                _ => None,
+            })
+            .collect();
+    let ask_call_ids: std::collections::HashSet<&str> = turn
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            ResponsePart::ToolCall(call)
+                if tool_name_of(&call.tool_call) == manox_agent::tools::ASK_USER_QUESTION =>
+            {
+                let id = tool_call_id_of(&call.tool_call);
+                (!id.is_empty()).then_some(id)
+            }
+            _ => None,
+        })
+        .collect();
+    let mut merged_asks: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut part_index = 0usize;
     for part in turn.parts {
         part_index += 1;
@@ -512,6 +542,33 @@ fn push_turn(
                         &model_id,
                         prev_segment_model,
                     );
+                    // ONE ask, ONE card. The runtime's ask tool returns at
+                    // once ("question delivered") — the tool call's own state
+                    // runs Running→Success in the same second the elicitation
+                    // parks, so the card's lifecycle is the ELICITATION's,
+                    // never the call's. When this id carries both faces,
+                    // emit the merged ask card here (the call's position) and
+                    // mark the id spent so the InputRequest arm below emits
+                    // nothing: two same-id rows would race `find_tool`, park
+                    // the interactive state on the wrong row (a Running/
+                    // Success one — the form renders on PendingApproval
+                    // alone), and show a dead plain card beside the live one.
+                    if name == manox_agent::tools::ASK_USER_QUESTION
+                        && let Some(request) = ask_requests.get(call_id.as_str())
+                    {
+                        // A repeat face of the same id (a journal whose parts
+                        // did not fold together) emits nothing: a second row
+                        // here is the dead plain card this merge removes.
+                        if merged_asks.insert(call_id.clone()) {
+                            nodes.push(Node {
+                                key: ItemKey::Ask(call_id.clone()),
+                                kind: ConvItem::ToolCall(ask_card_item(request)),
+                                role: model_id.clone(),
+                                model_repeats: false,
+                            });
+                        }
+                        continue;
+                    }
                     nodes.push(tool_card_node(&call_id, state, env));
                     continue;
                 }
@@ -574,6 +631,15 @@ fn push_turn(
                 });
             }
             ResponsePart::InputRequest(request) => {
+                // A request whose id is also an ask-shaped tool call rides
+                // that call's merged card (above) — emitting its own row
+                // would mint the second same-id row the merge exists to
+                // prevent. A request with no same-id call (an older
+                // journal's bare ask) takes its own row, whatever the part
+                // order.
+                if ask_call_ids.contains(request.request.id.as_str()) {
+                    continue;
+                }
                 if flush_segment(
                     turn,
                     overlays,
@@ -980,7 +1046,7 @@ pub fn ask_card_item(request: &ahp_types::state::InputRequestResponsePart) -> To
             ToolCallStatus::PendingApproval
         },
         output: if answered {
-            "answered".to_string()
+            ask_canonical_output(req)
         } else {
             String::new()
         },
@@ -994,6 +1060,109 @@ pub fn ask_card_item(request: &ahp_types::state::InputRequestResponsePart) -> To
         cwd: None,
         stream: Default::default(),
     }
+}
+
+/// The settled ask's output, in the canonical `{answers: […]}` JSON the
+/// settled card's markdown folds (`crate::views::message`'s
+/// `ask_answer_markdown`): one entry per question, in question order — the
+/// selected option labels plus the free-form note, either of which may be
+/// absent. The card shows what the user actually submitted — a selection
+/// and a note both, whenever both are present; unlike the runtime's
+/// model-facing fold (`manox-agent`'s `fold_ask_answers`), a single-select
+/// note does not replace the selection. A question the user never touched
+/// is an explicit skip (an empty selection, no note). A request whose
+/// questions are absent or unmodelled degrades to an empty list, which the
+/// markdown reader rejects into the raw-output fallback.
+fn ask_canonical_output(req: &ahp_types::state::ChatInputRequest) -> String {
+    // The note is a multi-line field in the wire, but the markdown reader
+    // renders it inline after the answer: one line, trimmed, blank notes
+    // dropped. A client may send several values (this app sends one).
+    let note = |values: &Option<Vec<String>>| -> Option<String> {
+        let joined = values
+            .as_ref()?
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        (!joined.is_empty()).then_some(joined)
+    };
+    let answers = req
+        .questions
+        .iter()
+        .flatten()
+        .filter_map(|q| {
+            let (id, options) = match q {
+                ahp_types::state::ChatInputQuestion::SingleSelect(s) => {
+                    (s.id.as_str(), Some(s.options.as_slice()))
+                }
+                ahp_types::state::ChatInputQuestion::MultiSelect(m) => {
+                    (m.id.as_str(), Some(m.options.as_slice()))
+                }
+                ahp_types::state::ChatInputQuestion::Text(t) => (t.id.as_str(), None),
+                ahp_types::state::ChatInputQuestion::Number(n) => (n.id.as_str(), None),
+                ahp_types::state::ChatInputQuestion::Integer(n) => (n.id.as_str(), None),
+                ahp_types::state::ChatInputQuestion::Boolean(b) => (b.id.as_str(), None),
+                ahp_types::state::ChatInputQuestion::Unknown(_) => return None,
+            };
+            // An AHP client names a selected option by its stable `id`; this
+            // app's own writer (`ask_answers` in agent-ui) puts the option
+            // LABEL in the same field. Resolve an id through the question's
+            // own options, and pass anything else through — a label is
+            // already the display string, and an option this request does
+            // not name must still be shown, not dropped.
+            let label_of = |value: &str| -> String {
+                options
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|o| o.id == value)
+                    .map(|o| o.label.clone())
+                    .unwrap_or_else(|| value.to_string())
+            };
+            let answer = req.answers.as_ref().and_then(|a| a.get(id));
+            let (selected, custom) = match answer {
+                Some(ahp_types::state::ChatInputAnswer::Submitted(submitted)) => {
+                    match &submitted.value {
+                        ahp_types::state::ChatInputAnswerValue::Text(t) => {
+                            (Vec::new(), Some(t.value.clone()))
+                        }
+                        ahp_types::state::ChatInputAnswerValue::Number(n) => {
+                            (Vec::new(), Some(n.value.to_string()))
+                        }
+                        ahp_types::state::ChatInputAnswerValue::Boolean(b) => {
+                            (Vec::new(), Some(b.value.to_string()))
+                        }
+                        ahp_types::state::ChatInputAnswerValue::Selected(s) => (
+                            // An empty value is the "free text instead of an
+                            // option" shape: no phantom empty answer row.
+                            (!s.value.is_empty())
+                                .then(|| label_of(&s.value))
+                                .into_iter()
+                                .collect(),
+                            note(&s.freeform_values),
+                        ),
+                        ahp_types::state::ChatInputAnswerValue::SelectedMany(s) => (
+                            s.value
+                                .iter()
+                                .filter(|value| !value.is_empty())
+                                .map(|value| label_of(value))
+                                .collect(),
+                            // Multi-select notes supplement the selection.
+                            note(&s.freeform_values),
+                        ),
+                        ahp_types::state::ChatInputAnswerValue::Unknown(_) => (Vec::new(), None),
+                    }
+                }
+                _ => (Vec::new(), None),
+            };
+            Some(serde_json::json!({
+                "id": id,
+                "selected": selected,
+                "custom": custom,
+            }))
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "answers": answers }).to_string()
 }
 
 /// The `AskUserQuestion` input shape the ask card renders from: one entry

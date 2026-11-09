@@ -2014,9 +2014,25 @@ impl Workspace {
             .count()
     }
 
-    /// The accumulated output of the activity-segment tool entry with the given
-    /// id, when one exists. Diagnostic-only: this is how the attach catch-up's
-    /// replay of a parked thread's streamed `ToolOutput` is observed.
+    /// The top-level `ToolCall` row `find_tool` lands on for `id`, as
+    /// `(status, carries_snapshot)` — the render-routing truth for the ask
+    /// card: the interactive form renders only on a `PendingApproval` row
+    /// that carries the snapshot. Diagnostic-only.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_find_tool_row(
+        &self,
+        id: &str,
+        cx: &App,
+    ) -> Option<(manox_agent::ToolCallStatus, bool)> {
+        let conversation = self.chat.read(cx).conversation.clone();
+        let ix = conversation.read(cx).find_tool(id, cx)?;
+        let item = conversation.read(cx).items()[ix].read(cx);
+        let ConvItem::ToolCall(t) = item.kind() else {
+            return None;
+        };
+        Some((t.status, item.ask_snapshot.is_some()))
+    }
+
     /// The pending question card's id, if one is surfaced. Diagnostic-only.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_pending_ask_id(&self, cx: &App) -> Option<String> {
