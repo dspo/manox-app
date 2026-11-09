@@ -40,9 +40,15 @@ if [ -n "$hits" ]; then
     status=1
 fi
 
-# 3. The shell must not grow a local selection mirror again: the highlight is
-#    the host foreground read through HostHooks::active_row.
-hits=$(grep -rnE '^[[:space:]]*pub active[[:space:]]*:' crates/steer-agent-chrome-ui/src/shell.rs || true)
+# 3. The shell must not grow a local selection mirror again (any visibility:
+#    a private one drifts just as silently, it only stops aborting): the
+#    highlight is the host foreground read through HostHooks::active_row.
+#    NOTE: this script is a tripwire, not the defence. The structural guard is
+#    `shell_handle()`'s module privacy: nothing outside this file can name a
+#    shell entity, so every chrome write must pass through the two functions
+#    above.
+hits=$(grep -rnE '^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?active[[:space:]]*:' \
+    crates/steer-agent-chrome-ui/src/shell.rs || true)
 if [ -n "$hits" ]; then
     echo "violation: the shell owns a selection field again:"
     echo "$hits"

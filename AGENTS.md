@@ -163,7 +163,9 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
   边界 → SIGABRT），而经 `WindowHandle::update` 绕行的写法在事件分发内会**静默丢命令**。四条不变量：
   ① chrome 状态只有一个写入者——`chrome_assembly::project`（workspace observer，effect 边界无租约）；
   ② chrome 不镜像可派生事实（侧栏高亮 = 渲染期 `HostHooks::active_row`，壳无本地字段）；
-  ③ 宿主对 shell 的**动作**只经 `defer_shell`（`cx.defer` + 窗口 handle，落到 effect 边界）；
+  ③ 宿主对 shell 的**动作**只经 `defer_shell`（`cx.defer` + 窗口 handle，落到 effect 边界）；同一次 update 内
+  **先发命令、后 `cx.notify()`**——命令与驱动投影泵的 notify 共用 effect 队列、按入队序执行，先 notify 会让泵
+  先完成 pane 的 stash/restore，随后的陈旧命令可能关掉刚恢复的 incoming tab；
   ④ hook / subscription 载荷自足，宿主不得在回调内触碰发起它的实体（launcher 的 ⏎ 另走延迟，构造上安全）。
   新增 chrome 写入先在 `chrome_assembly` 里找通道，**绝不**在调用点直接 `shell.update`；手势回归矩阵在
   `crates/agent-ui/tests/chrome_boundary.rs`（真实装配 + 真实租约）。

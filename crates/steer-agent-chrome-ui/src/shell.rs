@@ -1304,12 +1304,14 @@ impl Shell {
         let _ = cx;
     }
 
-    /// Archive/unarchive local reconciliation. The ARCHIVE direction pre-drops
-    /// the row (the batch bar's optimistic half); the row menu never does (a
-    /// confirmation may cancel). The UNARCHIVE direction keeps the local flip:
-    /// the row is present, the next snapshot confirms it. The highlight needs
-    /// no reconciliation: it is derived from the host's foreground, so a
-    /// retired row stops wearing it on the next frame.
+    /// Archive/unarchive local reconciliation. The UNARCHIVE direction is the
+    /// row menu's optimistic flip (the row is present; the next snapshot
+    /// confirms it). The ARCHIVE direction is a local row drop with no
+    /// production caller: archived rows leave through the projection (the
+    /// host's `container_rows` filters the archived bit), so it exists only
+    /// for the regression fixture that replays that drop face. The highlight
+    /// needs no reconciliation either: it is derived from the host's
+    /// foreground, so a retired row stops wearing it on the next frame.
     pub fn set_archived(&mut self, id: &str, archived: bool, cx: &mut App) {
         if archived {
             self.sessions.retain(|s| s.id != id);

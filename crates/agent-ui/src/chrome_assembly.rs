@@ -57,6 +57,14 @@ fn shell_handle() -> Option<Entity<Shell>> {
 /// issued mid-event has no window to take, so the old round-trip helper
 /// silently dropped the command. Deferring removes both hazards instead of
 /// classifying call sites by which lease they happen to stand in.
+///
+/// ORDERING: commands and the notifications that drive [`project`] share the
+/// effect queue and run in enqueue order. A host update must therefore issue
+/// its chrome commands BEFORE the `cx.notify()` that makes the pump re-read
+/// the workspace (the switch paths do: `leave_*`/pane commands first, the
+/// notify at the tail). A command enqueued after that notify would run after
+/// the projection has already stashed and restored the incoming container's
+/// pane — and could then close a tab the projection legitimately restored.
 pub fn defer_shell(
     cx: &mut App,
     command: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
@@ -277,6 +285,10 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
 /// no entity lease is held; this function (plus deferred commands) is the only
 /// place allowed to call `shell.update`. Host code never writes chrome state
 /// inline: it mutates workspace state and notifies, and the pump projects.
+///
+/// The notifications this runs on are queued by `cx.notify()`; chrome commands
+/// queued in the SAME update run after it (see [`defer_shell`]'s ordering
+/// note). The pane stash/restore below is what that ordering protects.
 fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
     let mux = ws.read(cx).multiplexer.clone();
     // The process-lifetime registries the app wires at startup:

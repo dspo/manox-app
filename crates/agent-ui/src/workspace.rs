@@ -465,9 +465,9 @@ pub struct Workspace {
     /// Index into `views::settings::nav_leaves()`'s flat leaf order.
     pub(crate) settings_nav: usize,
     /// The Settings split layout's sidebar view. HOST state (the chrome's
-    /// sidebar slot is a projection of it), created on the first entry and
-    /// kept for the process lifetime: a re-opened window mounts the same
-    /// entity back instead of losing the layout.
+    /// sidebar slot is a projection of it): created on entry, dropped on
+    /// exit. The entity is window-independent, so a re-opened window mounts
+    /// whatever is current instead of losing the layout.
     pub(crate) settings_nav_view: Option<Entity<crate::views::settings_nav::SettingsNavView>>,
     /// The chrome's modal dialog slot: the open project create/edit dialog,
     /// if any. HOST state for the same reason — closing the window with the
