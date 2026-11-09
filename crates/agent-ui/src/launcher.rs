@@ -469,6 +469,7 @@ impl LauncherState {
             return;
         }
         let this = cx.entity().downgrade();
+        let ws = self.ws.clone();
         let current = self.target.project_id().map(str::to_string);
         let menu = PopupMenu::build(window, cx, |menu, _window, cx| {
             let mut menu = menu;
@@ -532,10 +533,14 @@ impl LauncherState {
                 .item(
                     PopupMenuItem::new(steer_i18n::t("project-new-menu"))
                         .icon(Icon::default().path("icons/plus.svg"))
-                        .on_click(move |_, window, cx| {
-                            // The launcher stays mounted behind the dialog;
-                            // the closing render adopts the fresh project.
-                            crate::chrome_assembly::open_project_dialog(None, window, cx);
+                        .on_click({
+                            let ws = ws.clone();
+                            move |_, window, cx| {
+                                // The launcher stays mounted behind the dialog;
+                                // the closing render adopts the fresh project.
+                                let _ = ws
+                                    .update(cx, |ws, cx| ws.open_project_dialog(None, window, cx));
+                            }
                         }),
                 )
                 .item(

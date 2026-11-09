@@ -160,9 +160,9 @@ impl Workspace {
         for id in ids {
             manox_agent::thread_store_global().with_mut(|s| s.archive_thread(id, true));
         }
-        for id in ids {
-            crate::chrome_assembly::drop_sidebar_row(id, cx);
-        }
+        // The sidebar rows leave with the projection: the multiplexer's
+        // teardown optimistically flags every archived captain, and the
+        // `cx.notify()` at the tail re-projects the list (no shell push).
         for id in ids {
             // Archive IS the native container's death (D7): raise the
             // predicate-flip event and run the ONE resource teardown. The

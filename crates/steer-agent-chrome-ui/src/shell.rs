@@ -403,6 +403,14 @@ pub struct Shell {
 
 impl Shell {
     pub fn set_sidebar_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        // Identity-idempotent: the projection pump re-runs on every workspace
+        // notification, and only a MOUNT/UNMOUNT transition may touch the pin
+        // bookkeeping below.
+        if self.sidebar_surface.as_ref().map(gpui::AnyView::entity_id)
+            == surface.as_ref().map(gpui::AnyView::entity_id)
+        {
+            return;
+        }
         // The injected surface is the mode's only exit, so mounting it pins
         // the sidebar open and remembers the user's preference; unmounting
         // releases the pin and restores it. A second mount while pinned (the
@@ -428,11 +436,15 @@ impl Shell {
     /// Mount/unmount the modal dialog overlay (the host-side seam of the
     /// project dialog; the view carries its own state and dismissal).
     pub fn set_dialog_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
-        let changed = self.dialog_surface.is_some() != surface.is_some();
-        self.dialog_surface = surface;
-        if changed {
-            cx.notify();
+        // Identity-idempotent (the pump re-runs per notification): a swap
+        // between two dialogs is a change, a re-push of the same one is not.
+        if self.dialog_surface.as_ref().map(gpui::AnyView::entity_id)
+            == surface.as_ref().map(gpui::AnyView::entity_id)
+        {
+            return;
         }
+        self.dialog_surface = surface;
+        cx.notify();
     }
 
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {

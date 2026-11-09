@@ -75,8 +75,12 @@ pub fn group_menu(
             menu = menu.item(
                 PopupMenuItem::new(steer_i18n::t("project-new-menu"))
                     .icon(Icon::default().path("icons/plus.svg"))
-                    .on_click(move |_, window, cx| {
-                        crate::chrome_assembly::open_project_dialog(None, window, cx);
+                    .on_click({
+                        let ws = ws.clone();
+                        move |_, window, cx| {
+                            let _ =
+                                ws.update(cx, |ws, cx| ws.open_project_dialog(None, window, cx));
+                        }
                     }),
             );
         }
@@ -167,8 +171,13 @@ pub fn group_menu(
             menu = menu.separator().item(
                 PopupMenuItem::new(steer_i18n::t("project-edit-title"))
                     .icon(Icon::default().path("icons/settings-2.svg"))
-                    .on_click(move |_, window, cx| {
-                        crate::chrome_assembly::open_project_dialog(Some(&id_edit), window, cx);
+                    .on_click({
+                        let ws = ws.clone();
+                        move |_, window, cx| {
+                            let _ = ws.update(cx, |ws, cx| {
+                                ws.open_project_dialog(Some(&id_edit), window, cx)
+                            });
+                        }
                     }),
             );
         }

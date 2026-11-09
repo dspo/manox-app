@@ -32,9 +32,9 @@ impl crate::Workspace {
         if !already {
             self.leave_external_session();
             self.leave_subagent_stream(cx);
-            if matches!(self.view_mode, ViewMode::Settings) {
-                crate::chrome_assembly::leave_settings_layout(cx);
-            }
+            // Leaving Settings drops its sidebar nav; the projection swaps
+            // the session list back in.
+            self.settings_nav_view = None;
             self.view_mode = ViewMode::Launcher;
         }
         let launcher = match self.launcher.clone() {

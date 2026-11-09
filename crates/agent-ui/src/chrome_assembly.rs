@@ -46,58 +46,6 @@ fn shell_handle() -> Option<Entity<Shell>> {
     }
 }
 
-/// The Settings split layout: swap the chrome sidebar's session list for the
-/// settings nav. The main column's swap rides the Workspace's view mode —
-/// this owns only the sidebar half of the layout.
-pub fn enter_settings_layout(cx: &mut App) {
-    let Some(shell) = shell_handle() else {
-        return;
-    };
-    let nav = cx.new(crate::views::settings_nav::SettingsNavView::new);
-    shell.update(cx, |shell, cx| {
-        shell.set_sidebar_surface(Some(nav.into()), cx)
-    });
-}
-
-/// Restore the session-list sidebar (leaving the Settings split layout).
-pub fn leave_settings_layout(cx: &mut App) {
-    let Some(shell) = shell_handle() else {
-        return;
-    };
-    shell.update(cx, |shell, cx| shell.set_sidebar_surface(None, cx));
-}
-
-/// Open the create-project dialog, or the edit variant for `edit_of` — the
-/// sidebar footer's ＋ 新建项目 row and the Chats bucket's menu entry both
-/// land here. The dialog entity is the mounted view; closing it is
-/// [`close_project_dialog`]. A missing project id (deleted meanwhile) opens
-/// nothing.
-pub fn open_project_dialog(edit_of: Option<&str>, window: &mut Window, cx: &mut App) {
-    let Some(shell) = shell_handle() else {
-        return;
-    };
-    let dialog: Entity<crate::project_dialog::ProjectDialogState> = match edit_of {
-        None => cx.new(|cx| crate::project_dialog::ProjectDialogState::for_create(window, cx)),
-        Some(id) => {
-            let Some(project) = crate::projects::get_project(id) else {
-                return;
-            };
-            cx.new(|cx| crate::project_dialog::ProjectDialogState::for_edit(project, window, cx))
-        }
-    };
-    let view: gpui::AnyView = dialog.into();
-    shell.update(cx, |shell, cx| shell.set_dialog_surface(Some(view), cx));
-}
-
-/// Close (unmount) the project dialog. The dialog's own dismissals — ✕ /
-/// 取消 / Escape, a successful save, a confirmed removal — route here.
-pub fn close_project_dialog(cx: &mut App) {
-    let Some(shell) = shell_handle() else {
-        return;
-    };
-    shell.update(cx, |shell, cx| shell.set_dialog_surface(None, cx));
-}
-
 /// Open (or focus) a host-built tool tab in the live right pane. `false` when
 /// no shell or window is live — the caller's gesture has no surface then.
 pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) -> bool {
@@ -212,26 +160,6 @@ pub fn dock_terminal_live(cx: &App) -> bool {
     shell_handle().is_some_and(|shell| shell.read(cx).panel_live())
 }
 
-/// The archive gesture's shell-side reconciliation: drop the row from the
-/// sidebar now (the container teardown path's own optimistic half, at its
-/// shell face), instead of waiting for the protocol echo + the next list
-/// snapshot. The workspace-side archive paths (`/exit`, `cmd-;`) have no
-/// menu handler to do this half for them. `false` when no shell is live.
-pub fn drop_sidebar_row(id: &str, cx: &mut App) -> bool {
-    let Some(shell) = shell_handle() else {
-        return false;
-    };
-    let Some(handle) = crate::dispatch::window_global() else {
-        return false;
-    };
-    let id = id.to_string();
-    handle
-        .update(cx, |_, _, cx| {
-            shell.update(cx, |shell, cx| shell.set_archived(&id, true, cx));
-        })
-        .is_ok()
-}
-
 /// The open observation panel for a sub-agent address, when one is mounted in
 /// the live pane — how the workspace streams a child event into a panel the
 /// shell owns.
@@ -344,162 +272,182 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         let Some(shell) = shell_weak.upgrade() else {
             return;
         };
-        let mux = ws.read(cx).multiplexer.clone();
-        // The process-lifetime registries the app wires at startup:
-        // the dispatch slot (dock badge pump + reopen-focus read it) and the
-        // process-wide browser host (IPC routing + the agent's web capability).
-        crate::dispatch::set_workspace(ws.clone());
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        {
-            let ws = ws.clone();
-            cx.spawn(async move |cx| {
-                crate::browser_host::WorkspaceBrowserHost::install(ws, cx);
-            })
-            .detach();
-        }
-        let rows = mux.read(cx).container_list(cx);
-        // The grouping data source is the project registry (design §2.3):
-        // projects in sidebar order + each container's membership. Rows
-        // without a membership (ad-hoc folders, external containers,
-        // other clients' sessions) all fall to the loose bucket.
-        let projects = crate::projects::list_projects();
-        let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
-            crate::sidebar_projection::project_groups(&rows, &projects, &|id| {
-                crate::projects::membership_of(id)
-            })
-            .into_iter()
-            .flat_map(steer_agent_chrome_ui::shell::SessionRow::from_group)
-            .collect();
-        // Launched external sessions (project-menu agents/terminals) merge
-        // into the snapshot as sidebar rows, keyed by their own membership.
-        sessions.extend(ws.read(cx).external_session_rows());
-        // The project skeleton (id, display name, roots — the roots feed
-        // the header's count badge + tooltip) and the display order: the
-        // registry's position order, the loose bucket trailing.
-        let heads: Vec<(String, String, Vec<String>)> = projects
-            .iter()
-            .map(|project| {
-                (
-                    project.id.clone(),
-                    crate::projects::display_name(project),
-                    project
-                        .roots
-                        .iter()
-                        .map(|root| root.path.to_string_lossy().into_owned())
-                        .collect(),
-                )
-            })
-            .collect();
-        let mut keys: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
-        keys.push(steer_agent_chrome_ui::session_list::LOOSE_BUCKET_KEY.to_string());
-        shell.update(cx, |shell, cx| {
-            shell.set_folder_heads(heads);
-            shell.set_group_order(keys);
-            shell.set_sessions(sessions);
-            cx.notify();
+        project(&shell, &ws, cx);
+    })
+    .detach();
+    // Seed the first frame from the same pump: a re-opened window mounts a
+    // fresh shell over the surviving workspace.
+    project(&shell, &ws, cx);
+    shell
+}
+
+/// The projection pump — the ONE writer of chrome state.
+///
+/// `cx.observe` callbacks run in `flush_effects` at the effect boundary, where
+/// no entity lease is held; this function (plus deferred commands) is the only
+/// place allowed to call `shell.update`. Host code never writes chrome state
+/// inline: it mutates workspace state and notifies, and the pump projects.
+fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
+    let mux = ws.read(cx).multiplexer.clone();
+    // The process-lifetime registries the app wires at startup:
+    // the dispatch slot (dock badge pump + reopen-focus read it) and the
+    // process-wide browser host (IPC routing + the agent's web capability).
+    crate::dispatch::set_workspace(ws.clone());
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        let ws = ws.clone();
+        cx.spawn(async move |cx| {
+            crate::browser_host::WorkspaceBrowserHost::install(ws, cx);
+        })
+        .detach();
+    }
+    let rows = mux.read(cx).container_list(cx);
+    // The grouping data source is the project registry (design §2.3):
+    // projects in sidebar order + each container's membership. Rows
+    // without a membership (ad-hoc folders, external containers,
+    // other clients' sessions) all fall to the loose bucket.
+    let projects = crate::projects::list_projects();
+    let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
+        crate::sidebar_projection::project_groups(&rows, &projects, &|id| {
+            crate::projects::membership_of(id)
+        })
+        .into_iter()
+        .flat_map(steer_agent_chrome_ui::shell::SessionRow::from_group)
+        .collect();
+    // Launched external sessions (project-menu agents/terminals) merge
+    // into the snapshot as sidebar rows, keyed by their own membership.
+    sessions.extend(ws.read(cx).external_session_rows());
+    // The project skeleton (id, display name, roots — the roots feed
+    // the header's count badge + tooltip) and the display order: the
+    // registry's position order, the loose bucket trailing.
+    let heads: Vec<(String, String, Vec<String>)> = projects
+        .iter()
+        .map(|project| {
+            (
+                project.id.clone(),
+                crate::projects::display_name(project),
+                project
+                    .roots
+                    .iter()
+                    .map(|root| root.path.to_string_lossy().into_owned())
+                    .collect(),
+            )
+        })
+        .collect();
+    let mut keys: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
+    keys.push(steer_agent_chrome_ui::session_list::LOOSE_BUCKET_KEY.to_string());
+    // The chrome's host-owned surfaces: the dialog slot and the Settings
+    // sidebar nav are workspace state (a re-opened window remounts them), so
+    // the projection mounts whatever the workspace currently holds.
+    let dialog = ws.read(cx).dialog.clone().map(Into::into);
+    let sidebar = ws.read(cx).settings_nav_view.clone().map(Into::into);
+    shell.update(cx, |shell, cx| {
+        shell.set_folder_heads(heads);
+        shell.set_group_order(keys);
+        shell.set_sessions(sessions);
+        shell.set_dialog_surface(dialog, cx);
+        shell.set_sidebar_surface(sidebar, cx);
+        cx.notify();
+    });
+    refresh_foreground_project(ws, &rows, cx);
+    // The foreground CONTAINER id (a native thread id verbatim, an
+    // external row id while one owns the main column): the dock and the
+    // right pane both follow it. On a switch, detach the outgoing
+    // container's views into the workspace's registry stash and
+    // restore/spawn the incoming container's own. The dock and the pane
+    // switch together, so one live-owner pair moves in lockstep (the
+    // container teardown clears them together when its container dies).
+    let fg = ws.read(cx).foreground_container_id(cx);
+    let old_id = ws.read(cx).dock_owner();
+    if fg != old_id && fg.is_some() {
+        // The outgoing views leave the shell first, land under the
+        // outgoing container's key, then the incoming container's own
+        // come back (or the pane falls back to its persisted snapshot /
+        // the fresh new-tab page).
+        let taken = shell.update(cx, |shell, cx| shell.take_panel_view(cx));
+        let outgoing = shell.update(cx, |shell, cx| shell.stash_right_session(cx));
+        ws.update(cx, |ws, _| {
+            ws.set_dock_owner(fg.clone());
+            ws.set_right_owner(fg.clone());
+            if let (Some(old_id), Some(view)) = (&old_id, taken) {
+                ws.stash_dock(old_id, view);
+            }
+            if let Some(old_id) = &old_id
+                && let Some(session) = outgoing
+            {
+                ws.stash_right(old_id, session);
+            }
         });
-        refresh_foreground_project(&ws, &rows, cx);
-        // The foreground CONTAINER id (a native thread id verbatim, an
-        // external row id while one owns the main column): the dock and the
-        // right pane both follow it. On a switch, detach the outgoing
-        // container's views into the workspace's registry stash and
-        // restore/spawn the incoming container's own. The dock and the pane
-        // switch together, so one live-owner pair moves in lockstep (the
-        // container teardown clears them together when its container dies).
-        let fg = ws.read(cx).foreground_container_id(cx);
-        let old_id = ws.read(cx).dock_owner();
-        if fg != old_id && fg.is_some() {
-            // The outgoing views leave the shell first, land under the
-            // outgoing container's key, then the incoming container's own
-            // come back (or the pane falls back to its persisted snapshot /
-            // the fresh new-tab page).
-            let taken = shell.update(cx, |shell, cx| shell.take_panel_view(cx));
-            let outgoing = shell.update(cx, |shell, cx| shell.stash_right_session(cx));
-            ws.update(cx, |ws, _| {
-                ws.set_dock_owner(fg.clone());
-                ws.set_right_owner(fg.clone());
-                if let (Some(old_id), Some(view)) = (&old_id, taken) {
-                    ws.stash_dock(old_id, view);
-                }
-                if let Some(old_id) = &old_id
-                    && let Some(session) = outgoing
-                {
-                    ws.stash_right(old_id, session);
-                }
-            });
-            let (dock_in, right_in) = ws.update(cx, |ws, _| {
-                (
-                    fg.as_ref().and_then(|id| ws.take_dock(id)),
-                    fg.as_ref().and_then(|id| ws.take_right(id)),
-                )
-            });
-            shell.update(cx, |shell, cx| {
-                // No stashed terminal: the slot stays empty — the next
-                // expand spawns at the NEW container's attrs cwd via the
-                // surface. The right pane rides the same switch.
-                if let Some(view) = dock_in {
-                    shell.set_panel_view(view, cx);
-                }
-                match right_in {
-                    Some(session) => shell.restore_right_session(session, cx),
-                    None => {
-                        // No in-session stash: rebuild from the container's
-                        // durable snapshot (browser/editor restore; live
-                        // session kinds are dropped — a dead process cannot
-                        // be resurrected). The window handle comes from the
-                        // dispatch slot (the restore builds webviews).
-                        let restored = fg.as_ref().and_then(|id| {
-                            let json = load_right_pane(id)?;
-                            let shape: serde_json::Value = serde_json::from_str(&json).ok()?;
-                            let visible = shape.get("visible")?.as_bool()?;
-                            let active = shape.get("active")?.as_u64()? as usize;
-                            let tabs = shape
-                                .get("tabs")?
-                                .as_array()?
-                                .iter()
-                                .filter_map(|t| {
-                                    let kind = t.get("kind")?.as_str()?.to_string();
-                                    let spec = t.get("spec")?.as_str()?.to_string();
-                                    Some((kind, spec))
-                                })
-                                .collect::<Vec<_>>();
-                            Some((tabs, visible, active))
-                        });
-                        match restored {
-                            Some((tabs, visible, active)) => {
-                                // We are already inside `shell.update`; the
-                                // window handle (the restore builds webviews)
-                                // comes from the dispatch slot. Re-entering
-                                // the Shell entity here would double-lease.
-                                if let Some(handle) = crate::dispatch::window_global() {
-                                    let _ = handle.update(cx, |_, w, cx| {
-                                        shell.right.update(cx, |pane, cx| {
-                                            pane.restore_persisted(tabs, visible, active, w, cx);
-                                        });
+        let (dock_in, right_in) = ws.update(cx, |ws, _| {
+            (
+                fg.as_ref().and_then(|id| ws.take_dock(id)),
+                fg.as_ref().and_then(|id| ws.take_right(id)),
+            )
+        });
+        shell.update(cx, |shell, cx| {
+            // No stashed terminal: the slot stays empty — the next
+            // expand spawns at the NEW container's attrs cwd via the
+            // surface. The right pane rides the same switch.
+            if let Some(view) = dock_in {
+                shell.set_panel_view(view, cx);
+            }
+            match right_in {
+                Some(session) => shell.restore_right_session(session, cx),
+                None => {
+                    // No in-session stash: rebuild from the container's
+                    // durable snapshot (browser/editor restore; live
+                    // session kinds are dropped — a dead process cannot
+                    // be resurrected). The window handle comes from the
+                    // dispatch slot (the restore builds webviews).
+                    let restored = fg.as_ref().and_then(|id| {
+                        let json = load_right_pane(id)?;
+                        let shape: serde_json::Value = serde_json::from_str(&json).ok()?;
+                        let visible = shape.get("visible")?.as_bool()?;
+                        let active = shape.get("active")?.as_u64()? as usize;
+                        let tabs = shape
+                            .get("tabs")?
+                            .as_array()?
+                            .iter()
+                            .filter_map(|t| {
+                                let kind = t.get("kind")?.as_str()?.to_string();
+                                let spec = t.get("spec")?.as_str()?.to_string();
+                                Some((kind, spec))
+                            })
+                            .collect::<Vec<_>>();
+                        Some((tabs, visible, active))
+                    });
+                    match restored {
+                        Some((tabs, visible, active)) => {
+                            // We are already inside `shell.update`; the
+                            // window handle (the restore builds webviews)
+                            // comes from the dispatch slot. Re-entering
+                            // the Shell entity here would double-lease.
+                            if let Some(handle) = crate::dispatch::window_global() {
+                                let _ = handle.update(cx, |_, w, cx| {
+                                    shell.right.update(cx, |pane, cx| {
+                                        pane.restore_persisted(tabs, visible, active, w, cx);
                                     });
-                                }
-                            }
-                            None => {
-                                // Fresh container: drop any lingering pane
-                                // state to the empty page, COLLAPSED — the
-                                // pane's per-container memory (stash/durable
-                                // snapshot) restores the container's own
-                                // visibility when it has one; a container
-                                // without one starts with the transcript
-                                // full-width.
-                                shell.right.update(cx, |pane, cx| {
-                                    pane.new_tab_page(cx);
-                                    pane.collapse(cx);
                                 });
                             }
                         }
+                        None => {
+                            // Fresh container: drop any lingering pane
+                            // state to the empty page, COLLAPSED — the
+                            // pane's per-container memory (stash/durable
+                            // snapshot) restores the container's own
+                            // visibility when it has one; a container
+                            // without one starts with the transcript
+                            // full-width.
+                            shell.right.update(cx, |pane, cx| {
+                                pane.new_tab_page(cx);
+                                pane.collapse(cx);
+                            });
+                        }
                     }
                 }
-            });
-        }
-    })
-    .detach();
-    shell
+            }
+        });
+    }
 }
 
 fn shell_config(
@@ -797,8 +745,11 @@ fn shell_config(
             // The sidebar footer's ＋ 新建项目 row: open the project dialog.
             // (The Chats bucket's group menu is the other entry; the
             // Launcher chip menu joins in Step-3.)
-            on_new_project: Some(Box::new(|window, cx| {
-                open_project_dialog(None, window, cx);
+            on_new_project: Some(Box::new({
+                let ws = ws.downgrade();
+                move |window, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.open_project_dialog(None, window, cx));
+                }
             })),
             // The row-drag membership drop: a project group key attaches the
             // container to that project, the loose bucket's key detaches.
