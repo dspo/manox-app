@@ -435,9 +435,12 @@ fn push_turn(
     let mut segment_parts: Vec<(String, SegmentEntryNode)> = Vec::new();
     // The turn's elicitation parts and its ask-shaped tool-call ids, both
     // by id. The runtime's ask tool journals the AskUserQuestion TOOL CALL
-    // and the elicitation under the SAME id (`call_…`), so an id in both
-    // families is ONE ask: exactly one top-level card, emitted at the
-    // tool-call part's position, in whatever order the parts arrived.
+    // and the elicitation under the SAME id (`call_…`) inside ONE turn — it
+    // registers the card and returns from the tool call while the turn is
+    // still open — so an id in both families is ONE ask: exactly one
+    // top-level card, emitted at the tool-call part's position, in whatever
+    // order the parts arrived. The scan is per turn: an elicitation split
+    // into a later turn would project its own card again.
     let ask_requests: std::collections::HashMap<&str, &ahp_types::state::InputRequestResponsePart> =
         turn.parts
             .iter()
@@ -552,14 +555,18 @@ fn push_turn(
                     // alone), and show a dead plain card beside the live one.
                     if name == manox_agent::tools::ASK_USER_QUESTION
                         && let Some(request) = ask_requests.get(call_id.as_str())
-                        && merged_asks.insert(call_id.clone())
                     {
-                        nodes.push(Node {
-                            key: ItemKey::Ask(call_id.clone()),
-                            kind: ConvItem::ToolCall(ask_card_item(request)),
-                            role: model_id.clone(),
-                            model_repeats: false,
-                        });
+                        // A repeat face of the same id (a journal whose parts
+                        // did not fold together) emits nothing: a second row
+                        // here is the dead plain card this merge removes.
+                        if merged_asks.insert(call_id.clone()) {
+                            nodes.push(Node {
+                                key: ItemKey::Ask(call_id.clone()),
+                                kind: ConvItem::ToolCall(ask_card_item(request)),
+                                role: model_id.clone(),
+                                model_repeats: false,
+                            });
+                        }
                         continue;
                     }
                     nodes.push(tool_card_node(&call_id, state, env));
@@ -1057,13 +1064,29 @@ pub fn ask_card_item(request: &ahp_types::state::InputRequestResponsePart) -> To
 
 /// The settled ask's output, in the canonical `{answers: […]}` JSON the
 /// settled card's markdown folds (`crate::views::message`'s
-/// `ask_answer_markdown`): one entry per question — the selected option
-/// labels and/or the free text. The submitted answers ride the request's
-/// own `answers` map; a question the user never touched is an explicit
-/// skip (an empty selection). `None`-shaped input (a bare ask) degrades to
-/// an empty list, which the markdown reader rejects into the raw-output
-/// fallback.
+/// `ask_answer_markdown`): one entry per question, in question order — the
+/// selected option labels plus the free-form note, either of which may be
+/// absent. The card shows what the user actually submitted — a selection
+/// and a note both, whenever both are present; unlike the runtime's
+/// model-facing fold (`manox-agent`'s `fold_ask_answers`), a single-select
+/// note does not replace the selection. A question the user never touched
+/// is an explicit skip (an empty selection, no note). A request whose
+/// questions are absent or unmodelled degrades to an empty list, which the
+/// markdown reader rejects into the raw-output fallback.
 fn ask_canonical_output(req: &ahp_types::state::ChatInputRequest) -> String {
+    // The note is a multi-line field in the wire, but the markdown reader
+    // renders it inline after the answer: one line, trimmed, blank notes
+    // dropped. A client may send several values (this app sends one).
+    let note = |values: &Option<Vec<String>>| -> Option<String> {
+        let joined = values
+            .as_ref()?
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        (!joined.is_empty()).then_some(joined)
+    };
     let answers = req
         .questions
         .iter()
@@ -1082,9 +1105,12 @@ fn ask_canonical_output(req: &ahp_types::state::ChatInputRequest) -> String {
                 ahp_types::state::ChatInputQuestion::Boolean(b) => (b.id.as_str(), None),
                 ahp_types::state::ChatInputQuestion::Unknown(_) => return None,
             };
-            // The wire's answer values name OPTION IDS; the card renders
-            // labels. Resolve through the question's own options and fall
-            // back to the raw value for anything unmatched.
+            // An AHP client names a selected option by its stable `id`; this
+            // app's own writer (`ask_answers` in agent-ui) puts the option
+            // LABEL in the same field. Resolve an id through the question's
+            // own options, and pass anything else through — a label is
+            // already the display string, and an option this request does
+            // not name must still be shown, not dropped.
             let label_of = |value: &str| -> String {
                 options
                     .unwrap_or(&[])
@@ -1106,13 +1132,24 @@ fn ask_canonical_output(req: &ahp_types::state::ChatInputRequest) -> String {
                         ahp_types::state::ChatInputAnswerValue::Boolean(b) => {
                             (Vec::new(), Some(b.value.to_string()))
                         }
-                        ahp_types::state::ChatInputAnswerValue::Selected(s) => {
-                            let custom = s.freeform_values.as_ref().map(|frees| frees.join("，"));
-                            (vec![label_of(&s.value)], custom)
-                        }
-                        ahp_types::state::ChatInputAnswerValue::SelectedMany(s) => {
-                            (s.value.iter().map(|v| label_of(v)).collect(), None)
-                        }
+                        ahp_types::state::ChatInputAnswerValue::Selected(s) => (
+                            // An empty value is the "free text instead of an
+                            // option" shape: no phantom empty answer row.
+                            (!s.value.is_empty())
+                                .then(|| label_of(&s.value))
+                                .into_iter()
+                                .collect(),
+                            note(&s.freeform_values),
+                        ),
+                        ahp_types::state::ChatInputAnswerValue::SelectedMany(s) => (
+                            s.value
+                                .iter()
+                                .filter(|value| !value.is_empty())
+                                .map(|value| label_of(value))
+                                .collect(),
+                            // Multi-select notes supplement the selection.
+                            note(&s.freeform_values),
+                        ),
                         ahp_types::state::ChatInputAnswerValue::Unknown(_) => (Vec::new(), None),
                     }
                 }

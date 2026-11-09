@@ -1710,7 +1710,75 @@ mod tests {
         let output: serde_json::Value = serde_json::from_str(&card.output)
             .expect("the settled output is the canonical answers JSON");
         assert_eq!(output["answers"][0]["id"], "q");
-        assert_eq!(output["answers"][0]["selected"][0], "A", "labels, not ids");
+        assert_eq!(
+            output["answers"][0]["selected"][0], "A",
+            "an option id resolves to its label"
+        );
+    }
+
+    /// The settled card's synthesized output: one row per question in
+    /// question order — labels resolved (option ids from an AHP client, the
+    /// labels this app's own writer sends), notes kept, an untouched
+    /// question as an explicit skip. `ask_answer_markdown` folds exactly
+    /// this shape.
+    #[test]
+    fn a_settled_ask_emits_the_canonical_answers_json() {
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "ask"));
+        let requested: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/inputRequested", "turnId": "t-1",
+            "request": {
+                "id": "call-9",
+                "questions": [
+                    { "kind": "single-select", "id": "s", "message": "Single?",
+                      "options": [{ "id": "a", "label": "A" }, { "id": "b", "label": "B" }] },
+                    { "kind": "multi-select", "id": "m", "message": "Multi?",
+                      "options": [{ "id": "x", "label": "X" }, { "id": "y", "label": "Y" }] },
+                    { "kind": "text", "id": "t", "message": "Text?" },
+                    { "kind": "single-select", "id": "k", "message": "Skip?",
+                      "options": [{ "id": "p", "label": "P" }] },
+                ],
+            },
+        }))
+        .unwrap();
+        fold(&mut chat, &requested);
+        let completed: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/inputCompleted", "turnId": "t-1", "requestId": "call-9",
+            "response": "accept",
+            "answers": {
+                "s": { "state": "submitted", "value": {
+                    "kind": "selected", "value": "a", "freeformValues": null,
+                }},
+                "m": { "state": "submitted", "value": {
+                    "kind": "selected-many", "value": ["X", "Y"],
+                    "freeformValues": ["and z"],
+                }},
+                "t": { "state": "submitted", "value": {
+                    "kind": "text", "value": "free text",
+                }},
+                "k": { "state": "skipped", "freeformValues": null },
+            },
+        }))
+        .unwrap();
+        fold(&mut chat, &completed);
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let ConvItem::ToolCall(card) = &nodes[1].kind else {
+            panic!("the settled ask card is a tool card");
+        };
+        let output: serde_json::Value =
+            serde_json::from_str(&card.output).expect("the settled output is canonical JSON");
+        assert_eq!(
+            output["answers"],
+            serde_json::json!([
+                { "id": "s", "selected": ["A"], "custom": null },
+                { "id": "m", "selected": ["X", "Y"], "custom": "and z" },
+                { "id": "t", "selected": [], "custom": "free text" },
+                { "id": "k", "selected": [], "custom": null },
+            ]),
+            "labels resolved, notes kept, the untouched question skipped"
+        );
     }
 
     /// System notifications and error parts render keyed per (turn, index) —

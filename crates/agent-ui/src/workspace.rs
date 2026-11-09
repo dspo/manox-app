@@ -2033,9 +2033,6 @@ impl Workspace {
         Some((t.status, item.ask_snapshot.is_some()))
     }
 
-    /// The accumulated output of the activity-segment tool entry with the given
-    /// id, when one exists. Diagnostic-only: this is how the attach catch-up's
-    /// replay of a parked thread's streamed `ToolOutput` is observed.
     /// The pending question card's id, if one is surfaced. Diagnostic-only.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_pending_ask_id(&self, cx: &App) -> Option<String> {
