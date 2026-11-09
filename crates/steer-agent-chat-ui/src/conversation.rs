@@ -1607,6 +1607,112 @@ mod tests {
         assert_eq!(keys_of(&nodes), vec!["user:t-1", "tc:tc-9"]);
     }
 
+    /// THE ask-card regression (the 2026-11 journal shape): the runtime's
+    /// non-blocking ask journals the AskUserQuestion TOOL CALL and the
+    /// elicitation under the SAME id, and the tool call completes at once
+    /// (Running→Success in the same second the elicitation parks). ONE id
+    /// is ONE card — pending while the elicitation is unanswered, whatever
+    /// the call's own state — and the part order must not matter. Two
+    /// same-id rows would race `find_tool`, park the interactive state on a
+    /// Running/Success row (the form renders on PendingApproval alone), and
+    /// leave a dead plain card beside the live one.
+    #[test]
+    fn an_ask_call_and_its_same_id_elicitation_are_one_card() {
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let tool_start = serde_json::json!({
+            "type": "chat/toolCallStart", "turnId": "t-1", "toolCallId": "call-1",
+            "toolName": "AskUserQuestion", "displayName": "AskUserQuestion",
+            "intention": "Clarifying question",
+        });
+        let complete = serde_json::json!({
+            "type": "chat/toolCallComplete", "turnId": "t-1", "toolCallId": "call-1",
+            "result": {
+                "success": true,
+                "pastTenseMessage": "Question delivered to the user. This turn ends here.",
+            },
+        });
+        let requested = serde_json::json!({
+            "type": "chat/inputRequested", "turnId": "t-1",
+            "request": {
+                "id": "call-1",
+                "questions": [{
+                    "kind": "single-select", "id": "q", "title": "Pick",
+                    "message": "Which one?",
+                    "options": [
+                        { "id": "a", "label": "A", "recommended": true },
+                        { "id": "b", "label": "B" },
+                    ],
+                }],
+            },
+        });
+
+        // Production order — the call lands first, the elicitation parks
+        // while the call is already success.
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "ask"));
+        for action in [tool_start.clone(), complete.clone(), requested.clone()] {
+            fold(
+                &mut chat,
+                &serde_json::from_value::<StateAction>(action).unwrap(),
+            );
+        }
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert_eq!(
+            keys_of(&nodes),
+            vec!["user:t-1", "ir:call-1"],
+            "one ask, one card — the elicitation's key, the call's position"
+        );
+        let ConvItem::ToolCall(card) = &nodes[1].kind else {
+            panic!("the merged ask card is a tool card");
+        };
+        assert_eq!(
+            card.status,
+            ToolCallStatus::PendingApproval,
+            "the form parks on the elicitation, not the call's instant success"
+        );
+        assert_eq!(
+            card.input["requestId"], "call-1",
+            "the questions ride the card"
+        );
+
+        // Reversed order — the elicitation parks first, the call lands
+        // after: still one card.
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "ask"));
+        for action in [requested.clone(), tool_start.clone(), complete.clone()] {
+            fold(
+                &mut chat,
+                &serde_json::from_value::<StateAction>(action).unwrap(),
+            );
+        }
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert_eq!(keys_of(&nodes), vec!["user:t-1", "ir:call-1"]);
+
+        // The answer lands: the one card settles into the canonical answers
+        // JSON the settled phase's markdown folds.
+        let completed: StateAction = serde_json::from_value(serde_json::json!({
+            "type": "chat/inputCompleted", "turnId": "t-1", "requestId": "call-1",
+            "response": "accept",
+            "answers": {
+                "q": { "state": "submitted", "value": {
+                    "kind": "selected", "value": "a", "freeformValues": null,
+                }},
+            },
+        }))
+        .unwrap();
+        fold(&mut chat, &completed);
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        let ConvItem::ToolCall(card) = &nodes[1].kind else {
+            panic!("the settled ask card is a tool card");
+        };
+        assert_eq!(card.status, ToolCallStatus::Success);
+        let output: serde_json::Value = serde_json::from_str(&card.output)
+            .expect("the settled output is the canonical answers JSON");
+        assert_eq!(output["answers"][0]["id"], "q");
+        assert_eq!(output["answers"][0]["selected"][0], "A", "labels, not ids");
+    }
+
     /// System notifications and error parts render keyed per (turn, index) —
     /// the part id they do not carry. The error part reaches the state at
     /// turn-end (the reducer drops Error parts on the wire action and

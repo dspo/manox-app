@@ -430,6 +430,8 @@ The resolved model identity every turn surface renders (`crates/steer-agent-chat
 
 A standalone tool-call card (`render_tool_call`) for the special-case tools that don't fold into an [ActivitySegment](#activitysegment) batch — today `agent` sub-agent calls and `AskUserQuestion`. A model response's other tool calls batch into the `Thinking` container; the seven card families render as [Tool](#tool) cards (see [ActivitySegment](#activitysegment)), every other tool's output renders via [TerminalPanel](#terminalpanel).
 
+**Ask 的一卡不变量**（`transcript.rs` 的 `ask_call_ids` 预扫描）：运行时的 ask 工具把 AskUserQuestion 工具调用与 elicitation 记在**同一个 `call_…` id** 下，且工具调用即时完成（"question delivered"）。同 id 的两个面在投影层合并为一张顶层卡（键 `ir:{id}`，落在工具调用 part 的位置，part 顺序无关）：pending ⟺ elicitation 未决（工具调用自身的 Running→Success 不参与卡片生命周期），settled 输出由 `request.answers` 合成 canonical `{answers:[…]}` JSON 喂 settled 卡的 Q&A markdown。两条同 id 行会让 `find_tool` 挂在工具调用行（Running/Success，表单只在 PendingApproval 渲染），表单无处出现——这是 ask 卡反复坏掉的根因，回归钉在 chat-ui 的 `an_ask_call_and_its_same_id_elicitation_are_one_card` 与 agent-ui 的 `ask_card_same_id_routing`（冻结 journal 字面量 → Translator → fold → 路由断言）。
+
 Statuses: `PendingApproval` | `Running` | `Success` | `Error` | `Denied` — see [ToolCallStatus](#tool-call-statuses).
 
 > Source: `crates/steer-agent-chat-ui/src/views/message.rs`

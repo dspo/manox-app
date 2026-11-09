@@ -138,6 +138,7 @@ dependencies = [
  "lyon",
  "manox-agent",
  "manox-ahp",
+ "manox-ahp-runtime",
  "manox-harness",
  "manox-providers",
  "manox-session-core",
