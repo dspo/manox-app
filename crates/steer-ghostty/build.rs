@@ -125,8 +125,11 @@ fn build_libvt(zig: &Path, src: &Path, cache: &Path) {
             // passes this flag too (flatpak manifests), and its test builds
             // resolve `Config.baselineTarget` for the same reason.
             "-Dcpu=baseline",
-            "--prefix",
         ])
+        // zig 0.17's build CLI only parses options as single `-Dkey=value`
+        // tokens; passing the value as a separate arg makes it a step name.
+        .arg(format!("-Dversion-string={}", ghostty_version(src)))
+        .arg("--prefix")
         .arg(cache)
         .current_dir(src)
         .status()
@@ -141,6 +144,36 @@ fn build_libvt(zig: &Path, src: &Path, cache: &Path) {
 // ---------------------------------------------------------------------------
 // Ghostty sources
 // ---------------------------------------------------------------------------
+
+/// Ghostty's `build.zig.zon` version, fed to `zig build` as `-Dversion-string`.
+///
+/// Without it, `Config.zig` detects the build version from git — but a tarball
+/// tree has no `.git`, so `git -C` climbs into the enclosing repository, and
+/// if that repo's HEAD sits exactly on a `vX.Y.Z` tag, `Config.zig` panics
+/// ("tagged releases must be in vX.Y.Z format matching build.zig") because a
+/// foreign tag can never match Ghostty's own version. Passing the tree's own
+/// version skips the git path entirely, making the build immune to the state
+/// of the surrounding repo.
+fn ghostty_version(src: &Path) -> String {
+    let zon =
+        std::fs::read_to_string(src.join("build.zig.zon")).expect("read ghostty build.zig.zon");
+    let line = zon
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with(".version ="))
+        .expect("ghostty build.zig.zon has no .version field");
+    // The value is the quoted literal; taking it between quotes keeps a
+    // trailing comma or comment from reaching the semver parser.
+    let version = line[".version =".len()..]
+        .split('"')
+        .nth(1)
+        .expect("ghostty build.zig.zon .version is not a quoted string");
+    assert!(
+        !version.is_empty(),
+        "ghostty build.zig.zon has an empty .version"
+    );
+    version.to_string()
+}
 
 fn resolve_sources(cache: &Path) -> PathBuf {
     if let Some(p) = std::env::var_os("GHOSTTY_SRC") {

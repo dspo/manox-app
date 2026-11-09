@@ -16,7 +16,7 @@ description: >-
 
   The key versions two things. The (Ghostty rev, zig identity) part mirrors
   `GHOSTTY_REV`/`ZIG_VERSION` in `build.rs` and moves with them. The trailing
-  artifact version (`-v3`) must be bumped whenever the cached path set or the
+  artifact version (`-v4`) must be bumped whenever the cached path set or the
   artifact's build inputs change — the stamp only records rev + zig identity,
   so it cannot invalidate an archive produced by different zig flags:
   `actions/cache` never overwrites an existing key, so without the bump a
@@ -31,7 +31,7 @@ runs:
         path: |
           ~/.cache/steer-ghostty/lib/libghostty-vt.a
           ~/.cache/steer-ghostty/ghostty-vt.stamp
-        key: ghostty-vt-${{ runner.os }}-${{ runner.arch }}-042b16b6-zig0.17.0-v3
+        key: ghostty-vt-${{ runner.os }}-${{ runner.arch }}-042b16b6-zig0.17.0-v4
 
     # The cache step names files; the build script needs the directory. Kept in
     # the action so every leg points at the same one.
