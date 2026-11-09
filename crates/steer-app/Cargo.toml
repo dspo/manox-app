@@ -25,6 +25,9 @@ anyhow.workspace = true
 # next to its headline.
 steer-components.workspace = true
 steer-i18n.workspace = true
+# The macOS in-app updater: the menu, the About window's update section, and
+# the notification path all project its UpdateStore.
+steer-updater.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true

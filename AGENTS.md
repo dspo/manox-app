@@ -25,6 +25,8 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
   ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
   steer-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
   steer-i18n/              # app chrome 本地化（Fluent 栈 + locales/{zh-CN,en}.ftl，无 gpui 依赖）
+  steer-updater/           # 应用内自更新（GitHub Releases 检查 + dmg 校验下载 + macOS 原地
+                           #   覆盖安装 + UpdateStore 状态机；仅 steer-app 消费，seam 外编译为拒绝桩）
   steer-webview/           # wry 原生 webview + Tauri 式 IPC
   steer-webview-macros/    # webview IPC 过程宏
   cx/                      # cx headless 库（配置核心、launch-home、

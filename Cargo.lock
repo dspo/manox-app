@@ -11150,6 +11150,7 @@ dependencies = [
  "steer-components",
  "steer-ext-agents",
  "steer-i18n",
+ "steer-updater",
  "supervisor",
  "toml 0.8.23",
  "tracing",
@@ -11232,6 +11233,22 @@ dependencies = [
 [[package]]
 name = "steer-term-process"
 version = "0.3.0"
+
+[[package]]
+name = "steer-updater"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "dirs 6.0.0",
+ "gpui-pre",
+ "reqwest 0.12.28",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "steer-i18n",
+ "tracing",
+]
 
 [[package]]
 name = "steer-webview"
