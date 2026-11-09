@@ -213,18 +213,16 @@ impl crate::Workspace {
     /// rooted at the target (the primary root or ad-hoc folder; the
     /// foreground-container fallback the old menu kept). A non-empty composer
     /// text rides the argv as the CLI's initial prompt; the membership lands
-    /// with the mint.
+    /// with the mint. `target`/`prompt` arrive from the launcher's own update
+    /// (its menu callback): the workspace never reads a chrome-side entity.
     pub(crate) fn launch_agent_from_launcher(
         &mut self,
         launch: LauncherAgentLaunchPayload,
+        target: crate::launcher::LauncherTarget,
+        prompt: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
-        let (target, _, _, _) = launcher.read(cx).snapshot();
-        let prompt = launcher.update(cx, |state, cx| state.take_text_if_present(window, cx));
         let project_path = target.folder();
         let project_id = target.project_id().map(str::to_string);
         let cwd = project_path
@@ -277,13 +275,10 @@ impl crate::Workspace {
     /// silently dropped).
     pub(crate) fn launch_terminal_from_launcher(
         &mut self,
+        target: crate::launcher::LauncherTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
-        let (target, _, _, _) = launcher.read(cx).snapshot();
         let project_path = target.folder();
         let project_id = target.project_id().map(str::to_string);
         let cwd = project_path
