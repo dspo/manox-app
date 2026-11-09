@@ -46,66 +46,67 @@ fn shell_handle() -> Option<Entity<Shell>> {
     }
 }
 
-/// Open (or focus) a host-built tool tab in the live right pane. `false` when
-/// no shell or window is live — the caller's gesture has no surface then.
-pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) -> bool {
-    let Some(shell) = shell_handle() else {
-        return false;
-    };
-    let Some(handle) = crate::dispatch::window_global() else {
-        return false;
-    };
-    handle
-        .update(cx, |_, window, cx| {
-            shell.update(cx, |shell, cx| {
-                shell
-                    .right
-                    .update(cx, |pane, cx| pane.open_tab(tab, window, cx));
-            });
-        })
-        .is_ok()
+/// The chrome command channel: the ONLY way host code mutates the shell
+/// outside the projection pump (`project`). The command runs in a deferred
+/// effect flushed at the outermost `App::update`, where no entity lease is
+/// held and no window update is in flight.
+///
+/// Both facts are load-bearing. A chrome listener / hook runs inside its own
+/// entity's update, so an inline `shell.update` there is a double lease (the
+/// abort class this channel exists to end); and a `WindowHandle::update`
+/// issued mid-event has no window to take, so the old round-trip helper
+/// silently dropped the command. Deferring removes both hazards instead of
+/// classifying call sites by which lease they happen to stand in.
+pub fn defer_shell(
+    cx: &mut App,
+    command: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
+) {
+    cx.defer(move |cx| {
+        let Some(shell) = shell_handle() else {
+            tracing::debug!("chrome command dropped: no live shell");
+            return;
+        };
+        let Some(handle) = crate::dispatch::window_global() else {
+            tracing::debug!("chrome command dropped: no live window");
+            return;
+        };
+        let _ = handle.update(cx, |_, window, cx| {
+            shell.update(cx, |shell, cx| command(shell, window, cx));
+        });
+    });
 }
 
-/// Close every open tab of `kind` in the live pane; `false` when no shell or
-/// window is live. The workspace retires the ephemeral observation panels
-/// through this when it leaves a thread: a panel's content is the child
-/// transcript ACCUMULATED SO FAR, so one carried across a thread switch would
-/// come back stale (the transcript catches up, the panel does not). Dropping
-/// them keeps the invariant "a restored panel == the thread's transcript at
-/// open time".
-pub fn close_tool_tabs_of_kind(kind: &str, cx: &mut App) -> bool {
-    let Some(shell) = shell_handle() else {
-        return false;
-    };
-    let Some(handle) = crate::dispatch::window_global() else {
-        return false;
-    };
-    handle
-        .update(cx, |_, window, cx| {
-            shell.update(cx, |shell, cx| {
-                shell
-                    .right
-                    .update(cx, |pane, cx| pane.close_kind(kind, window, cx));
-            });
-        })
-        .is_ok()
+/// Open (or focus) a host-built tool tab in the live right pane.
+pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) {
+    defer_shell(cx, move |shell, window, cx| {
+        shell
+            .right
+            .update(cx, |pane, cx| pane.open_tab(tab, window, cx));
+    });
+}
+
+/// Close every open tab of `kind` in the live pane. The workspace retires the
+/// ephemeral observation panels through this when it leaves a thread: a
+/// panel's content is the child transcript ACCUMULATED SO FAR, so one carried
+/// across a thread switch would come back stale (the transcript catches up,
+/// the panel does not). Dropping them keeps the invariant "a restored panel
+/// == the thread's transcript at open time".
+pub fn close_tool_tabs_of_kind(kind: &str, cx: &mut App) {
+    let kind = kind.to_string();
+    defer_shell(cx, move |shell, window, cx| {
+        shell
+            .right
+            .update(cx, |pane, cx| pane.close_kind(&kind, window, cx));
+    });
 }
 
 /// Open (or focus) a right-pane tool kind from outside the view tree (the
-/// edit cards' open-diff path). `false` when no shell or window is live —
-/// the gesture has no surface then.
-pub fn open_right_kind(kind: &str, cx: &mut App) -> bool {
-    let Some(shell) = shell_handle() else {
-        return false;
-    };
-    let Some(handle) = crate::dispatch::window_global() else {
-        return false;
-    };
-    handle
-        .update(cx, |_, window, cx| {
-            shell.update(cx, |shell, cx| shell.open_right(kind, window, cx));
-        })
-        .is_ok()
+/// edit cards' open-diff path).
+pub fn open_right_kind(kind: &str, cx: &mut App) {
+    let kind = kind.to_string();
+    defer_shell(cx, move |shell, window, cx| {
+        shell.open_right(&kind, window, cx);
+    });
 }
 
 /// The open tool-tab instance ids in the live pane, in open order — the
@@ -120,23 +121,12 @@ pub fn pane_open_tab_ids(cx: &App) -> Vec<String> {
 
 /// Take the live dock's panel view and drop it — dropping the terminal view
 /// tears its PTY down (process-tree SIGTERM → SIGKILL), which is how `/exit`
-/// stops the dock's subprocesses. `false` when no shell/window is live or the
-/// dock holds no live content (a collapsed dock has none — collapse already
-/// dropped the view).
-pub fn stop_dock_terminal(cx: &mut App) -> bool {
-    let Some(shell) = shell_handle() else {
-        return false;
-    };
-    let Some(handle) = crate::dispatch::window_global() else {
-        return false;
-    };
-    let mut taken = None;
-    let _ = handle.update(cx, |_, _, cx| {
-        shell.update(cx, |shell, cx| taken = shell.take_panel_view(cx));
+/// stops the dock's subprocesses. A collapsed dock holds no view: nothing to
+/// take, nothing to kill.
+pub fn stop_dock_terminal(cx: &mut App) {
+    defer_shell(cx, |shell, _window, cx| {
+        drop(shell.take_panel_view(cx));
     });
-    let had = taken.is_some();
-    drop(taken);
-    had
 }
 
 /// The distinct tool-tab kinds open in the live pane — `/exit`'s read-only

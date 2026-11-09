@@ -54,15 +54,9 @@ impl Workspace {
         // the label is the task topic, not the bare run id — a row of hex
         // tails cannot be told apart.
         let tab = crate::tool_tabs::subagent_tab(id, &banner, panel);
-        let address = id.to_string();
-        cx.defer(move |cx| {
-            if !crate::chrome_assembly::open_tool_tab(tab, cx) {
-                tracing::debug!(
-                    subagent = %address,
-                    "subagent panel requested with no live right pane"
-                );
-            }
-        });
+        // The pane open crosses at the effect boundary (defer_shell takes the
+        // deferral).
+        crate::chrome_assembly::open_tool_tab(tab, cx);
     }
 
     /// Rebuild the per-thread sub-agent observation rows (the rail's crew

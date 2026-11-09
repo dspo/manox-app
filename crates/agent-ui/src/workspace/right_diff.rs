@@ -45,14 +45,9 @@ impl Workspace {
             .map_err(|e| SharedString::from(e.to_string()));
         self.right_diff = Some(RightDiff { title, state });
         cx.notify();
-        // The open re-enters the shell (a different entity) and must not
-        // nest inside this workspace update — the same deferral the
-        // sub-agent panel open runs.
-        cx.defer(move |cx| {
-            if !crate::chrome_assembly::open_right_kind(crate::tool_tabs::DIFF_KIND, cx) {
-                tracing::debug!("diff tab requested with no live right pane");
-            }
-        });
+        // The pane open crosses at the effect boundary (defer_shell takes
+        // the deferral), never inline in this update.
+        crate::chrome_assembly::open_right_kind(crate::tool_tabs::DIFF_KIND, cx);
     }
 
     /// Diff tabs are per-thread ephemeral state like the sub-agent panels:
