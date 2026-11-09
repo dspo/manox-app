@@ -612,6 +612,15 @@ mod tests {
             cx.debug_bounds("about-update-status").is_none(),
             "the idle state carries no status line"
         );
+
+        // The manual check's ephemeral note rides the idle status line for
+        // its visibility window.
+        cx.update(|_window, cx| steer_updater::mark_up_to_date(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("about-update-status").is_some(),
+            "the up-to-date note renders as the idle status line"
+        );
     }
 
     #[cfg(target_os = "macos")]

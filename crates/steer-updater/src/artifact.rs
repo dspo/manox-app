@@ -33,7 +33,7 @@ pub fn updates_dir_under(base: &Path) -> PathBuf {
 /// Remove every file in `dir` except `keep` — leftovers from earlier updates
 /// (a failed run's `.part`, dmgs a crash kept) would otherwise accrue
 /// forever. Only plain files are removed; directories are left alone.
-pub fn prune_stale(dir: &Path, keep: &[&Path]) -> usize {
+fn prune_stale(dir: &Path, keep: &[&Path]) -> usize {
     let mut removed = 0;
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();

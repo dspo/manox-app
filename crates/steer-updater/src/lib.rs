@@ -120,12 +120,31 @@ pub fn init(cx: &mut App) {
 /// Whether a check may run right now: only while no job is in flight. A
 /// check that landed `Available` over a `Downloading`/`ReadyToInstall` state
 /// would re-arm the download button and start a second job racing the first
-/// on the same `.part` file — the state machine never allows that transition.
+/// on the same `.part` file — both this entry gate and
+/// [`apply_check_success`] refuse that transition.
 pub fn check_allowed(cx: &App) -> bool {
     !matches!(
         UpdateStore::state(cx),
         Some(UpdateState::Downloading(_)) | Some(UpdateState::ReadyToInstall(_))
     )
+}
+
+/// Store half of a completed check, behind the same gate as the entry: the
+/// request outlives the state it started in (the user can start a download
+/// while a check is still in flight), so a result that would land on
+/// `Downloading`/`ReadyToInstall` is dropped instead of overwriting the job.
+/// Returns whether the result reached the store. An `Err` result is the
+/// caller's to surface — the manual path shows it in the About row, the
+/// scheduled path only warns.
+pub fn apply_check_success(cx: &mut App, found: Option<ReleaseInfo>) -> bool {
+    if !check_allowed(cx) {
+        return false;
+    }
+    match found {
+        Some(release) => UpdateStore::set_available(cx, Some(release)),
+        None => UpdateStore::set_state(cx, None),
+    }
+    true
 }
 
 /// The automatic check's gate, on top of [`check_allowed`]: a scheduled pass
@@ -173,10 +192,18 @@ async fn run_scheduled_check(cx: &gpui::AsyncApp) {
     let result = cx
         .background_spawn(async move { check_latest(&current) })
         .await;
-    cx.update(|cx| match result {
-        Ok(Some(release)) => UpdateStore::set_available(cx, Some(release)),
-        Ok(None) => UpdateStore::set_state(cx, None),
-        Err(err) => tracing::warn!("automatic update check failed: {err:#}"),
+    cx.update(|cx| {
+        // The request may have outlived the state it started in; re-check
+        // before writing so a download that began mid-check keeps its state.
+        if !scheduled_check_due(cx) {
+            return;
+        }
+        match result {
+            Ok(found) => {
+                apply_check_success(cx, found);
+            }
+            Err(err) => tracing::warn!("automatic update check failed: {err:#}"),
+        }
     });
 }
 
@@ -408,6 +435,42 @@ mod tests {
             UpdateStore::set_state(cx, Some(UpdateState::ReadyToInstall(release.clone())));
             assert!(!check_allowed(cx));
             assert_eq!(pending_release(cx), None);
+        });
+    }
+
+    /// A completed check must not write over a job that started while the
+    /// request was in flight: the entry gate alone cannot see that transition.
+    #[gpui::test]
+    fn a_completed_check_never_writes_over_an_in_flight_job(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init(cx);
+            let release = sample_release();
+
+            UpdateStore::set_state(cx, Some(UpdateState::Downloading(release.clone())));
+            assert!(!apply_check_success(cx, Some(release.clone())));
+            assert!(!apply_check_success(cx, None));
+            assert!(matches!(
+                UpdateStore::state(cx),
+                Some(UpdateState::Downloading(_))
+            ));
+
+            UpdateStore::set_state(cx, Some(UpdateState::ReadyToInstall(release.clone())));
+            assert!(!apply_check_success(cx, Some(release.clone())));
+            assert!(!apply_check_success(cx, None));
+            assert!(matches!(
+                UpdateStore::state(cx),
+                Some(UpdateState::ReadyToInstall(_))
+            ));
+
+            // Idle and failed stores still take the result.
+            UpdateStore::set_state(cx, None);
+            assert!(apply_check_success(cx, Some(release.clone())));
+            assert_eq!(
+                UpdateStore::state(cx),
+                Some(UpdateState::Available(release))
+            );
+            assert!(apply_check_success(cx, None));
+            assert_eq!(UpdateStore::state(cx), None);
         });
     }
 

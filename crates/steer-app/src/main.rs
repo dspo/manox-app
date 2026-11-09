@@ -507,6 +507,28 @@ fn announce_available_update(cx: &mut App) -> bool {
     delivered
 }
 
+/// Answer a manual check that was refused because a job is already in
+/// flight: the job's own state is the answer ("downloading …", "ready to
+/// restart"). The About row already projects it; this covers the menu path
+/// with the About window closed.
+#[cfg(target_os = "macos")]
+fn announce_update_in_flight(cx: &mut App) {
+    let text = match steer_updater::UpdateStore::state(cx) {
+        Some(steer_updater::UpdateState::Downloading(release)) => {
+            let version = release.version.to_string();
+            steer_i18n::t_str("update-downloading", &[("version", version.as_str())])
+        }
+        Some(steer_updater::UpdateState::ReadyToInstall(_)) => steer_i18n::t("update-ready"),
+        _ => return,
+    };
+    let Some(handle) = agent_ui::dispatch::window_global() else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        window.push_notification(Notification::info(text), cx);
+    });
+}
+
 /// The menu's 检查更新… / About-window check: like the scheduled check but it
 /// answers the user — "up to date" shows as the About window's inline note
 /// and as a notification when the main window is open, failures land in the
@@ -516,8 +538,10 @@ fn announce_available_update(cx: &mut App) -> bool {
 fn run_manual_update_check(cx: &mut App) {
     // A check never runs over an in-flight download/install: landing
     // `Available` on those states would re-arm the download button and start
-    // a second job racing the first on the same `.part` file.
+    // a second job racing the first on the same `.part` file. Answer with the
+    // job's own state instead of silently ignoring the click.
     if !steer_updater::check_allowed(cx) {
+        announce_update_in_flight(cx);
         return;
     }
     // Answer at the check stage when this build cannot install at all — a
@@ -533,27 +557,35 @@ fn run_manual_update_check(cx: &mut App) {
             .background_spawn(async move { steer_updater::check_latest(&current) })
             .await;
         cx.update(|cx| match result {
-            Ok(Some(release)) => {
-                steer_updater::UpdateStore::set_available(cx, Some(release));
-            }
-            Ok(None) => {
-                steer_updater::UpdateStore::set_state(cx, None);
-                // The manual check must answer: the inline note covers the
-                // About window (including a tray-parked app with only the
-                // About open, where no notification could reach), and the
-                // notification covers a main window with the About closed.
-                steer_updater::mark_up_to_date(cx);
-                if let Some(handle) = agent_ui::dispatch::window_global() {
-                    let _ = handle.update(cx, |_, window, cx| {
-                        window.push_notification(
-                            Notification::info(steer_i18n::t("update-uptodate")),
-                            cx,
-                        );
-                    });
+            Ok(found) => {
+                // The request can outlive the state it started in: drop a
+                // result that would land on a job the user began meanwhile.
+                let up_to_date = found.is_none();
+                if !steer_updater::apply_check_success(cx, found) {
+                    return;
+                }
+                if up_to_date {
+                    // The manual check must answer: the inline note covers the
+                    // About window (including a tray-parked app with only the
+                    // About open, where no notification could reach), and the
+                    // notification covers a main window with the About closed.
+                    steer_updater::mark_up_to_date(cx);
+                    if let Some(handle) = agent_ui::dispatch::window_global() {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            window.push_notification(
+                                Notification::info(steer_i18n::t("update-uptodate")),
+                                cx,
+                            );
+                        });
+                    }
                 }
             }
             Err(err) => {
-                steer_updater::UpdateStore::set_failed(cx, None, err.to_string());
+                // Same gate: a check that started before a download must not
+                // replace the job's state with a check failure.
+                if steer_updater::check_allowed(cx) {
+                    steer_updater::UpdateStore::set_failed(cx, None, err.to_string());
+                }
             }
         });
     })
