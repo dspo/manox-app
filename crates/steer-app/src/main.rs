@@ -508,11 +508,25 @@ fn announce_available_update(cx: &mut App) -> bool {
 }
 
 /// The menu's 检查更新… / About-window check: like the scheduled check but it
-/// answers the user — "up to date" lands as a notification, failures land in
-/// the About window's update section instead of staying silent. A found
-/// release announces through the store observer like any other discovery.
+/// answers the user — "up to date" shows as the About window's inline note
+/// and as a notification when the main window is open, failures land in the
+/// About window's update section instead of staying silent. A found release
+/// announces through the store observer like any other discovery.
 #[cfg(target_os = "macos")]
 fn run_manual_update_check(cx: &mut App) {
+    // A check never runs over an in-flight download/install: landing
+    // `Available` on those states would re-arm the download button and start
+    // a second job racing the first on the same `.part` file.
+    if !steer_updater::check_allowed(cx) {
+        return;
+    }
+    // Answer at the check stage when this build cannot install at all — a
+    // dev (`cargo run`) run learns it here instead of after spending a
+    // download.
+    if steer_updater::install::preflight().is_err() {
+        steer_updater::UpdateStore::set_failed(cx, None, steer_i18n::t("update-not-bundle"));
+        return;
+    }
     cx.spawn(async move |cx| {
         let current = steer_updater::current_version();
         let result = cx
@@ -524,6 +538,11 @@ fn run_manual_update_check(cx: &mut App) {
             }
             Ok(None) => {
                 steer_updater::UpdateStore::set_state(cx, None);
+                // The manual check must answer: the inline note covers the
+                // About window (including a tray-parked app with only the
+                // About open, where no notification could reach), and the
+                // notification covers a main window with the About closed.
+                steer_updater::mark_up_to_date(cx);
                 if let Some(handle) = agent_ui::dispatch::window_global() {
                     let _ = handle.update(cx, |_, window, cx| {
                         window.push_notification(

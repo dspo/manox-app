@@ -14,9 +14,6 @@ pub const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/dspo/manox-ap
 /// where full-name equality would not.
 const ASSET_SUFFIX: &str = "_macos_arm64.dmg";
 
-const API_ACCEPT: &str = "application/vnd.github+json";
-const API_VERSION: &str = "2022-11-28";
-
 /// A folded update candidate: everything the download and install steps need,
 /// resolved against one specific release.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,15 +26,12 @@ pub struct ReleaseInfo {
     /// Hex sha256 of the dmg, from the asset's `digest` field.
     pub asset_sha256: String,
     pub asset_size: u64,
-    /// The release's human page, for surfaces that link to it.
-    pub release_url: String,
 }
 
 /// The `/releases/latest` payload, narrowed to what the fold consumes.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct LatestRelease {
     pub tag_name: String,
-    pub html_url: String,
     pub assets: Vec<ReleaseAsset>,
 }
 
@@ -57,6 +51,8 @@ pub struct ReleaseAsset {
 /// elsewhere rather than spending API quota on an uninstallable answer.
 #[cfg(target_os = "macos")]
 pub fn fetch_latest() -> Result<LatestRelease> {
+    const API_ACCEPT: &str = "application/vnd.github+json";
+    const API_VERSION: &str = "2022-11-28";
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("Steer/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -115,7 +111,6 @@ pub fn fold_release(raw: &LatestRelease, current: &Version) -> Result<Option<Rel
         asset_url: asset.browser_download_url.clone(),
         asset_sha256: sha256,
         asset_size: asset.size,
-        release_url: raw.html_url.clone(),
     }))
 }
 
@@ -140,7 +135,6 @@ mod tests {
     fn release_with_assets(tag: &str, assets: &[(&str, u64, Option<&str>)]) -> LatestRelease {
         LatestRelease {
             tag_name: tag.into(),
-            html_url: format!("https://github.com/dspo/manox-app/releases/tag/{tag}"),
             assets: assets
                 .iter()
                 .map(|(name, size, digest)| ReleaseAsset {
@@ -232,10 +226,6 @@ mod tests {
         );
         assert_eq!(folded.asset_sha256, SHA);
         assert_eq!(folded.asset_size, 90_000_000);
-        assert_eq!(
-            folded.release_url,
-            "https://github.com/dspo/manox-app/releases/tag/v0.4.0"
-        );
     }
 
     /// The zip and the checksums file must never win the asset selection,

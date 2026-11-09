@@ -14,6 +14,10 @@ use crate::gh_release::ReleaseInfo;
 /// final name once size and digest have both checked out.
 const PART_SUFFIX: &str = ".part";
 
+/// Hard deadline for one download request, connection through body. See the
+/// client builder in [`download`] for why this is the stall bound.
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// The cache directory holding downloaded update artifacts.
 pub fn updates_dir() -> Result<PathBuf> {
     let base = dirs::cache_dir().context("missing user cache directory")?;
@@ -26,6 +30,23 @@ pub fn updates_dir_under(base: &Path) -> PathBuf {
     base.join("Steer").join("updates")
 }
 
+/// Remove every file in `dir` except `keep` — leftovers from earlier updates
+/// (a failed run's `.part`, dmgs a crash kept) would otherwise accrue
+/// forever. Only plain files are removed; directories are left alone.
+pub fn prune_stale(dir: &Path, keep: &[&Path]) -> usize {
+    let mut removed = 0;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if !path.is_file() || keep.contains(&path.as_path()) {
+            continue;
+        }
+        if fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Stream the release's dmg to `<updates>/<asset>.part`, then run the
 /// integrity gate; only a verified file is promoted to its final name.
 pub fn download(release: &ReleaseInfo) -> Result<PathBuf> {
@@ -35,10 +56,17 @@ pub fn download(release: &ReleaseInfo) -> Result<PathBuf> {
     let file_name = sanitize_file_name(&release.asset_name);
     let artifact_path = dir.join(&file_name);
     let part_path = dir.join(format!("{file_name}{PART_SUFFIX}"));
+    prune_stale(&dir, &[&artifact_path, &part_path]);
 
+    // The blocking builder exposes no per-read timeout, so the overall
+    // deadline is the stall bound: a server that stops mid-stream fails the
+    // request (into a retryable `Failed`) within it instead of hanging the
+    // store in `Downloading` forever. The span must still fit a ~80MB dmg on
+    // a slow link, hence minutes rather than seconds.
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("Steer/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(DOWNLOAD_TIMEOUT)
         .build()
         .context("failed to build the download HTTP client")?;
     let mut response = client
@@ -172,6 +200,36 @@ mod tests {
             updates_dir_under(Path::new("/cache")),
             PathBuf::from("/cache/Steer/updates")
         );
+    }
+
+    /// Pruning clears every file outside the keep list — earlier artifacts
+    /// and abandoned `.part` files — and never touches a kept path or a
+    /// directory.
+    #[test]
+    fn prune_stale_removes_everything_outside_the_keep_list() {
+        let dir = std::env::temp_dir().join(format!("steer-updater-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir creates");
+
+        let kept_artifact = dir.join("Steer_0.4.0_macos_arm64.dmg");
+        let kept_part = dir.join("Steer_0.4.0_macos_arm64.dmg.part");
+        let stale_artifact = dir.join("Steer_0.3.0_macos_arm64.dmg");
+        let stale_part = dir.join("Steer_0.3.0_macos_arm64.dmg.part");
+        for path in [&kept_artifact, &kept_part, &stale_artifact, &stale_part] {
+            fs::write(path, b"x").expect("fixture writes");
+        }
+        let nested = dir.join("nested");
+        fs::create_dir_all(&nested).expect("fixture dir creates");
+
+        let removed = prune_stale(&dir, &[&kept_artifact, &kept_part]);
+
+        assert_eq!(removed, 2);
+        assert!(kept_artifact.is_file());
+        assert!(kept_part.is_file());
+        assert!(!stale_artifact.exists());
+        assert!(!stale_part.exists());
+        assert!(nested.is_dir());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

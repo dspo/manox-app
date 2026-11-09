@@ -14,7 +14,6 @@ pub mod artifact;
 pub mod gh_release;
 pub mod install;
 
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -41,12 +40,9 @@ pub enum UpdateState {
     Available(ReleaseInfo),
     /// The release's dmg is streaming into the update cache.
     Downloading(ReleaseInfo),
-    /// The artifact is verified and copied over the install position; the
+    /// The verified artifact has been copied over the install position; the
     /// running process keeps its old image until it restarts.
-    ReadyToInstall {
-        release: ReleaseInfo,
-        artifact: PathBuf,
-    },
+    ReadyToInstall(ReleaseInfo),
     /// The last action failed; `release` survives so surfaces can offer a
     /// retry of the same job.
     Failed {
@@ -121,18 +117,36 @@ pub fn init(cx: &mut App) {
     cx.set_global(UpdateStore(None));
 }
 
-/// Fire one automatic check now: silent on failure (the store only ever
-/// moves to `Available`, clears, or stays put), and any announcement of a
-/// found release rides the bin's store observer rather than this crate.
-pub fn check_now(cx: &mut App) {
-    cx.spawn(async move |cx| run_scheduled_check(cx).await)
-        .detach();
+/// Whether a check may run right now: only while no job is in flight. A
+/// check that landed `Available` over a `Downloading`/`ReadyToInstall` state
+/// would re-arm the download button and start a second job racing the first
+/// on the same `.part` file — the state machine never allows that transition.
+pub fn check_allowed(cx: &App) -> bool {
+    !matches!(
+        UpdateStore::state(cx),
+        Some(UpdateState::Downloading(_)) | Some(UpdateState::ReadyToInstall(_))
+    )
+}
+
+/// The automatic check's gate, on top of [`check_allowed`]: a scheduled pass
+/// runs only when the store is idle or failed (a known `Available` release
+/// keeps its announcement rather than being re-discovered every 12h), and
+/// only where the updater could actually install — a dev build (no bundle)
+/// stays silent instead of alarming on every `cargo run`.
+fn scheduled_check_due(cx: &App) -> bool {
+    store_checkable(&UpdateStore::state(cx)) && install::preflight().is_ok()
+}
+
+/// The store half of the scheduled gate; the preflight is the other half.
+fn store_checkable(state: &Option<UpdateState>) -> bool {
+    matches!(state, None | Some(UpdateState::Failed { .. }))
 }
 
 /// The automatic check schedule: one delayed first pass clear of the first
-/// frame, then every 12h while the app lives. A pass only runs while the
-/// store is idle or failed — never over an in-flight download/install. The
-/// task is detached and outlives every surface that starts it.
+/// frame, then every 12h while the app lives. Every pass goes through
+/// [`scheduled_check_due`], so a pass never runs over an in-flight
+/// download/install and never fires in a dev build. The task is detached and
+/// outlives every surface that starts it.
 pub fn spawn_startup_check(cx: &mut App) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(STARTUP_CHECK_DELAY).await;
@@ -141,22 +155,20 @@ pub fn spawn_startup_check(cx: &mut App) {
             cx.background_executor()
                 .timer(PERIODIC_CHECK_INTERVAL)
                 .await;
-            let due = cx.update(|cx| {
-                matches!(
-                    UpdateStore::state(cx),
-                    None | Some(UpdateState::Failed { .. })
-                )
-            });
-            if due {
-                run_scheduled_check(cx).await;
-            }
+            run_scheduled_check(cx).await;
         }
     })
     .detach();
 }
 
-/// One scheduled pass against the live API.
+/// One scheduled pass against the live API: silent on failure and on a
+/// skipped gate (the store only ever moves to `Available`, clears, or stays
+/// put), and any announcement of a found release rides the bin's store
+/// observer rather than this crate.
 async fn run_scheduled_check(cx: &gpui::AsyncApp) {
+    if !cx.update(|cx| scheduled_check_due(cx)) {
+        return;
+    }
     let current = current_version();
     let result = cx
         .background_spawn(async move { check_latest(&current) })
@@ -206,13 +218,13 @@ pub fn start_update_download(cx: &mut App) {
             Err(err) => Err(err.to_string()),
         };
         cx.update(|cx| match outcome {
-            Ok(artifact) => UpdateStore::set_state(
-                cx,
-                Some(UpdateState::ReadyToInstall {
-                    release: release.clone(),
-                    artifact,
-                }),
-            ),
+            // The artifact's content now lives in the install position and
+            // nothing consumes the dmg again (restart re-execs the bundle),
+            // so it leaves the cache instead of accruing ~80MB per update.
+            Ok(artifact) => {
+                let _ = std::fs::remove_file(&artifact);
+                UpdateStore::set_state(cx, Some(UpdateState::ReadyToInstall(release.clone())));
+            }
             Err(message) => UpdateStore::set_failed(cx, Some(release.clone()), message),
         });
     })
@@ -237,13 +249,19 @@ fn pending_release(cx: &App) -> Option<ReleaseInfo> {
 /// while no window exists stays pending for the next window (re)open.
 static NOTIFIED_VERSION: Mutex<Option<String>> = Mutex::new(None);
 
+/// Read the notified-version marker, recovering the guard if a task panicked
+/// while holding it — a poisoned marker must never take the app down.
+fn notified_version() -> Option<String> {
+    let guard = NOTIFIED_VERSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.clone()
+}
+
 /// The `Available` release whose version has not yet been announced through
 /// a notification, if any.
 pub fn unnotified_release(cx: &App) -> Option<ReleaseInfo> {
-    let notified = NOTIFIED_VERSION
-        .lock()
-        .expect("notified-version lock poisoned")
-        .clone();
+    let notified = notified_version();
     match UpdateStore::state(cx)? {
         UpdateState::Available(release)
             if notified.as_deref() != Some(&release.version.to_string()) =>
@@ -258,9 +276,62 @@ pub fn unnotified_release(cx: &App) -> Option<ReleaseInfo> {
 /// [`unnotified_release`] stops offering it. A still-newer version offered
 /// later re-offers, so each release announces exactly once.
 pub fn mark_notified(release: &ReleaseInfo) {
-    *NOTIFIED_VERSION
+    let mut guard = NOTIFIED_VERSION
         .lock()
-        .expect("notified-version lock poisoned") = Some(release.version.to_string());
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(release.version.to_string());
+}
+
+/// How long the inline "up to date" note stays visible in the About window
+/// after a manual check that found nothing.
+pub const UP_TO_DATE_VISIBLE: Duration = Duration::from_secs(8);
+
+/// When the last "up to date" check happened, if any. Unlike the store (whose
+/// idle state is indistinguishable between "never checked" and "checked, found
+/// nothing"), this is the manual check's ephemeral answer: it shows for
+/// [`UP_TO_DATE_VISIBLE`] and then expires.
+static UP_TO_DATE_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Whether a mark made at `mark` is still inside its visibility window at
+/// `now`.
+fn up_to_date_visible_since(mark: std::time::Instant, now: std::time::Instant) -> bool {
+    now.duration_since(mark) < UP_TO_DATE_VISIBLE
+}
+
+/// Record that a check just found the app up to date, and schedule the
+/// refresh that retires the note when its visibility window ends (a newer
+/// mark keeps the note alive — the clear only fires when the window has
+/// actually elapsed).
+pub fn mark_up_to_date(cx: &mut App) {
+    *UP_TO_DATE_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::time::Instant::now());
+    cx.refresh_windows();
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(UP_TO_DATE_VISIBLE).await;
+        cx.update(|cx| {
+            let expired = UP_TO_DATE_AT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .map(|mark| !up_to_date_visible_since(mark, std::time::Instant::now()))
+                .unwrap_or(true);
+            if expired {
+                *UP_TO_DATE_AT
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                cx.refresh_windows();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Whether the About window should show the "up to date" note right now.
+pub fn up_to_date_visible() -> bool {
+    UP_TO_DATE_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some_and(|mark| up_to_date_visible_since(mark, std::time::Instant::now()))
 }
 
 #[cfg(test)]
@@ -276,7 +347,6 @@ mod tests {
             asset_url: "https://github.com/dspo/manox-app/releases/download/v0.4.0/Steer_0.4.0_macos_arm64.dmg".into(),
             asset_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             asset_size: 1024,
-            release_url: "https://github.com/dspo/manox-app/releases/tag/v0.4.0".into(),
         }
     }
 
@@ -299,16 +369,10 @@ mod tests {
             UpdateStore::set_state(cx, Some(UpdateState::Downloading(release.clone())));
             assert!(UpdateStore::is_downloading(cx));
 
-            UpdateStore::set_state(
-                cx,
-                Some(UpdateState::ReadyToInstall {
-                    release: release.clone(),
-                    artifact: PathBuf::from("/tmp/Steer_0.4.0_macos_arm64.dmg"),
-                }),
-            );
+            UpdateStore::set_state(cx, Some(UpdateState::ReadyToInstall(release.clone())));
             assert!(matches!(
                 UpdateStore::state(cx),
-                Some(UpdateState::ReadyToInstall { .. })
+                Some(UpdateState::ReadyToInstall(_))
             ));
 
             UpdateStore::set_failed(cx, Some(release.clone()), "checksum mismatch");
@@ -320,6 +384,64 @@ mod tests {
             UpdateStore::set_state(cx, None);
             assert_eq!(UpdateStore::state(cx), None);
         });
+    }
+
+    /// A check may never run over an in-flight job: landing `Available` on a
+    /// `Downloading`/`ReadyToInstall` state would re-arm the download button
+    /// and start a second job racing the first on the same `.part` file.
+    #[gpui::test]
+    fn checks_are_refused_while_a_job_is_in_flight(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init(cx);
+            let release = sample_release();
+
+            assert!(check_allowed(cx));
+            UpdateStore::set_available(cx, Some(release.clone()));
+            assert!(check_allowed(cx));
+            UpdateStore::set_failed(cx, Some(release.clone()), "rsync failed");
+            assert!(check_allowed(cx));
+
+            UpdateStore::set_state(cx, Some(UpdateState::Downloading(release.clone())));
+            assert!(!check_allowed(cx));
+            assert_eq!(pending_release(cx), None);
+
+            UpdateStore::set_state(cx, Some(UpdateState::ReadyToInstall(release.clone())));
+            assert!(!check_allowed(cx));
+            assert_eq!(pending_release(cx), None);
+        });
+    }
+
+    /// The scheduled gate's store half: idle and failed states re-check,
+    /// everything else (a known `Available`, an in-flight job) does not.
+    #[test]
+    fn the_scheduled_gate_re_checks_only_idle_and_failed_states() {
+        let release = sample_release();
+        assert!(store_checkable(&None));
+        assert!(store_checkable(&Some(UpdateState::Failed {
+            release: Some(release.clone()),
+            message: "x".into(),
+        })));
+        assert!(!store_checkable(&Some(UpdateState::Available(
+            release.clone()
+        ))));
+        assert!(!store_checkable(&Some(UpdateState::Downloading(
+            release.clone()
+        ))));
+        assert!(!store_checkable(&Some(UpdateState::ReadyToInstall(
+            release.clone()
+        ))));
+    }
+
+    /// The "up to date" note lives exactly for its visibility window.
+    #[test]
+    fn the_up_to_date_note_expires_with_its_window() {
+        let now = std::time::Instant::now();
+        assert!(up_to_date_visible_since(now, now));
+        assert!(up_to_date_visible_since(
+            now,
+            now + UP_TO_DATE_VISIBLE - Duration::from_secs(1)
+        ));
+        assert!(!up_to_date_visible_since(now, now + UP_TO_DATE_VISIBLE));
     }
 
     /// A `Failed` state that kept its release is a valid starting point for

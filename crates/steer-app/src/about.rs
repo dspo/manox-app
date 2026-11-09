@@ -90,15 +90,20 @@ impl AboutWindow {
 
     /// The update section between the headline and the provenance axis: one
     /// row per store state — a status line plus the matching action button
-    /// (下载并安装 / disabled 下载中… / 重启以更新 / 重试), and just the check
-    /// button while the store is idle. macOS only; the updater's seams bail
-    /// on every other platform, so the surface is gated to match.
+    /// (下载并安装 / disabled 下载中… / 重启以更新 / 重试), and the check
+    /// button while the store is idle (with the manual check's ephemeral
+    /// 「已是最新」note riding the status line for its visibility window).
+    /// macOS only; the updater's seams bail on every other platform, so the
+    /// surface is gated to match.
     #[cfg(target_os = "macos")]
     fn update_section(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = Theme::global(cx);
         let (status, action) = match steer_updater::UpdateStore::state(cx) {
             None => (
-                None,
+                // The manual check's ephemeral answer: the note shows briefly
+                // after a check that found nothing — including on a
+                // tray-parked app where no notification could reach.
+                steer_updater::up_to_date_visible().then(|| i18n::t("update-uptodate")),
                 update_button(
                     "update-action",
                     i18n::t("update-check"),
@@ -136,7 +141,7 @@ impl AboutWindow {
                     ),
                 )
             }
-            Some(steer_updater::UpdateState::ReadyToInstall { .. }) => (
+            Some(steer_updater::UpdateState::ReadyToInstall(_)) => (
                 Some(i18n::t("update-ready")),
                 update_button(
                     "update-action",
@@ -617,7 +622,6 @@ mod tests {
             asset_url: "https://github.com/dspo/manox-app/releases/download/v0.4.0/Steer_0.4.0_macos_arm64.dmg".into(),
             asset_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             asset_size: 1024,
-            release_url: "https://github.com/dspo/manox-app/releases/tag/v0.4.0".into(),
         }
     }
 }
