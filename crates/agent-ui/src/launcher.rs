@@ -231,7 +231,14 @@ impl LauncherState {
                 let Some(payload) = this.submit_payload(window, cx) else {
                     return;
                 };
-                let _ = this.ws.update(cx, |ws, cx| ws.submit_launcher(payload, cx));
+                // The workspace command runs at the effect boundary: this
+                // callback holds the launcher's lease, so any workspace code
+                // that touches the launcher (today none does; the payload is
+                // complete) would be a double lease.
+                let ws = this.ws.clone();
+                cx.defer(move |cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.submit_launcher(payload, cx));
+                });
             }
         });
         // The action row's availability face: one PATH scan at construction,
@@ -415,6 +422,20 @@ impl LauncherState {
         )
     }
 
+    /// Fire the composer's ⏎ exactly as the key path does — the InputEvent
+    /// emitted from the input's own update, so the `subscribe_in` handler
+    /// runs under THIS entity's lease. The lease-accurate driver for the
+    /// boundary regression. Test-support.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn diagnostic_emit_enter(&self, cx: &mut Context<Self>) {
+        self.input.update(cx, |_, cx| {
+            cx.emit(gpui_component::input::InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            })
+        });
+    }
+
     /// The send's payload, consumed out of this state — `None` for a blank
     /// draft (the composer stays untouched). The IN-FLIGHT check is the
     /// caller's peek ([`Self::first_turn_in_flight`], the PressEnter
@@ -469,6 +490,7 @@ impl LauncherState {
             return;
         }
         let this = cx.entity().downgrade();
+        let ws = self.ws.clone();
         let current = self.target.project_id().map(str::to_string);
         let menu = PopupMenu::build(window, cx, |menu, _window, cx| {
             let mut menu = menu;
@@ -532,10 +554,14 @@ impl LauncherState {
                 .item(
                     PopupMenuItem::new(steer_i18n::t("project-new-menu"))
                         .icon(Icon::default().path("icons/plus.svg"))
-                        .on_click(move |_, window, cx| {
-                            // The launcher stays mounted behind the dialog;
-                            // the closing render adopts the fresh project.
-                            crate::chrome_assembly::open_project_dialog(None, window, cx);
+                        .on_click({
+                            let ws = ws.clone();
+                            move |_, window, cx| {
+                                // The launcher stays mounted behind the dialog;
+                                // the closing render adopts the fresh project.
+                                let _ = ws
+                                    .update(cx, |ws, cx| ws.open_project_dialog(None, window, cx));
+                            }
                         }),
                 )
                 .item(
@@ -716,9 +742,18 @@ impl LauncherState {
                 move |row, window, cx| {
                     // The pick leaves this state first (the menu's dismiss
                     // subscription is fine with an already-closed flag), then
-                    // the launch runs on the workspace.
-                    let _ = this.update(cx, |state, cx| state.close_agent_menu(cx));
+                    // the launch runs on the workspace. The target and the
+                    // composer text are extracted HERE, inside this state's
+                    // own update: the workspace never reads the launcher.
+                    let picked = this.update(cx, |state, cx| {
+                        state.close_agent_menu(cx);
+                        let (target, _, _, _) = state.snapshot();
+                        (target, state.take_text_if_present(window, cx))
+                    });
                     let Some((agent_id, display, svg)) = launch_row else {
+                        return;
+                    };
+                    let Ok((target, prompt)) = picked else {
                         return;
                     };
                     let _ = ws.update(cx, |ws, cx| {
@@ -731,6 +766,8 @@ impl LauncherState {
                                 model: row.config_id.clone(),
                                 wire: crate::views::model_cascade::launch_wire_key(&row.api),
                             },
+                            target,
+                            prompt,
                             window,
                             cx,
                         )
@@ -804,8 +841,16 @@ impl LauncherState {
             cascade: None,
             on_click: {
                 let ws = ws.clone();
+                let this = this.clone();
                 Rc::new(move |_, window, cx| {
-                    let _ = ws.update(cx, |ws, cx| ws.launch_terminal_from_launcher(window, cx));
+                    // The launcher extracts its own target — the workspace
+                    // never reads a chrome-side entity.
+                    let Ok(target) = this.update(cx, |state, _| state.snapshot().0) else {
+                        return;
+                    };
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.launch_terminal_from_launcher(target, window, cx)
+                    });
                 })
             },
         }];

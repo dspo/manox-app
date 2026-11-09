@@ -16,7 +16,9 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{AppContext as _, Context, Entity, IntoElement, Render, Subscription, Window};
+use gpui::{
+    AppContext as _, Context, Entity, IntoElement, Render, Subscription, WeakEntity, Window,
+};
 use gpui_component::WindowExt as _;
 use gpui_component::input::{InputEvent, InputState};
 use steer_agent_chrome_ui::project_dialog::{OnRootPath, ProjectDialog, ProjectRootRow};
@@ -29,9 +31,12 @@ pub enum Mode {
     Edit { project_id: String },
 }
 
-/// The dialog draft — one instance per open dialog, mounted into the shell's
-/// dialog slot by [`crate::chrome_assembly::open_project_dialog`].
+/// The dialog draft — one instance per open dialog, held by the workspace
+/// (the chrome's dialog slot is a projection of it) so a window reopen
+/// remounts the dialog instead of losing it.
 pub struct ProjectDialogState {
+    /// The workspace that owns this dialog: the dismissals clear its slot.
+    ws: WeakEntity<crate::Workspace>,
     mode: Mode,
     name: Entity<InputState>,
     /// The user typed in the name field at least once; until then the
@@ -49,9 +54,14 @@ pub struct ProjectDialogState {
 impl ProjectDialogState {
     /// The create-mode draft: no roots yet (the confirm action stays inert
     /// until the picker fills them).
-    pub fn for_create(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn for_create(
+        ws: WeakEntity<crate::Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (name, sub) = Self::build_name_field(None, placeholder_text(None), window, cx);
         Self {
+            ws,
             mode: Mode::Create,
             name,
             name_touched: false,
@@ -67,6 +77,7 @@ impl ProjectDialogState {
     /// following project keeps the field empty so the placeholder keeps
     /// previewing the primary's basename.
     pub fn for_edit(
+        ws: WeakEntity<crate::Workspace>,
         project: crate::projects::Project,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -81,6 +92,7 @@ impl ProjectDialogState {
         let (name, sub) =
             Self::build_name_field(prefill, placeholder_text(primary.as_deref()), window, cx);
         Self {
+            ws,
             mode: Mode::Edit {
                 project_id: project.id,
             },
@@ -125,7 +137,13 @@ impl ProjectDialogState {
 
     /// Dismiss without saving (✕ / 取消 / Escape).
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
-        crate::chrome_assembly::close_project_dialog(cx);
+        self.close(cx);
+    }
+
+    /// Clear the workspace's dialog slot — the one dismiss route, shared by
+    /// the cancel gesture, a successful save and the confirmed removal.
+    fn close(&self, cx: &mut Context<Self>) {
+        let _ = self.ws.update(cx, |ws, cx| ws.close_project_dialog(cx));
     }
 
     /// The ＋ 添加文件夹… row: the native multi-select folder picker, as an
@@ -207,7 +225,7 @@ impl ProjectDialogState {
             ),
         };
         match result {
-            Ok(()) => crate::chrome_assembly::close_project_dialog(cx),
+            Ok(()) => self.close(cx),
             Err(e) => {
                 self.error = Some(steer_i18n::t_str(
                     "project-error-save",
@@ -226,11 +244,13 @@ impl ProjectDialogState {
             return;
         };
         let dialog = cx.entity().downgrade();
+        let ws = self.ws.clone();
         window.open_alert_dialog(cx, move |alert, _, _| {
             // The builder may re-run: every face clones its own handles, the
             // on_ok closure moves them out of THIS builder run.
             let project_id = project_id.clone();
             let dialog = dialog.clone();
+            let ws = ws.clone();
             alert
                 .title(steer_i18n::t("project-remove-confirm-title"))
                 .description(steer_i18n::t("project-remove-confirm-body"))
@@ -240,7 +260,12 @@ impl ProjectDialogState {
                 .on_ok(move |_, _, cx| {
                     crate::projects::delete_project(&project_id);
                     if let Some(dialog) = dialog.upgrade() {
-                        dialog.update(cx, |_, cx| crate::chrome_assembly::close_project_dialog(cx));
+                        // The dialog exists while the workspace holds it; drop
+                        // the slot through the owner (the view itself only
+                        // needs to know *that* it closed).
+                        dialog.update(cx, |_, cx| {
+                            let _ = ws.update(cx, |ws, cx| ws.close_project_dialog(cx));
+                        });
                     }
                     true
                 })

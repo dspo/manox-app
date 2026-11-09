@@ -1,9 +1,12 @@
 //! The shell root view — the app window's chrome. Owns layout state (sidebar
 //! width/visibility, bottom dock, right pane) and the sidebar's *interaction*
-//! state (selection, collapse, group order, row menu, session picker); the
-//! session rows themselves are host-pushed snapshots ([`Shell::set_sessions`])
-//! and every state-changing action is mirrored to the host through
-//! [`HostHooks`] — the chrome never touches a data source.
+//! state (batch selection, collapse, group order, row menu, session picker).
+//! The session rows are host-pushed snapshots ([`Shell::set_sessions`]); the
+//! row HIGHLIGHT is not state at all — it is the host's foreground read at
+//! render time ([`HostHooks::active_row`]), so no switch path can leave it
+//! advertising a row the host is not showing. Every state-changing gesture is
+//! mirrored to the host through [`HostHooks`] — the chrome never touches a
+//! data source.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -141,9 +144,6 @@ pub type HookOnRowProject = Box<dyn Fn(&str, &str, &mut Window, &mut App)>;
 pub type HookOnGroupOrder = Box<dyn Fn(&[String], &mut App)>;
 /// The popup menu entity the host builds and the shell mounts.
 pub type MenuEntity = Entity<gpui_component::menu::PopupMenu>;
-/// Host nav move: opens the previous/next thread in the host's history and
-/// returns the thread id it landed on (`None` when there is nowhere to go).
-pub type HookOnNav = Box<dyn Fn(&mut Window, &mut App) -> Option<String>>;
 /// Host state query face (render-time read, no mutation).
 pub type HookQuery<T> = Box<dyn Fn(&App) -> T>;
 
@@ -173,18 +173,24 @@ pub struct HostHooks {
     /// Thread-tag write-back (the same store seam the sidebar's
     /// `SetThreadTag` uses). `None` clears the tag.
     pub on_set_tag: Option<HookOnSetTag>,
-    /// New-session request (the New button / ⌘N). Absent → the shell just
-    /// clears the active session.
+    /// New-session request (the New button / ⌘N). Absent → the click is
+    /// inert (the shell has no draft state of its own to clear).
     pub on_new_session: Option<HookOnUnit>,
     /// Selection-change notification (the full production switch path; the
     /// row menu has no open action — its five items are pin / archive /
     /// tag / clear-tag / copy id).
     pub on_select: Option<HookOnId>,
-    /// ←/→ session-history navigation. The hook performs the host-side move
-    /// and reports the landed thread id so the shell can move its own
-    /// selection without re-deriving host state.
-    pub on_nav_back: Option<HookOnNav>,
-    pub on_nav_forward: Option<HookOnNav>,
+    /// The row that wears the highlight: the host's foreground container id,
+    /// read at render time. The highlight has NO local mirror — a host-pushed
+    /// field would have to be re-primed at every switch site, and one missed
+    /// site silently advertises the wrong session. Absent → no row is
+    /// selected (a chrome with no data source).
+    pub active_row: Option<HookQuery<Option<String>>>,
+    /// ←/→ session-history navigation. The hook performs the host-side move;
+    /// the landed row's highlight arrives through [`Self::active_row`] — the
+    /// selection has no second source to keep in step.
+    pub on_nav_back: Option<HookOnUnit>,
+    pub on_nav_forward: Option<HookOnUnit>,
     /// Availability of the two nav moves, queried at render time AND
     /// enforced by [`Shell::nav_back`] / [`Shell::nav_forward`]. ABSENT =
     /// neither move may fire: a host that ships `on_nav_back` without this
@@ -287,7 +293,6 @@ struct InlineEdit {
 pub struct Shell {
     // ── sessions (host-pushed) ──
     pub sessions: Vec<SessionRow>,
-    pub active: Option<String>,
     collapsed: Vec<String>,
     /// Groups whose 5-row fold was lifted (show more or an active-row
     /// reveal); cleared when the group collapses. Interior mutability: the
@@ -398,6 +403,14 @@ pub struct Shell {
 
 impl Shell {
     pub fn set_sidebar_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        // Identity-idempotent: the projection pump re-runs on every workspace
+        // notification, and only a MOUNT/UNMOUNT transition may touch the pin
+        // bookkeeping below.
+        if self.sidebar_surface.as_ref().map(gpui::AnyView::entity_id)
+            == surface.as_ref().map(gpui::AnyView::entity_id)
+        {
+            return;
+        }
         // The injected surface is the mode's only exit, so mounting it pins
         // the sidebar open and remembers the user's preference; unmounting
         // releases the pin and restores it. A second mount while pinned (the
@@ -423,11 +436,21 @@ impl Shell {
     /// Mount/unmount the modal dialog overlay (the host-side seam of the
     /// project dialog; the view carries its own state and dismissal).
     pub fn set_dialog_surface(&mut self, surface: Option<gpui::AnyView>, cx: &mut Context<Self>) {
-        let changed = self.dialog_surface.is_some() != surface.is_some();
-        self.dialog_surface = surface;
-        if changed {
-            cx.notify();
+        // Identity-idempotent (the pump re-runs per notification): a swap
+        // between two dialogs is a change, a re-push of the same one is not.
+        if self.dialog_surface.as_ref().map(gpui::AnyView::entity_id)
+            == surface.as_ref().map(gpui::AnyView::entity_id)
+        {
+            return;
         }
+        self.dialog_surface = surface;
+        cx.notify();
+    }
+
+    /// Whether the modal dialog slot is mounted (the host projection's read
+    /// face; the field itself is private to the render path).
+    pub fn has_dialog_surface(&self) -> bool {
+        self.dialog_surface.is_some()
     }
 
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -440,7 +463,6 @@ impl Shell {
         Self {
             right,
             sessions: Vec::new(),
-            active: None,
             collapsed: Vec::new(),
             expanded_groups: RefCell::new(Vec::new()),
             revealed_for: RefCell::new(HashMap::new()),
@@ -506,35 +528,20 @@ impl Shell {
         }
     }
 
+    /// A row click: the host opens the row; the highlight follows the host's
+    /// foreground through [`Self::active_row`] — the click paints nothing
+    /// locally, so a refused open cannot leave a row selected.
     pub fn select(&mut self, id: &str, window: &mut Window, cx: &mut App) {
-        self.active = Some(id.to_string());
         if let Some(on_select) = &self.hooks.on_select {
             on_select(id, window, cx);
         }
     }
 
-    /// The programmatic face of [`Self::select`]: the highlight only — no
-    /// `on_select` fires. The host pushes this from its own open/attach/spawn
-    /// paths, where routing back through the select hook would re-enter the
-    /// very path that pushed it. Row clicks still go through
-    /// [`Self::select`].
-    pub fn set_active(&mut self, id: &str) {
-        self.active = Some(id.to_string());
-    }
-
-    /// No container owns the main column (the launcher is up): no row wears
-    /// the selection.
-    pub fn clear_active(&mut self) {
-        self.active = None;
-    }
-
-    /// The New button / ⌘N: default behavior is the empty state (no active
-    /// session); hosts with a real new-session path hook `on_new_session`.
+    /// The New button / ⌘N: the host lands its empty state. No host face →
+    /// the click is inert.
     pub fn new_session(&mut self, window: &mut Window, cx: &mut App) {
         if let Some(on_new) = &self.hooks.on_new_session {
             on_new(window, cx);
-        } else {
-            self.active = None;
         }
     }
 
@@ -549,9 +556,7 @@ impl Shell {
         let Some(hook) = &self.hooks.on_nav_back else {
             return;
         };
-        if let Some(id) = hook(window, cx) {
-            self.active = Some(id);
-        }
+        hook(window, cx);
     }
 
     /// →: one step forward through the host's session history (live-edge
@@ -563,9 +568,14 @@ impl Shell {
         let Some(hook) = &self.hooks.on_nav_forward else {
             return;
         };
-        if let Some(id) = hook(window, cx) {
-            self.active = Some(id);
-        }
+        hook(window, cx);
+    }
+
+    /// The row wearing the highlight: the host's foreground, read through
+    /// [`HostHooks::active_row`]. This is the ONLY selection source — no
+    /// field, no push, nothing to keep in step.
+    pub fn active_row(&self, cx: &App) -> Option<String> {
+        self.hooks.active_row.as_ref().and_then(|q| q(cx))
     }
 
     /// Whether the two nav moves can fire right now (the host's history
@@ -1271,12 +1281,12 @@ impl Shell {
     /// The fold footer's toggle: lift the group's 5-row fold or lay it back
     /// down. A manual show-less records the active row as already revealed,
     /// so the auto-reveal does not immediately lift the fold again.
-    pub fn toggle_show_more(&mut self, key: &str) {
+    pub fn toggle_show_more(&mut self, key: &str, cx: &App) {
         let mut expanded = self.expanded_groups.borrow_mut();
         if let Some(i) = expanded.iter().position(|k| k == key) {
             expanded.remove(i);
             drop(expanded);
-            if let Some(a) = self.active.clone() {
+            if let Some(a) = self.active_row(cx) {
                 self.revealed_for.borrow_mut().insert(key.to_string(), a);
             }
         } else {
@@ -1294,19 +1304,17 @@ impl Shell {
         let _ = cx;
     }
 
-    /// Archive/unarchive local reconciliation. The ARCHIVE direction is the
-    /// container teardown path's own optimistic half at its shell face — its
-    /// only caller is the host's `drop_sidebar_row` primitive (the
-    /// workspace-side archive gestures have no menu handler to do this half
-    /// for them); the row menu and the batch bar never pre-drop (a
-    /// confirmation may cancel). The UNARCHIVE direction keeps the local
-    /// flip: the row is present, the next snapshot confirms it.
+    /// Archive/unarchive local reconciliation. The UNARCHIVE direction is the
+    /// row menu's optimistic flip (the row is present; the next snapshot
+    /// confirms it). The ARCHIVE direction is a local row drop with no
+    /// production caller: archived rows leave through the projection (the
+    /// host's `container_rows` filters the archived bit), so it exists only
+    /// for the regression fixture that replays that drop face. The highlight
+    /// needs no reconciliation either: it is derived from the host's
+    /// foreground, so a retired row stops wearing it on the next frame.
     pub fn set_archived(&mut self, id: &str, archived: bool, cx: &mut App) {
         if archived {
             self.sessions.retain(|s| s.id != id);
-            if self.active.as_deref() == Some(id) {
-                self.active = None;
-            }
         } else if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
             s.archived = false;
         }
@@ -1561,7 +1569,7 @@ impl Shell {
             // in `revealed_for`); a manual show-less after that sticks until
             // the active row changes. The reveal lands in `expanded_groups` —
             // the footer's show-less must find the lift to take it down.
-            let active = self.active.clone();
+            let active = self.active_row(cx);
             for g in &mut groups {
                 if g.rows.len() <= GROUP_ROW_LIMIT {
                     continue;
@@ -2129,7 +2137,7 @@ impl Shell {
     /// The sidebar view: shell session state → SessionList props.
     fn render_sidebar(&mut self, cx: &mut Context<Shell>) -> impl IntoElement {
         let (fixed, groups, customizations) = self.sidebar_props(cx);
-        let selected = self.active.clone();
+        let selected = self.active_row(cx);
         let hovered = self.hovered_row.clone();
         let has_chats = !self.sessions.is_empty();
         let marker = self.group_drag_marker.clone();
@@ -2177,7 +2185,7 @@ impl Shell {
             cx.notify();
         });
         let on_show_more = cx.listener(|this, key: &String, _w, cx| {
-            this.toggle_show_more(key);
+            this.toggle_show_more(key, cx);
             cx.notify();
         });
         let on_new = cx.listener(|this, _: &ClickEvent, w, cx| {

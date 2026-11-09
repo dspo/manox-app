@@ -208,7 +208,8 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
   → `archive_containers`）：容器带**活跃成员**（名册 running 行 + `backgroundWork` 后台 shell
   卡，双面去重）时先弹确认（`archive-confirm-*` 双语键，gpui-component `AlertDialog`，
   列出成员清单），确认或无成员直通后落 **archive 模式 teardown 一条命令**；乐观半场 = 整树摘行
-  （book summaries + object 行归档位）+ 侧栏 shell 摘行（`drop_sidebar_row`）+ 容器资源回收
+  （book summaries + object 行归档位；侧栏行随下一次投影消失——归档位过滤在
+  `container_rows` 里，没有单独的摘行推送）+ 容器资源回收
   （A2 `teardown_container`）+ 死亡谓词事件——原三处乐观摘行站点（store 的 `archive_sessions`
   归档臂、壳菜单自摘、`/exit` 显式摘行）全部收敛到这一条路径。`cmd-;` 与 `/new` 保持 idle 门禁，
   归档落地后续接新容器（`ArchiveLanding` 延续）。
@@ -1006,7 +1007,7 @@ entry，把 `(path, output)` 交给 `ChatHost::open_right_diff` → workspace �
 
 The Settings split layout: Settings reuses the shell's own two-column structure. On
 `enter_settings` the chrome sidebar swaps its session list for the injected settings nav
-(`Shell::sidebar_surface` ← `chrome_assembly::enter_settings_layout`,
+(`Shell::sidebar_surface` ← 投影泵挂载 `Workspace::settings_nav_view`,
 `views/settings_nav::SettingsNavView`), and the main column carries the selected page's detail
 (`Workspace::render_settings_detail`).
 
@@ -1154,7 +1155,7 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 #### ChromeShell
 
-应用壳根视图（`crates/steer-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px 仅 macOS（其余平台 12px 起排）；Linux/FreeBSD 客户端装饰下右翼末尾另有自绘最小化/最大化/关闭按钮——请求 `WindowDecorations::Client` 后无系统标题栏，Server 回退时自动隐藏；侧栏开关、**←/→ 会话历史导航**（可用性由宿主经 `nav_avail` 查询钩子渲染期提供，无可去边界时置灰 inert）、session 下拉选择器（触发器是两组 `flex_1` 控件翼之外的最后挂载 absolute 层：固定 360px 宽、按 `(视口宽−360)/2` 钉在窗口水平中心线；下拉开面板用同一公式锚在标题栏下方 4px，面板恰好盖住触发器正下方，不再记录点击锚点）、**「在 VS Code 中打开」**（`on_open_editor` → 宿主后台 spawn `launch_plain(前台 project)`，只失败推错误通知（成功由 VS Code 打开自证）；无项目时推「没有可打开的项目」错误通知，绝不静默打开 `$HOME`）、面板/右栏开关、**品牌位**（`ShellConfig.brand` 注入的 app logo 元素工厂，None 回退通用字形；刻意非交互，且被排除在窗口拖拽面外——mouse-down 被吞掉；行级拖拽是 arm/move 模型：mouse-down 只置位、首次 mouse-move 才 `start_window_move`，双击最大化——press 直接启动交互移动会被 WM 抢走 pointer、吞掉子件 click））+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为上游 gpui-base `resize_handle` 隐形带（外观渲染为空——卡缝即卡间空隙，不画分隔线；把手只发起拖载与双击重置，`on_drag_move` 挂根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行、品牌位与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（分组折叠/拖排、下拉/行菜单、**侧栏分组模式与过滤词**）；选中高亮由宿主每次快照用前台线程 id 覆写（`shell.active`），不跟随点击。固定行（Automations/Chats）与 Customizations 块（Overview/MCP）**尚未实现**：整行 `FG_FAINT` 化 + hover「尚未实现」tooltip，保持 inert（2026-09-30 假控件清理：Run/split/右栏 split·external 已删——原版 Run 是 split-button、manox 无任务系统；Sync Changes 胶囊已删——git pull/push 集成另立特性）。
+应用壳根视图（`crates/steer-agent-chrome-ui/src/shell.rs`）：垂直布局 = 38px 工具栏（原生交通灯槽位 70px 仅 macOS（其余平台 12px 起排）；Linux/FreeBSD 客户端装饰下右翼末尾另有自绘最小化/最大化/关闭按钮——请求 `WindowDecorations::Client` 后无系统标题栏，Server 回退时自动隐藏；侧栏开关、**←/→ 会话历史导航**（可用性由宿主经 `nav_avail` 查询钩子渲染期提供，无可去边界时置灰 inert）、session 下拉选择器（触发器是两组 `flex_1` 控件翼之外的最后挂载 absolute 层：固定 360px 宽、按 `(视口宽−360)/2` 钉在窗口水平中心线；下拉开面板用同一公式锚在标题栏下方 4px，面板恰好盖住触发器正下方，不再记录点击锚点）、**「在 VS Code 中打开」**（`on_open_editor` → 宿主后台 spawn `launch_plain(前台 project)`，只失败推错误通知（成功由 VS Code 打开自证）；无项目时推「没有可打开的项目」错误通知，绝不静默打开 `$HOME`）、面板/右栏开关、**品牌位**（`ShellConfig.brand` 注入的 app logo 元素工厂，None 回退通用字形；刻意非交互，且被排除在窗口拖拽面外——mouse-down 被吞掉；行级拖拽是 arm/move 模型：mouse-down 只置位、首次 mouse-move 才 `start_window_move`，双击最大化——press 直接启动交互移动会被 WM 抢走 pointer、吞掉子件 click））+ 内容区（侧栏｜主区卡［主槽｜右栏］／底部 dock）。主区卡圆角 8px、卡缝 6px；两条调宽把手为上游 gpui-base `resize_handle` 隐形带（外观渲染为空——卡缝即卡间空隙，不画分隔线；把手只发起拖载与双击重置，`on_drag_move` 挂根做绝对坐标数学，载荷类型左右各一）。`ShellConfig` 注入主槽（`MainSurface`）、右栏 kind 注册表、dock surface、侧栏固定行/自定义行、品牌位与 `HostHooks`；会话行由宿主推送快照（`set_sessions`），壳自身只持交互态（分组折叠/拖排、下拉/行菜单、**侧栏分组模式与过滤词**）；选中高亮是**渲染期查询**（`HostHooks::active_row` ← 宿主 `Workspace::chrome_selection`：launcher/Settings 无选中，external 行戴自己的 id，其余戴前台线程）——壳里没有选中字段，任何切换腿都无从「漏推」。固定行（Automations/Chats）与 Customizations 块（Overview/MCP）**尚未实现**：整行 `FG_FAINT` 化 + hover「尚未实现」tooltip，保持 inert（2026-09-30 假控件清理：Run/split/右栏 split·external 已删——原版 Run 是 split-button、manox 无任务系统；Sync Changes 胶囊已删——git pull/push 集成另立特性）。
 
 会话历史的权威栈在 `Workspace` 的 `NavHistory`（cap 100，去重判据是「当前指向项」而非栈尾）：用户发起的 `open_container`（侧栏点击/下拉选中）与 fork 落地、新建落地（⌘N、/exit 的替换会话经 `attach_created_session`）都入栈并截断前进尾；←/→ 移动指针不重复记录；successor 换代把**当前条目原地改写**为后继 id（`replace_nav_current`——追加会把已处置的前任留在 ← 一步可达处）。降级语义：栈内 id 若在线程归档/换代后失效，回退仍走 landing attach（空 landing 可接受）——不剪枝是接受的取舍。
 
@@ -1184,11 +1185,11 @@ Plugin management lives under Settings → Plugins (`PluginManagerView`): a Mark
 
 创建/编辑项目的模态对话框（设计 §2.4，2026-11 项目实体化 P2）。**职责切分同 [ProjectGroupMenu](#projectgroupmenu)**：chrome 只出面——`steer-agent-chrome-ui::ProjectDialog` 是 props 驱动的表单卡（标题「创建项目↔编辑项目」随 `edit` 翻转 + ✕、名称输入（宿主注入 `InputState`，placeholder 由宿主计算）、源文件夹行列表（FOLDER 图标 + basename 显示（tooltip 全路径）+「主要」徽章或「设为主要」文字钮 + ✕ 移除；**徽章是行属性不是列表位置**，设为主要不重排）、「＋ 添加文件夹…」行、行内红字错误行、动作行（编辑模式左侧「移除项目」红字钮 + 右侧 取消/确认药丸；roots 为空时确认置灰且不挂点击））；宿主出**状态机与写面**——`agent_ui::project_dialog::ProjectDialogState`（draft：name 输入实体 / roots / primary / name_touched / error；render 即 chrome 组件的 props 投影，回调经 entity handle 回环）。
 
-**挂载面**：`Shell::dialog_surface: Option<AnyView>` 槽（`set_dialog_surface`，与 `sidebar_surface` 同型的宿主注入面）——渲染为全窗口压暗浮层（`DIALOG_SCRIM`，前景色 30%）+ 居中卡片（`.occlude()` 不透传点击）；弹窗自身负责退出（✕／取消／Escape 三路同回 `on_cancel`——`on_key_down` 捕获裸 Escape、`on_action` 捕获输入框上抛的 Escape action），chrome 不发明背景点击语义。
+**挂载面**：`Shell::dialog_surface: Option<AnyView>` 槽（`set_dialog_surface`，与 `sidebar_surface` 同型的宿主注入面；内容是 workspace 的 `dialog` 字段，由投影泵挂载——关窗重开随装配恢复）——渲染为全窗口压暗浮层（`DIALOG_SCRIM`，前景色 30%）+ 居中卡片（`.occlude()` 不透传点击）；弹窗自身负责退出（✕／取消／Escape 三路同回 `on_cancel`——`on_key_down` 捕获裸 Escape、`on_action` 捕获输入框上抛的 Escape action），chrome 不发明背景点击语义。
 
 **状态机语义**：名称 placeholder = basename(primary) 且实时预览「设为主要」的跟随效果（跟随-直到-用户改过：`name_touched` 由 `InputEvent::Change` 置位，**预填不置位**——编辑模式的订阅挂在 set_value 之后，故跟随中的项目在编辑框里继续预览）；添加文件夹 = `rfd::AsyncFileDialog::new().pick_folders()` 原生多选目录面板（异步对话框——面板自身的 modal loop 不能在 click 事件分发内自旋，经 ModalFuture 派发、结果落回实体；追加按 canonical 去重、重复 no-op；首根自动持有徽章）；删根时徽章顺延给第一根、删空清徽章且确认置灰。提交：创建 = `projects::create_project(name trim 非空则 Some, roots, Some(primary))`（成功即盖 last-created 记录）；编辑 = `projects::apply_edit`（单次写盘——一次校验一次 persist，拒绝不留半应用）；成功即关对话框（`chrome_assembly::close_project_dialog`），失败行内红字（`project-error-save`）不弹窗。移除项目走仓内现有确认面（`window.open_alert_dialog`——归档确认同款 builder），ok → `projects::delete_project`（membership 级联剪除）后关闭；确认闭包持 weak handle（弹窗存活跨帧）。
 
-**入口（均汇入 `chrome_assembly::open_project_dialog`）**：创建（`None`）三路——① 侧栏底部常驻「＋ 新建项目」footer 行（[ChromeSessionList](#chromesessionlist) 尾节；`HostHooks::on_new_project` 缺席即无此行）；② Chats 桶组头菜单「新建项目…」（`project_menu::group_menu` 仅散桶挂首项——真实项目组的菜单管理既有项目，不挂创建行）；③ Launcher chip 菜单「新建项目…」（[Launcher](#launcher) 项目 chip 菜单尾行，关闭后经 `projects::last_created_project()` 采纳新项目为当前目标）。编辑（`Some(id)`）一路——项目组组头菜单「编辑项目」（[ProjectGroupMenu](#projectgroupmenu)，Step-4 落地；id 已删则静默不开）。全部 click 闭包自带 `&mut Window` 直通（Steer 行同律：绝不 `window_global().update` 重入已租窗口）。创建成功即上侧栏——空项目组照常渲染（骨架，分组投影消费注册表），launcher chip 经 last-created 记录当场采纳。离屏出图：`CHROME_PROJECT_DIALOG=1`（真实组件 + 真实浮层槽，静态 props）。
+**入口（均汇入 `Workspace::open_project_dialog`）**：创建（`None`）三路——① 侧栏底部常驻「＋ 新建项目」footer 行（[ChromeSessionList](#chromesessionlist) 尾节；`HostHooks::on_new_project` 缺席即无此行）；② Chats 桶组头菜单「新建项目…」（`project_menu::group_menu` 仅散桶挂首项——真实项目组的菜单管理既有项目，不挂创建行）；③ Launcher chip 菜单「新建项目…」（[Launcher](#launcher) 项目 chip 菜单尾行，关闭后经 `projects::last_created_project()` 采纳新项目为当前目标）。编辑（`Some(id)`）一路——项目组组头菜单「编辑项目」（[ProjectGroupMenu](#projectgroupmenu)，Step-4 落地；id 已删则静默不开）。全部 click 闭包自带 `&mut Window` 直通；宿主对壳的动作统一经 `chrome_assembly::defer_shell`（落到 effect 边界，既不在任何实体租约下、也没有窗口 update 在途——事件分发内直连 `window_global().update` 会被吞成静默 no-op），壳状态统一由 `chrome_assembly::project` 投影泵写入。创建成功即上侧栏——空项目组照常渲染（骨架，分组投影消费注册表），launcher chip 经 last-created 记录当场采纳。离屏出图：`CHROME_PROJECT_DIALOG=1`（真实组件 + 真实浮层槽，静态 props）。
 
 > Source: `crates/steer-agent-chrome-ui/src/project_dialog.rs`, `crates/agent-ui/src/project_dialog.rs`, `crates/agent-ui/src/chrome_assembly.rs`, `crates/agent-ui/src/projects.rs`, `crates/steer-agent-chrome-ui/src/shell.rs` (`render` 浮层)
 

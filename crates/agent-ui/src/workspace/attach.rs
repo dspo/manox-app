@@ -407,9 +407,6 @@ impl Workspace {
         // unread while the one just left never lit up.
         self.multiplexer
             .update(cx, |m, cx| m.set_focused(Some(&new_id), cx));
-        // The sidebar's selection follows the foreground: every attach leg
-        // (an open, the launcher create, a reclaim) changes hands.
-        crate::chrome_assembly::select_container(&new_id, cx);
 
         // Persist the old thread's current state before switching away. The
         // spawned-task save backstop in `run_turn` will persist again when the
@@ -823,28 +820,23 @@ impl Workspace {
         self.open_container_inner(id, false, window, cx);
     }
 
-    /// One step back through the visited-thread history; returns the thread
-    /// landed on (`None` when the move has no edge).
-    pub(crate) fn nav_back(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let id = self.nav.step_back()?;
-        self.open_container_inner(id.clone(), false, window, cx);
-        Some(id)
+    /// One step back through the visited-thread history (a dead edge is a
+    /// no-op — the shell gates the gesture on `nav_avail`). The highlight
+    /// follows the foreground this move sets, so nothing is reported back.
+    pub(crate) fn nav_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.nav.step_back() else {
+            return;
+        };
+        self.open_container_inner(id, false, window, cx);
     }
 
-    /// One step forward through the visited-thread history (`None` at the
-    /// tail).
-    pub(crate) fn nav_forward(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let id = self.nav.step_forward()?;
-        self.open_container_inner(id.clone(), false, window, cx);
-        Some(id)
+    /// One step forward through the visited-thread history (a dead edge is a
+    /// no-op).
+    pub(crate) fn nav_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.nav.step_forward() else {
+            return;
+        };
+        self.open_container_inner(id, false, window, cx);
     }
 
     /// The ←/→ moves' availability (the history's edges).

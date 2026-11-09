@@ -32,9 +32,9 @@ impl crate::Workspace {
         if !already {
             self.leave_external_session();
             self.leave_subagent_stream(cx);
-            if matches!(self.view_mode, ViewMode::Settings) {
-                crate::chrome_assembly::leave_settings_layout(cx);
-            }
+            // Leaving Settings drops its sidebar nav; the projection swaps
+            // the session list back in.
+            self.settings_nav_view = None;
             self.view_mode = ViewMode::Launcher;
         }
         let launcher = match self.launcher.clone() {
@@ -56,9 +56,8 @@ impl crate::Workspace {
             }
             state.focus(window, cx);
         });
-        // The launcher owns the main column: no container is foreground, so
-        // no row wears the selection.
-        crate::chrome_assembly::clear_container_selection(cx);
+        // The launcher owns the main column: `chrome_selection` reads None
+        // for this mode, so no row wears the highlight.
         cx.notify();
     }
 
@@ -214,18 +213,16 @@ impl crate::Workspace {
     /// rooted at the target (the primary root or ad-hoc folder; the
     /// foreground-container fallback the old menu kept). A non-empty composer
     /// text rides the argv as the CLI's initial prompt; the membership lands
-    /// with the mint.
+    /// with the mint. `target`/`prompt` arrive from the launcher's own update
+    /// (its menu callback): the workspace never reads a chrome-side entity.
     pub(crate) fn launch_agent_from_launcher(
         &mut self,
         launch: LauncherAgentLaunchPayload,
+        target: crate::launcher::LauncherTarget,
+        prompt: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
-        let (target, _, _, _) = launcher.read(cx).snapshot();
-        let prompt = launcher.update(cx, |state, cx| state.take_text_if_present(window, cx));
         let project_path = target.folder();
         let project_id = target.project_id().map(str::to_string);
         let cwd = project_path
@@ -278,13 +275,10 @@ impl crate::Workspace {
     /// silently dropped).
     pub(crate) fn launch_terminal_from_launcher(
         &mut self,
+        target: crate::launcher::LauncherTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
-        let (target, _, _, _) = launcher.read(cx).snapshot();
         let project_path = target.folder();
         let project_id = target.project_id().map(str::to_string);
         let cwd = project_path

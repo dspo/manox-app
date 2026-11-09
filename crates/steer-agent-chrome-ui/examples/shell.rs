@@ -167,9 +167,14 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             // The example has no project registry behind it — no footer row
             // (the hook's absence is the contract, not a disabled control).
             on_new_project: None,
+            // The example's selection model: a fixture cell the hooks write
+            // and `active_row` reads — exactly the host contract (the shell
+            // keeps no selection of its own).
+            active_row: Some(Box::new(|_cx| selected_row())),
             on_select: Some(Box::new({
                 let titles = titles.clone();
                 move |id, _w, cx| {
+                    SELECTED.with(|cell| *cell.borrow_mut() = Some(id.to_string()));
                     // Selection drives the preview: re-seed a short
                     // conversation whose user bubble quotes the real thread
                     // title.
@@ -232,6 +237,14 @@ thread_local! {
     /// below refreshes this on every push.
     static NAV_FIXTURE: std::cell::RefCell<NavFixture> =
         const { std::cell::RefCell::new(NavFixture::EMPTY) };
+    /// The example's foreground row — the `active_row` query source and the
+    /// only place a selection lives (the shell derives its highlight from it).
+    static SELECTED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn selected_row() -> Option<String> {
+    SELECTED.with(|cell| cell.borrow().clone())
 }
 
 /// The example's stand-in for the real history stack.
@@ -253,8 +266,8 @@ impl NavFixture {
 
 /// Step the fixture pointer by `delta`; returns the landed id (`None` at an
 /// edge or with nothing loaded — never a no-op move).
-fn nav_step(delta: i32) -> Option<String> {
-    NAV_FIXTURE.with(|cell| {
+fn nav_step(delta: i32) {
+    let landed = NAV_FIXTURE.with(|cell| {
         let mut f = cell.borrow_mut();
         let i = f.index?;
         let j = i as i64 + delta as i64;
@@ -266,7 +279,10 @@ fn nav_step(delta: i32) -> Option<String> {
         f.back = j > 0;
         f.forward = j + 1 < f.ids.len();
         Some(f.ids[j].clone())
-    })
+    });
+    if let Some(id) = landed {
+        SELECTED.with(|cell| *cell.borrow_mut() = Some(id));
+    }
 }
 
 fn nav_avail_fixture() -> steer_agent_chrome_ui::shell::NavAvail {
@@ -284,10 +300,7 @@ fn nav_fixture_sync(shell: &Shell) {
     NAV_FIXTURE.with(|cell| {
         let mut f = cell.borrow_mut();
         f.ids = shell.sessions.iter().map(|s| s.id.clone()).collect();
-        f.index = shell
-            .active
-            .as_ref()
-            .and_then(|a| f.ids.iter().position(|i| i == a));
+        f.index = selected_row().and_then(|a| f.ids.iter().position(|i| i == &a));
         f.back = f.index.is_some_and(|i| i > 0);
         f.forward = f.index.is_some_and(|i| i + 1 < f.ids.len());
     });
@@ -313,7 +326,7 @@ fn start_pump(shell: Entity<Shell>, titles: TitleMap, cx: &mut gpui::App) {
                 // Auto-select the first thread once the initial scan lands.
                 if !*boot_selected && !rows.is_empty() {
                     *boot_selected = true;
-                    shell.active = Some(rows[0].id.clone());
+                    SELECTED.with(|cell| *cell.borrow_mut() = Some(rows[0].id.clone()));
                 }
                 titles.borrow_mut().clear();
                 for r in &rows {

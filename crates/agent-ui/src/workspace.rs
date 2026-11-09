@@ -207,6 +207,18 @@ impl Workspace {
             .as_ref()
             .map(|(_, sid)| sid.clone())
     }
+
+    /// The sidebar row that wears the highlight: the foreground container,
+    /// with the two "no container owns the column" modes reading `None`
+    /// (the launcher is the pre-container pad; Settings swaps the sidebar
+    /// for its nav). The chrome reads this at render time — it has no
+    /// selection state of its own, so there is no push to remember on any
+    /// switch leg.
+    pub fn chrome_selection(&self, cx: &App) -> Option<String> {
+        (!matches!(self.view_mode, ViewMode::Launcher | ViewMode::Settings))
+            .then(|| self.foreground_container_id(cx))
+            .flatten()
+    }
 }
 mod composer;
 pub mod container;
@@ -452,6 +464,15 @@ pub struct Workspace {
     /// chrome sidebar's injected nav writes it, the main column reads it).
     /// Index into `views::settings::nav_leaves()`'s flat leaf order.
     pub(crate) settings_nav: usize,
+    /// The Settings split layout's sidebar view. HOST state (the chrome's
+    /// sidebar slot is a projection of it): created on entry, dropped on
+    /// exit. The entity is window-independent, so a re-opened window mounts
+    /// whatever is current instead of losing the layout.
+    pub(crate) settings_nav_view: Option<Entity<crate::views::settings_nav::SettingsNavView>>,
+    /// The chrome's modal dialog slot: the open project create/edit dialog,
+    /// if any. HOST state for the same reason — closing the window with the
+    /// dialog up must not lose it (the projection remounts it on reopen).
+    pub(crate) dialog: Option<Entity<crate::project_dialog::ProjectDialogState>>,
     /// Composer dictation: the speech session behind the mic button. Created
     /// unconditionally — where the platform has no system recognizer (Linux)
     /// or the process lacks the Info.plist usage keys (test binaries; the
@@ -1005,6 +1026,8 @@ impl Workspace {
             settings_view: None,
             settings_sub: None,
             settings_nav: 0,
+            settings_nav_view: None,
+            dialog: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
                 thread,
@@ -1244,6 +1267,18 @@ impl Workspace {
     #[cfg(feature = "test-support")]
     pub fn diagnostic_view_mode_is_launcher(&self) -> bool {
         matches!(self.view_mode, ViewMode::Launcher)
+    }
+
+    /// Press ⏎ on the launcher composer under the launcher's own lease (the
+    /// real gesture path: the input emits, the subscriber runs in
+    /// `LauncherState::update`). Test-support.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_launcher_press_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        launcher.update(cx, |state, cx| state.diagnostic_emit_enter(cx));
+        let _ = window;
     }
 
     /// Type into the launcher composer, replacing whatever it carries.
@@ -2184,9 +2219,12 @@ impl Workspace {
         // Dropping the page drops its refresh poll with it.
         self.subagent_stream = None;
         self.view_mode = ViewMode::Settings;
-        // The split layout's other half: the chrome sidebar swaps its session
-        // list for the settings nav (leave_settings restores it).
-        crate::chrome_assembly::enter_settings_layout(cx);
+        // The split layout's other half: the projection mounts this nav into
+        // the chrome sidebar (leaving Settings drops it and the session list
+        // comes back). Host-owned, so a window reopen restores the layout.
+        if self.settings_nav_view.is_none() {
+            self.settings_nav_view = Some(cx.new(crate::views::settings_nav::SettingsNavView::new));
+        }
         cx.notify();
     }
 
@@ -2194,8 +2232,45 @@ impl Workspace {
     /// the session-list sidebar (the nav's back control routes here).
     pub fn leave_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.view_mode = ViewMode::default();
-        crate::chrome_assembly::leave_settings_layout(cx);
+        self.settings_nav_view = None;
         cx.notify();
+    }
+
+    /// Open the project create dialog (`None`) or the edit variant for
+    /// `edit_of` — the sidebar footer, the group menu and the launcher chip
+    /// menu all land here. The dialog is host state; the projection mounts it
+    /// into the chrome's modal slot on the next effect pass. A project id
+    /// deleted meanwhile opens nothing.
+    pub fn open_project_dialog(
+        &mut self,
+        edit_of: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ws = cx.weak_entity();
+        let dialog = match edit_of {
+            None => {
+                cx.new(|cx| crate::project_dialog::ProjectDialogState::for_create(ws, window, cx))
+            }
+            Some(id) => {
+                let Some(project) = crate::projects::get_project(id) else {
+                    return;
+                };
+                cx.new(|cx| {
+                    crate::project_dialog::ProjectDialogState::for_edit(ws, project, window, cx)
+                })
+            }
+        };
+        self.dialog = Some(dialog);
+        cx.notify();
+    }
+
+    /// Close (unmount) the project dialog. The dialog's own dismissals — ✕ /
+    /// 取消 / Escape, a successful save, a confirmed removal — route here.
+    pub fn close_project_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.dialog.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// Selects the settings page shown in the main column (the split
@@ -2274,7 +2349,7 @@ impl Workspace {
         self.active_external = None;
         self.subagent_stream = None;
         self.view_mode = ViewMode::Workspace;
-        crate::chrome_assembly::leave_settings_layout(cx);
+        self.settings_nav_view = None;
         cx.notify();
     }
 

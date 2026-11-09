@@ -1,6 +1,7 @@
 //! The Settings split layout's sidebar nav — the view the chrome shell's
 //! sidebar slot renders instead of the session list while Settings is open
-//! (see `chrome_assembly::enter_settings_layout`). A two-level tree after
+//! (host state: `Workspace::settings_nav_view`, projected into the chrome's
+//! sidebar slot). A two-level tree after
 //! the ZCode pattern: a back control above labeled groups and 30px icon
 //! rows (chrome session-row metrics), a NEUTRAL active wash — the highlight
 //! is the surface, not an accent color. Top-level leaves ride unindented;

@@ -390,7 +390,7 @@ pub(crate) fn picker_left(window: &Window) -> Pixels {
 fn session_picker(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
     let left = picker_left(window);
     let active_title: String = shell
-        .active
+        .active_row(cx)
         .as_ref()
         .and_then(|id| shell.sessions.iter().find(|s| &s.id == id))
         .map(|s| single_line_title(&s.title))
@@ -507,7 +507,7 @@ pub(crate) fn picker_panel(shell: &Shell, cx: &mut Context<Shell>) -> AnyElement
         .map(|it| {
             let ent = shell_entity.clone();
             let id = it.id.clone();
-            let selected = shell.active.as_deref() == Some(it.id.as_str());
+            let selected = shell.active_row(cx).as_deref() == Some(it.id.as_str());
             let id_for_row = id.clone();
             let on_pick = move |_: &ClickEvent, w: &mut Window, cx: &mut App| {
                 let id = id.clone();
