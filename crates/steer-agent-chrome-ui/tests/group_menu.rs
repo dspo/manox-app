@@ -268,6 +268,7 @@ fn time_grouping_hides_the_group_menu(cx: &mut TestAppContext) {
 /// round-trip.
 #[gpui::test]
 fn nested_window_update_from_a_select_hook(cx: &mut TestAppContext) {
+    let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let nested_ran = Rc::new(RefCell::new(false));
     let nested_ok = Rc::new(RefCell::new(None));
     let shell_slot: Rc<RefCell<Option<gpui::Entity<Shell>>>> = Rc::new(RefCell::new(None));
@@ -279,7 +280,11 @@ fn nested_window_update_from_a_select_hook(cx: &mut TestAppContext) {
         shell_slot.clone(),
         window_slot.clone(),
     );
-    let on_select: steer_agent_chrome_ui::shell::HookOnId = Box::new(move |_id, _w, cx| {
+    let selected_for_hook = selected.clone();
+    let on_select: steer_agent_chrome_ui::shell::HookOnId = Box::new(move |id, _w, cx| {
+        // The host's foreground is the click's outcome — the shell's
+        // highlight derives from it, so the click paints nothing itself.
+        *selected_for_hook.borrow_mut() = Some(id.to_string());
         let Some(handle) = *window_for_hook.borrow() else {
             return;
         };
@@ -296,6 +301,7 @@ fn nested_window_update_from_a_select_hook(cx: &mut TestAppContext) {
 
     let shell_for_build = shell_slot.clone();
     let window_for_build = window_slot.clone();
+    let selected_for_build = selected.clone();
 
     cx.update(gpui_component::init);
     let window = cx.open_window(size(px(900.), px(600.)), move |window, cx| {
@@ -314,6 +320,10 @@ fn nested_window_update_from_a_select_hook(cx: &mut TestAppContext) {
                     customizations: vec![],
                     hooks: HostHooks {
                         on_select: Some(on_select),
+                        active_row: Some(Box::new({
+                            let selected = selected_for_build.clone();
+                            move |_| selected.borrow().clone()
+                        })),
                         ..Default::default()
                     },
                 },
@@ -348,7 +358,7 @@ fn nested_window_update_from_a_select_hook(cx: &mut TestAppContext) {
         Some(false),
         "a nested window update from a live click is rejected"
     );
-    let active = shell.read_with(cx, |s, _| s.active.clone());
+    let active = shell.read_with(cx, |s, cx| s.active_row(cx));
     assert_eq!(active.as_deref(), Some("thread-1"), "the shell survived");
 }
 

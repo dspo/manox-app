@@ -16,6 +16,12 @@ use steer_agent_chrome_ui::session_list::{SessionGroup, SessionRowData, SessionS
 use steer_agent_chrome_ui::shell::SessionRow;
 use steer_agent_chrome_ui::{HostHooks, MainSurface, Shell, ShellConfig, register_fonts};
 
+thread_local! {
+    /// The fixture host's foreground row — the source of the shell's
+    /// `active_row` query in the nav regression.
+    static NAV_LANDED: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 /// A placeholder main-surface view (the shell always mounts one).
 struct StubView;
 
@@ -809,12 +815,13 @@ fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
         let log = log.clone();
         config.hooks.on_nav_back = Some(Box::new(move |_w, _cx| {
             log.borrow_mut().push("back".into());
-            Some("landed".into())
+            NAV_LANDED.with(|cell| *cell.borrow_mut() = Some("landed".to_string()));
         }));
         config.hooks.on_nav_forward = Some(Box::new(move |_w, _cx| {
             fwd.borrow_mut().push("fwd".into());
-            Some("fwd-landed".into())
+            NAV_LANDED.with(|cell| *cell.borrow_mut() = Some("fwd-landed".to_string()));
         }));
+        config.hooks.active_row = Some(Box::new(|_| NAV_LANDED.with(|cell| cell.borrow().clone())));
         let shell = cx.new(|cx| Shell::new(config, window, cx));
         *slot_for_build.borrow_mut() = Some(shell.clone());
         Root::new(shell, window, cx)
@@ -838,7 +845,9 @@ fn nav_moves_call_hooks_only_at_live_edges(cx: &mut TestAppContext) {
         shell.update(cx, |s, cx| s.nav_back(window, cx));
     });
     assert_eq!(back_log.borrow().len(), 1);
-    shell.read_with(cx, |s, _| assert_eq!(s.active.as_deref(), Some("landed")));
+    shell.read_with(cx, |s, cx| {
+        assert_eq!(s.active_row(cx).as_deref(), Some("landed"))
+    });
 
     // The RENDERED buttons carry their glyphs in BOTH tones at the same
     // geometry (the round-two regression: the enabled branch dropped the

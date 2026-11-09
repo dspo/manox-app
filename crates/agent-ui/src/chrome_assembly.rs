@@ -67,24 +67,6 @@ pub fn leave_settings_layout(cx: &mut App) {
     shell.update(cx, |shell, cx| shell.set_sidebar_surface(None, cx));
 }
 
-/// The sidebar's selection follows the foreground container: the attach and
-/// the external-spawn paths push it whenever the main column changes hands.
-/// Highlight only — the select hook (the click's open route) does not fire.
-pub fn select_container(id: &str, cx: &mut App) {
-    let Some(shell) = shell_handle() else {
-        return;
-    };
-    shell.update(cx, |shell, _| shell.set_active(id));
-}
-
-/// The launcher owns the main column: no row wears the selection.
-pub fn clear_container_selection(cx: &mut App) {
-    let Some(shell) = shell_handle() else {
-        return;
-    };
-    shell.update(cx, |shell, _| shell.clear_active());
-}
-
 /// Open the create-project dialog, or the edit variant for `edit_of` — the
 /// sidebar footer's ＋ 新建项目 row and the Chats bucket's menu entry both
 /// land here. The dialog entity is the mounted view; closing it is
@@ -410,35 +392,10 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             .collect();
         let mut keys: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
         keys.push(steer_agent_chrome_ui::session_list::LOOSE_BUCKET_KEY.to_string());
-        // The sidebar highlight follows the FOREGROUND thread, not the last
-        // click: new-thread landings, /exit replacements and successor
-        // hand-offs all switch without a sidebar click; a stale
-        // highlight would advertise the wrong session as active. An external
-        // session's highlight is not stolen — it is no thread, so the
-        // foreground rule has no opinion on it while it holds the highlight.
-        let fg = ws
-            .read(cx)
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(_, sid)| sid.clone());
-        let active_is_external = shell
-            .read(cx)
-            .active
-            .as_deref()
-            // The record lookup is inherently live-guarded: a close removes
-            // the record, so a dead id left in `active` resolves false and
-            // the highlight falls back to the foreground thread.
-            .map(|id| ws.read(cx).is_external_session(id))
-            .unwrap_or(false);
         shell.update(cx, |shell, cx| {
             shell.set_folder_heads(heads);
             shell.set_group_order(keys);
             shell.set_sessions(sessions);
-            if !active_is_external && shell.active != fg {
-                shell.active = fg;
-            }
             cx.notify();
         });
         refresh_foreground_project(&ws, &rows, cx);
@@ -698,16 +655,23 @@ fn shell_config(
                     });
                 }
             })),
+            // The sidebar highlight: the workspace's foreground container,
+            // read at render time. No push — a push would have to be repeated
+            // at every attach/spawn/launcher/settings leg, and the one it
+            // misses would advertise the wrong session.
+            active_row: Some(Box::new({
+                let ws = ws.clone();
+                move |cx| ws.read(cx).chrome_selection(cx)
+            })),
             // ←/→ session history: the workspace owns the visited-thread
-            // stack; the hook reports the landed id so the shell's selection
-            // follows without re-deriving host state.
+            // stack; the move changes the foreground, and the highlight
+            // above follows it.
             on_nav_back: Some(Box::new({
                 let ws = ws.clone();
                 move |w, cx| {
                     ws.update(cx, |ws, cx| {
-                        let landed = ws.nav_back(w, cx);
+                        ws.nav_back(w, cx);
                         cx.notify();
-                        landed
                     })
                 }
             })),
@@ -715,9 +679,8 @@ fn shell_config(
                 let ws = ws.clone();
                 move |w, cx| {
                     ws.update(cx, |ws, cx| {
-                        let landed = ws.nav_forward(w, cx);
+                        ws.nav_forward(w, cx);
                         cx.notify();
-                        landed
                     })
                 }
             })),

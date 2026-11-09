@@ -207,6 +207,18 @@ impl Workspace {
             .as_ref()
             .map(|(_, sid)| sid.clone())
     }
+
+    /// The sidebar row that wears the highlight: the foreground container,
+    /// with the two "no container owns the column" modes reading `None`
+    /// (the launcher is the pre-container pad; Settings swaps the sidebar
+    /// for its nav). The chrome reads this at render time — it has no
+    /// selection state of its own, so there is no push to remember on any
+    /// switch leg.
+    pub fn chrome_selection(&self, cx: &App) -> Option<String> {
+        (!matches!(self.view_mode, ViewMode::Launcher | ViewMode::Settings))
+            .then(|| self.foreground_container_id(cx))
+            .flatten()
+    }
 }
 mod composer;
 pub mod container;

@@ -478,13 +478,8 @@ impl Workspace {
         if was_foreground {
             self.active_external = None;
             self.view_mode = super::ViewMode::Workspace;
-            // The selection follows the fallback conversation — the dead
-            // external's id must not outlive it wearing the highlight.
-            if let Some((_, sid)) = self.chat.read(cx).store.clone() {
-                crate::chrome_assembly::select_container(&sid, cx);
-            } else {
-                crate::chrome_assembly::clear_container_selection(cx);
-            }
+            // The highlight follows this mode flip on its own: it is derived
+            // from the foreground container at render time.
         }
         cx.notify();
     }

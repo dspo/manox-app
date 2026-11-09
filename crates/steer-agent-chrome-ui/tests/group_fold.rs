@@ -35,6 +35,22 @@ impl MainSurface for StubMain {
     }
 }
 
+thread_local! {
+    /// The fixture's foreground row — the host half the shell's `active_row`
+    /// query reads (the shell itself keeps no selection).
+    static ACTIVE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn active_row() -> Option<String> {
+    ACTIVE.with(|cell| cell.borrow().clone())
+}
+
+fn set_active<C: gpui::AppContext>(shell: &gpui::Entity<Shell>, id: &str, cx: &mut C) {
+    ACTIVE.with(|cell| *cell.borrow_mut() = Some(id.to_string()));
+    shell.update(cx, |_, cx| cx.notify());
+}
+
 /// One project-bound thread row; stamps are handed out increasing and the
 /// host ranks newer rows better, so the sort surfaces them NEWEST first
 /// (n is the wire push index, not the display position).
@@ -81,7 +97,10 @@ fn mount(
                     brand: None,
                     fixed_rows: vec![],
                     customizations: vec![],
-                    hooks: HostHooks::default(),
+                    hooks: HostHooks {
+                        active_row: Some(Box::new(|_| active_row())),
+                        ..Default::default()
+                    },
                 },
                 window,
                 cx,
@@ -175,7 +194,7 @@ fn collapsing_the_group_resets_the_fold(cx: &mut TestAppContext) {
     let rows: Vec<SessionRow> = (1..=7).map(|n| row(&format!("r{n}"), 100 * n)).collect();
     let (_visual, shell) = mount(cx, rows);
 
-    shell.update(cx, |s, _| s.toggle_show_more("/p/proj"));
+    shell.update(cx, |s, cx| s.toggle_show_more("/p/proj", cx));
     shell.read_with(cx, |s, cx| {
         let (_, groups, _) = s.sidebar_props(cx);
         assert_eq!(groups[0].rows.len(), 7, "expanded");
@@ -236,7 +255,7 @@ fn a_fold_hiding_the_active_row_reveals_once_per_active_row(cx: &mut TestAppCont
     let (_visual, shell) = mount(cx, rows);
 
     // The foreground thread sits in the hidden tail (r1 is the oldest row).
-    shell.update(cx, |s, _| s.active = Some("r1".into()));
+    set_active(&shell, "r1", cx);
     shell.read_with(cx, |s, cx| {
         let (_, groups, _) = s.sidebar_props(cx);
         assert!(groups[0].expanded, "the fold hiding the active row lifts");
@@ -245,7 +264,7 @@ fn a_fold_hiding_the_active_row_reveals_once_per_active_row(cx: &mut TestAppCont
 
     // The user lays the fold back down: it must NOT bounce up while r1
     // stays the foreground thread.
-    shell.update(cx, |s, _| s.toggle_show_more("/p/proj"));
+    shell.update(cx, |s, cx| s.toggle_show_more("/p/proj", cx));
     shell.read_with(cx, |s, cx| {
         let (_, groups, _) = s.sidebar_props(cx);
         assert!(!groups[0].expanded, "the manual show-less sticks");
@@ -253,7 +272,7 @@ fn a_fold_hiding_the_active_row_reveals_once_per_active_row(cx: &mut TestAppCont
     });
 
     // A different hidden row becomes the foreground: the reveal fires again.
-    shell.update(cx, |s, _| s.active = Some("r2".into()));
+    set_active(&shell, "r2", cx);
     shell.read_with(cx, |s, cx| {
         let (_, groups, _) = s.sidebar_props(cx);
         assert!(groups[0].expanded, "a new active row re-arms the reveal");

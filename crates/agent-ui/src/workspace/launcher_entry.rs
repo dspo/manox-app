@@ -56,9 +56,8 @@ impl crate::Workspace {
             }
             state.focus(window, cx);
         });
-        // The launcher owns the main column: no container is foreground, so
-        // no row wears the selection.
-        crate::chrome_assembly::clear_container_selection(cx);
+        // The launcher owns the main column: `chrome_selection` reads None
+        // for this mode, so no row wears the highlight.
         cx.notify();
     }
 
