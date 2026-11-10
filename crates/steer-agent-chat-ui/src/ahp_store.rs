@@ -964,6 +964,20 @@ pub enum DeliveryFailure {
     Stalled,
 }
 
+/// The connection's user-facing state: the honest answer to "can this
+/// conversation reach its host right now?".
+///
+/// `DeliveryFailure` is the reason a link is lost; this is the state machine
+/// around it. A dead handshake is `Connecting` until it gives up, a delivered
+/// write is `Ready`, and any latched transport/handshake/budget failure is
+/// `Lost` with the reason the composer can explain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkState {
+    Connecting,
+    Ready,
+    Lost(DeliveryFailure),
+}
+
 /// One dispatch outcome bound for the store's own pump: a failure latches
 /// the delivery face, a recovery retires a latched `Dispatch` face (a
 /// dispatch that leaves proves the transport answers again).
@@ -1181,6 +1195,24 @@ impl AhpStore {
             return Some(DeliveryFailure::Stalled);
         }
         None
+    }
+
+    /// The connection's state for the composer: a latched failure is `Lost`,
+    /// an in-flight dial is `Connecting`, a live client is `Ready`.
+    pub fn link_state(&self) -> LinkState {
+        if let Some(failure) = self.delivery_failure() {
+            return LinkState::Lost(failure);
+        }
+        if self.handshaking {
+            return LinkState::Connecting;
+        }
+        if self.client.is_some() {
+            LinkState::Ready
+        } else {
+            // Pre-dial (no handshake attempted yet): the strip stays quiet
+            // rather than claiming a connection that was never tried.
+            LinkState::Ready
+        }
     }
 
     /// Re-dial the host after a handshake failure (the composer error

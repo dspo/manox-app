@@ -2087,13 +2087,14 @@ impl Workspace {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let failure = self
+        let state = self
             .chat
             .read(cx)
             .store
             .as_ref()
-            .and_then(|(store, _)| store.read(cx).delivery_failure())?;
-        Some(self.render_delivery_error_strip(&failure, cx))
+            .map(|(store, _)| store.read(cx).link_state())?;
+        (state != steer_agent_chat_ui::ahp_store::LinkState::Ready)
+            .then(|| self.render_delivery_error_strip(&state, cx))
     }
 
     /// The pending ask's interactive card state (diagnostic-only): the page

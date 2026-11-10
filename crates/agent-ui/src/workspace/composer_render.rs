@@ -265,12 +265,11 @@ impl Workspace {
             .children(completion_overlay)
             .children(mention_tip)
             .when_some(
-                self.chat
-                    .read(cx)
-                    .store
-                    .as_ref()
-                    .and_then(|(store, _)| store.read(cx).delivery_failure()),
-                |el, failure| el.child(self.render_delivery_error_strip(&failure, cx)),
+                self.chat.read(cx).store.as_ref().and_then(|(store, _)| {
+                    let state = store.read(cx).link_state();
+                    (state != steer_agent_chat_ui::ahp_store::LinkState::Ready).then_some(state)
+                }),
+                |el, state| el.child(self.render_delivery_error_strip(&state, cx)),
             )
             .child(
                 // Composer input is message content in the mono family (Lilex)
@@ -1199,14 +1198,26 @@ impl Workspace {
     /// reason is always the pipeline's own.
     pub(super) fn render_delivery_error_strip(
         &self,
-        failure: &steer_agent_chat_ui::ahp_store::DeliveryFailure,
+        state: &steer_agent_chat_ui::ahp_store::LinkState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        use steer_agent_chat_ui::ahp_store::{DeliveryFailure, LinkState};
         let theme = cx.theme().clone();
-        let retryable = matches!(
-            failure,
-            steer_agent_chat_ui::ahp_store::DeliveryFailure::Handshake(_)
-        );
+        // Lost is a warning; Connecting is a quiet status line (a dial is in
+        // flight, nothing is wrong yet).
+        let (text, danger, retryable) = match state {
+            LinkState::Connecting => (i18n::t("composer-delivery-connecting"), false, false),
+            LinkState::Lost(DeliveryFailure::Handshake(_)) => {
+                (i18n::t("composer-delivery-handshake"), true, true)
+            }
+            LinkState::Lost(DeliveryFailure::Dispatch(_)) => {
+                (i18n::t("composer-delivery-dispatch"), true, false)
+            }
+            LinkState::Lost(DeliveryFailure::Stalled) => {
+                (i18n::t("composer-delivery-stalled"), true, false)
+            }
+            LinkState::Ready => return gpui::div().into_any_element(),
+        };
         h_flex()
             .id("delivery-error-strip")
             .debug_selector(|| "delivery-error-strip".to_string())
@@ -1216,18 +1227,34 @@ impl Workspace {
             .px_2()
             .py_1()
             .rounded(theme.radius)
-            .bg(theme.danger.opacity(0.08))
+            .bg(if danger {
+                theme.danger.opacity(0.08)
+            } else {
+                theme.muted.opacity(0.5)
+            })
             .child(
-                Icon::new(IconName::TriangleAlert)
-                    .xsmall()
-                    .text_color(theme.danger),
+                Icon::new(if danger {
+                    IconName::TriangleAlert
+                } else {
+                    IconName::Info
+                })
+                .xsmall()
+                .text_color(if danger {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                }),
             )
             .child(
                 gpui::div()
                     .flex_1()
                     .text_xs()
-                    .text_color(theme.danger)
-                    .child(i18n::t("composer-delivery-error")),
+                    .text_color(if danger {
+                        theme.danger
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(text),
             )
             .when(retryable, |el| {
                 el.child(
