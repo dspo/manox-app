@@ -4910,8 +4910,8 @@ dependencies = [
 
 [[package]]
 name = "hyperlinks"
-version = "0.8.2"
-source = "git+https://github.com/dspo/manox.git?tag=v0.8.2#d6a6065cace29185d3b3233fda61850e1a45b45e"
+version = "0.9.1"
+source = "git+https://github.com/dspo/manox.git?tag=v0.9.1#0e81cc0d7bea53a859148b48588384ac6378db60"
 
 [[package]]
 name = "iana-time-zone"
@@ -6225,8 +6225,8 @@ dependencies = [
 
 [[package]]
 name = "manox-agent"
-version = "0.8.2"
-source = "git+https://github.com/dspo/manox.git?tag=v0.8.2#d6a6065cace29185d3b3233fda61850e1a45b45e"
+version = "0.9.1"
+source = "git+https://github.com/dspo/manox.git?tag=v0.9.1#0e81cc0d7bea53a859148b48588384ac6378db60"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -6236,6 +6236,7 @@ dependencies = [
  "brush-core",
  "brush-parser",
  "chrono",
+ "core-foundation 0.10.1",
  "encoding_rs",
  "futures",
  "globset",
@@ -6261,6 +6262,7 @@ dependencies = [
  "serde_yaml",
  "similar",
  "supervisor",
+ "system-configuration 0.8.0",
  "tempfile",
  "tera",
  "thiserror 1.0.69",
@@ -6270,18 +6272,20 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "windows-registry 0.5.3",
  "xxhash-rust",
  "zstd",
 ]
 
 [[package]]
 name = "manox-ahp"
-version = "0.8.2"
-source = "git+https://github.com/dspo/manox.git?tag=v0.8.2#d6a6065cace29185d3b3233fda61850e1a45b45e"
+version = "0.9.1"
+source = "git+https://github.com/dspo/manox.git?tag=v0.9.1#0e81cc0d7bea53a859148b48588384ac6378db60"
 dependencies = [
  "ahp",
  "ahp-types",
  "async-channel",
+ "async-trait",
  "axum",
  "chrono",
  "futures",
@@ -6295,8 +6299,8 @@ dependencies = [
 
 [[package]]
 name = "manox-ahp-runtime"
-version = "0.8.2"
-source = "git+https://github.com/dspo/manox.git?tag=v0.8.2#d6a6065cace29185d3b3233fda61850e1a45b45e"
+version = "0.9.1"
+source = "git+https://github.com/dspo/manox.git?tag=v0.9.1#0e81cc0d7bea53a859148b48588384ac6378db60"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -6322,8 +6326,8 @@ dependencies = [
 
 [[package]]
 name = "manox-harness"
-version = "0.8.2"
-source = "git+https://github.com/dspo/manox.git?tag=v0.8.2#d6a6065cace29185d3b3233fda61850e1a45b45e"
+version = "0.9.1"
+source = "git+https://github.com/dspo/manox.git?tag=v0.9.1#0e81cc0d7bea53a859148b48588384ac6378db60"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -6364,8 +6368,8 @@ dependencies = [
 
 [[package]]
 name = "manox-providers"
-version = "0.8.2"
-source = "git+https://github.com/dspo/manox.git?tag=v0.8.2#d6a6065cace29185d3b3233fda61850e1a45b45e"
+version = "0.9.1"
+source = "git+https://github.com/dspo/manox.git?tag=v0.9.1#0e81cc0d7bea53a859148b48588384ac6378db60"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -6377,8 +6381,8 @@ dependencies = [
 
 [[package]]
 name = "manox-session-core"
-version = "0.8.2"
-source = "git+https://github.com/dspo/manox.git?tag=v0.8.2#d6a6065cace29185d3b3233fda61850e1a45b45e"
+version = "0.9.1"
+source = "git+https://github.com/dspo/manox.git?tag=v0.9.1#0e81cc0d7bea53a859148b48588384ac6378db60"
 dependencies = [
  "ahp",
  "ahp-types",
@@ -6403,8 +6407,8 @@ dependencies = [
 
 [[package]]
 name = "manox-workspace"
-version = "0.8.2"
-source = "git+https://github.com/dspo/manox.git?tag=v0.8.2#d6a6065cace29185d3b3233fda61850e1a45b45e"
+version = "0.9.1"
+source = "git+https://github.com/dspo/manox.git?tag=v0.9.1#0e81cc0d7bea53a859148b48588384ac6378db60"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11389,8 +11393,8 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "supervisor"
-version = "0.8.2"
-source = "git+https://github.com/dspo/manox.git?tag=v0.8.2#d6a6065cace29185d3b3233fda61850e1a45b45e"
+version = "0.9.1"
+source = "git+https://github.com/dspo/manox.git?tag=v0.9.1#0e81cc0d7bea53a859148b48588384ac6378db60"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -14271,6 +14275,17 @@ dependencies = [
  "windows-result 0.3.4",
  "windows-strings 0.3.1",
  "windows-targets 0.53.5",
+]
+
+[[package]]
+name = "windows-registry"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b8a9ed28765efc97bbc954883f4e6796c33a06546ebafacbabee9696967499e"
+dependencies = [
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
+ "windows-strings 0.4.2",
 ]
 
 [[package]]
