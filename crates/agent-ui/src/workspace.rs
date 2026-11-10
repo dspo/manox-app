@@ -62,7 +62,6 @@ pub use composer::SubmitBehavior;
 
 mod attach;
 
-mod catch_up;
 mod chat_column;
 /// The send-mode gallery (test-support only): a driver strip over the real
 /// composer, driven against a detached store. See `examples/send_mode_gallery.rs`.
@@ -400,11 +399,6 @@ pub struct Workspace {
     /// `AgentClient` (client_id "desktop") carries every session; the
     /// per-session handles are leaves fed by its demux pump.
     pub(crate) multiplexer: gpui::Entity<crate::multiplexer::SessionMultiplexer>,
-    /// T-D: the shared app-level client used by the fire-and-forget
-    /// `send_note` and `Reply` verdict paths (no per-session connection).
-    /// (retired: the protocol client lives in the AhpStore)
-    #[allow(dead_code)]
-    pub(crate) client: (),
     /// Threads that were running when the user switched away (U6b⑤: the
     /// turn runs server-side and survives the switch on its own — the park
     /// keeps the session ATTACHED so the reclaim re-attaches in place with
@@ -1022,7 +1016,6 @@ impl Workspace {
             cwd: cwd.clone(),
             nav: NavHistory::default(),
             multiplexer,
-            client: (),
             background_threads: Vec::new(),
             _mux_lists,
             _rail_updates: rail_updates,
@@ -3327,14 +3320,5 @@ fn wire_commands_has(commands: &serde_json::Value, name: &str, kind: &str) -> bo
         })
 }
 
-/// Read the sidebar decoration columns the wire `ThreadListItem` does not
-/// carry yet (U2 dual-track): per-thread project/tag/access-mode plus the
-/// registered-project folder list. Returns `(meta by id, distinct active
-/// project paths in list order, known projects)`. The meta map spans both
-/// store partitions (active rows win) so a tag lookup addresses archived
-/// rows too; the project-path list drives the chip's "recent, unregistered"
-/// section. This is the last kernel read feeding the sidebar — the cross-
-/// domain ask is to extend §D.5 `ThreadsUpdated` with these columns so it
-/// retires.
 #[cfg(test)]
 mod tests;
