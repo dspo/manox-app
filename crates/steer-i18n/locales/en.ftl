@@ -1041,3 +1041,7 @@ update-failed = Update failed: { $err }
 update-retry = Retry
 update-uptodate = Steer is up to date
 update-not-bundle = Not running from an installed app bundle; in-app updates are unavailable
+
+workspace-stop-nothing-interrupted = Stop: no running turn was found to interrupt (the host may be disconnected, or the turn already ended).
+workspace-stop-refused = Stop was refused: { $err }
+workspace-stop-connection-closed = Stop failed: the host connection is gone.

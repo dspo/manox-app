@@ -658,6 +658,25 @@ impl Workspace {
         };
         let was_running = self.chat.read(cx).turn_active;
 
+        // A stop gesture whose receipt names nothing must say so: the host's
+        // answer (or its absence) is the only proof the user gets, and a
+        // silent no-op is exactly what made "stop did nothing" undebuggable.
+        let teardown = store.update(cx, |s, _| s.drain_teardown_notices());
+        for notice in teardown {
+            let text = match notice {
+                steer_agent_chat_ui::ahp_store::TeardownNotice::NothingInterrupted => {
+                    i18n::t("workspace-stop-nothing-interrupted").to_string()
+                }
+                steer_agent_chat_ui::ahp_store::TeardownNotice::Refused(err) => {
+                    i18n::t_str("workspace-stop-refused", &[("err", &err)]).to_string()
+                }
+                steer_agent_chat_ui::ahp_store::TeardownNotice::Closed => {
+                    i18n::t("workspace-stop-connection-closed").to_string()
+                }
+            };
+            self.add_info_message(text, cx);
+        }
+
         // Steer-consumption receipts retire their cards first, so the badge
         // they stamp (through a turn-id-bearing bubble the adoption consumes)
         // and the entrance ride they name land in the same projection pass.

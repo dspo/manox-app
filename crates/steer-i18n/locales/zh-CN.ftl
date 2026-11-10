@@ -1017,3 +1017,7 @@ update-failed = 更新失败：{ $err }
 update-retry = 重试
 update-uptodate = 已是最新版本
 update-not-bundle = 未以安装的 App 形态运行，无法自动更新
+
+workspace-stop-nothing-interrupted = 停止：没有找到可中断的运行（宿主可能已断开，或该对话已经结束）。
+workspace-stop-refused = 停止被拒绝：{ $err }
+workspace-stop-connection-closed = 停止失败：与宿主的连接已断开。
