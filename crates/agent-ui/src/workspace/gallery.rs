@@ -195,6 +195,18 @@ impl Workspace {
         self.send_user_turn(text.to_string(), Vec::new(), behavior, cx);
     }
 
+    /// Drive the composer's real interrupt gesture (⇧⌘↩): the empty-input
+    /// guard is part of this path, so this is the regression seam.
+    pub fn gallery_submit_interrupt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit_interrupt(window, cx);
+    }
+
+    /// Clear the composer's current draft.
+    pub fn gallery_clear_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat_input(cx)
+            .update(cx, |state, cx| state.set_value("", window, cx));
+    }
+
     /// Settle with (or without) the cancelled bit — the pump's
     /// `TurnFinished` arm, minus the sidebar refresh.
     pub fn gallery_settle(&mut self, cancelled: bool, cx: &mut Context<Self>) {
