@@ -86,6 +86,16 @@ impl Workspace {
             self.submit_pending_ask(cx);
             return;
         }
+        // An empty composer is a valid interrupt gesture: ⇧⌘↩ (and the send
+        // menu's 打断) must cancel the running turn even with nothing typed.
+        // It cancels only — no empty turn rides the outbox, or the settle
+        // would flush an empty user message.
+        if text.trim().is_empty() && attachments.is_empty() && behavior == SubmitBehavior::Interrupt
+        {
+            self.cancel_turn(cx);
+            cx.notify();
+            return;
+        }
         // Block submit on empty input. A message submitted while a turn is
         // running is *not* dropped here — it is routed through
         // `send_user_turn`, which enqueues it as a follow-up instead of

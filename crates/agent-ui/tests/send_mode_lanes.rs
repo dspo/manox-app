@@ -43,6 +43,33 @@ async fn send_mode_lanes(cx: &mut TestAppContext) {
         driver::seed_scene(&ws, cx);
     });
 
+    // ── empty-composer interrupt: ⇧⌘↩ cancels with nothing typed ───────────
+    // The gesture must reach `cancel_turn`, not die at the empty-input guard
+    // (the composer error this test names). It queues no text.
+    visual.update(|window, cx| {
+        ws.update(cx, |ws, cx| {
+            ws.gallery_clear_composer(window, cx);
+            ws.gallery_submit_interrupt(window, cx);
+        });
+    });
+    visual.update(|_window, cx| {
+        ws.update(cx, |ws, cx| {
+            assert_eq!(
+                ws.gallery_outbox_len(cx),
+                0,
+                "an empty interrupt queues no turn"
+            );
+            assert!(
+                lanes(&ws.gallery_queue_snapshot(cx)).is_empty(),
+                "an empty interrupt leaves no follow-up card"
+            );
+            assert!(
+                wire_tags(ws, cx).contains(&"chat/turnCancelled".to_string()),
+                "an empty interrupt still cancels the running turn"
+            );
+        });
+    });
+
     // ── routing: one submit per behavior while running ─────────────────────
     visual.update(|_window, cx| {
         ws.update(cx, |ws, cx| {
