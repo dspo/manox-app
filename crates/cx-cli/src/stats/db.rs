@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use super::parser::RawEntry;
 use super::types::UsageRecord;
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScanState {
     pub(super) mtime_secs: u64,
@@ -83,10 +82,6 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
 
     Ok(())
 }
-
-
-
-
 
 /// 读取某源文件的扫描状态。
 pub(super) fn load_scan_state(conn: &Connection, path: &str) -> Option<ScanState> {
@@ -758,10 +753,6 @@ mod tests {
 
         assert!(file_unchanged(&conn, "/extra/copilot.log", 1000, 200));
     }
-
-
-
-
 
     #[test]
     fn aggregate_normalizes_model_names() {

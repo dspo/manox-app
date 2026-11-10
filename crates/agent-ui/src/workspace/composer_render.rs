@@ -234,7 +234,6 @@ impl Workspace {
         let queue = self.render_queued_follow_ups(theme, cx);
         let project_chip = self.render_project_chip_pi(theme, cx);
         let goal_chip = self.render_goal_chip(theme, cx);
-        let follow_stop_chip = self.render_follow_stop_chip(theme, cx);
         let access = self.render_access_switch(theme, cx);
         let model = self.render_model_selector_pi(theme, cx);
         // Absolute cancel priority: the stop form is driven by the raw
@@ -450,11 +449,7 @@ impl Workspace {
                             .gap_1()
                             .child(project_chip)
                             .when_some(goal_chip, |el, chip| el.child(chip))
-                            .child(access)
-                            // The stopped-follow projection rides at the
-                            // group's tail: its arrival must never shift
-                            // the stable controls, only extend the row.
-                            .when_some(follow_stop_chip, |el, chip| el.child(chip)),
+                            .child(access),
                     )
                     .child(
                         h_flex()
@@ -761,32 +756,6 @@ impl Workspace {
                 .child(delete_btn),
         )
         .into_any_element()
-    }
-
-    /// Persistent projection of the §二.3 follow-stop state: a compact
-    /// footer chip that lives in the composer's own chip group — the
-    /// place the user reaches to resend/retry — and NEVER disappears on
-    /// its own. Unlike the dismissible banner (which hides only the
-    /// broadcast), the chip's condition reads `follow_stop()` and
-    /// deliberately ignores `dismissed`: the state outlives the
-    /// dismissal, so a stuck lease or an exhausted budget always leaves a
-    /// visible status and a live retry entry; the frozen transcript is
-    /// never left signal-less. The chip IS the retry action: clicking it
-    /// fires the same `retry_follow` the banner's Retry button wires (a
-    /// no-op with no multiplexer, keeping the contract that the entry
-    /// never vanishes on a click), and its tooltip previews that
-    /// consequence. Geometry: `flex_shrink_0` at the chip-group tail so
-    /// the chip's arrival or departure can never squeeze or shift the
-    /// pinned model/send controls. Copy is keyed per reason via
-    /// `indicator_key()`.
-    fn render_follow_stop_chip(
-        &self,
-        _theme: &Theme,
-        _cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        // The retry chip retired with the v2 follow stream: a failed turn
-        // surfaces as the chat's error part now.
-        None
     }
 
     /// The composer footer's inline access-mode switch (see
