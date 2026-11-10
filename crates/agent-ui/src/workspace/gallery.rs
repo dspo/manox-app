@@ -120,6 +120,7 @@ fn set_running(ws: &mut Workspace, on: bool, cx: &mut Context<Workspace>) {
 fn preset_queue(ws: &mut Workspace, cx: &mut Context<Workspace>) {
     let card = |text: &str, state| QueuedFollowUp {
         turn: DeferredUserTurn {
+            unsent_id: uuid::Uuid::new_v4().to_string(),
             text: text.to_string(),
             images: Vec::new(),
             meta: crate::conversation::UserTurnMeta::new(0, "gallery".to_string(), None),

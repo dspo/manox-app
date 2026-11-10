@@ -1045,3 +1045,4 @@ update-not-bundle = Not running from an installed app bundle; in-app updates are
 workspace-stop-nothing-interrupted = Stop: no running turn was found to interrupt (the host may be disconnected, or the turn already ended).
 workspace-stop-refused = Stop was refused: { $err }
 workspace-stop-connection-closed = Stop failed: the host connection is gone.
+workspace-unsent-draft-marker = [unsent]
