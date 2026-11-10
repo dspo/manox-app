@@ -296,8 +296,8 @@ enum RegistryTurnKind {
 // module (Phase 2 tail); these re-exports keep every bare/`super::` name in
 // the workspace family resolving unchanged.
 pub use steer_agent_chat_ui::column::{
-    AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState, PendingAsk,
-    PendingConfirmation, QueuedFollowUp, drain_queued_follow_ups, parse_pending_ask,
+    AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, PendingAsk,
+    PendingConfirmation, Submission, SubmissionState, drain_queued_follow_ups, parse_pending_ask,
     steer_group_insert_index,
 };
 

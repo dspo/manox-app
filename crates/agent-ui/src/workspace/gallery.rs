@@ -115,10 +115,10 @@ fn set_running(ws: &mut Workspace, on: bool, cx: &mut Context<Workspace>) {
     cx.notify();
 }
 
-/// Queue one card per [`FollowUpState`] so every badge and button cluster
+/// Queue one card per [`SubmissionState`] so every badge and button cluster
 /// is on screen at once.
 fn preset_queue(ws: &mut Workspace, cx: &mut Context<Workspace>) {
-    let card = |text: &str, state| QueuedFollowUp {
+    let card = |text: &str, state| Submission {
         turn: DeferredUserTurn {
             unsent_id: uuid::Uuid::new_v4().to_string(),
             text: text.to_string(),
@@ -132,12 +132,12 @@ fn preset_queue(ws: &mut Workspace, cx: &mut Context<Workspace>) {
         chat.queued_follow_ups = [
             card(
                 "先只看失败的测试",
-                FollowUpState::SteerPending {
+                SubmissionState::SteerPending {
                     message_id: "gallery-steer-1".to_string(),
                 },
             ),
-            card("这条发送没能上线，可重试", FollowUpState::Failed),
-            card("把错误日志再贴一遍", FollowUpState::Queued),
+            card("这条发送没能上线，可重试", SubmissionState::Failed),
+            card("把错误日志再贴一遍", SubmissionState::Queued),
         ]
         .into_iter()
         .collect();
@@ -166,7 +166,7 @@ impl Workspace {
             .queued_follow_ups
             .iter()
             .find_map(|item| match &item.state {
-                FollowUpState::SteerPending { message_id } => Some(message_id.clone()),
+                SubmissionState::SteerPending { message_id } => Some(message_id.clone()),
                 _ => None,
             });
         if let Some(id) = id {
@@ -278,9 +278,10 @@ impl Workspace {
             .iter()
             .map(|item| {
                 let lane = match &item.state {
-                    FollowUpState::Queued => "queued",
-                    FollowUpState::SteerPending { message_id: _ } => "steer",
-                    FollowUpState::Failed => "failed",
+                    SubmissionState::Queued => "queued",
+                    SubmissionState::SteerPending { message_id: _ } => "steer",
+                    SubmissionState::Failed => "failed",
+                    SubmissionState::Interrupting => "interrupt",
                 };
                 (
                     lane.to_string(),
@@ -370,7 +371,7 @@ impl Workspace {
             .queued_follow_ups
             .iter()
             .find_map(|item| match &item.state {
-                FollowUpState::SteerPending { message_id } => Some(message_id.clone()),
+                SubmissionState::SteerPending { message_id } => Some(message_id.clone()),
                 _ => None,
             })
     }
