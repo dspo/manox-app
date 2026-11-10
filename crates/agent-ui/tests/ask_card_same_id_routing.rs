@@ -20,7 +20,7 @@ mod common;
 use common::{init_harness, open_workspace};
 use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 use manox_ahp_runtime::ahp::projection::Translator;
-use manox_harness::session::SessionTreeEntry;
+use manox_harness::session::Event;
 use steer_agent_chat_ui::ahp_store::{AhpStore, chat_uri};
 
 const ASK_ID: &str = "call_probe";
@@ -135,7 +135,7 @@ async fn one_ask_id_is_one_renderable_card(cx: &mut TestAppContext) {
     // the entries into the fold actions.
     let mut translator = Translator::new();
     for (seq, entry) in journal().into_iter().enumerate() {
-        let entry: SessionTreeEntry = serde_json::from_value(entry).expect("entry parses");
+        let entry: Event = serde_json::from_value(entry).expect("entry parses");
         for emitted in translator.on_entry("c-1", "sess-1", seq as u64, &entry) {
             store.update(&mut visual.cx, |s, _| {
                 s.book.apply(&chat_uri("sess-1"), &emitted.action)
