@@ -445,6 +445,12 @@ impl ConversationState {
         }
     }
 
+    /// Take the turn ids adopted since the last drain (the unsent ledger's
+    /// retirement list).
+    pub fn drain_adopted_turns(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.overlays.adopted_turns)
+    }
+
     pub fn items(&self) -> &[Entity<MessageItem>] {
         &self.items
     }

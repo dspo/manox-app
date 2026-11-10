@@ -164,6 +164,9 @@ pub struct Overlays {
     pub turn_seen: HashMap<String, Instant>,
     /// The next optimistic-bubble / ui-notice serial.
     pub next_serial: usize,
+    /// Turn ids an adoption consumed since the last drain: the durable
+    /// unsent ledger retires exactly these rows.
+    pub adopted_turns: Vec<String>,
 }
 
 /// A locally submitted user turn not yet confirmed by the fold.
@@ -346,6 +349,9 @@ fn adopt_bubbles(chat: &ChatState, overlays: &mut Overlays, nodes: &mut [Node]) 
         .filter(|(ix, _)| !paired.contains(ix))
         .map(|(_, bubble)| bubble)
         .collect();
+    for (turn_id, _) in &adopted {
+        overlays.adopted_turns.push(turn_id.clone());
+    }
     for node in nodes.iter_mut() {
         if let ItemKey::User(turn) = &node.key
             && let Some((_, steered)) = adopted.iter().find(|(id, _)| id == turn)

@@ -36,6 +36,7 @@ pub mod resource_registry;
 pub mod sidebar_projection;
 pub mod slash_command;
 pub mod tool_tabs;
+pub mod unsent;
 pub mod views;
 pub mod vscode_app;
 pub mod workspace;

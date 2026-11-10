@@ -214,6 +214,9 @@ pub enum ComposerPlaceholderMode {
 }
 
 pub struct DeferredUserTurn {
+    /// The client id this turn is known by before any wire echo: the unsent
+    /// ledger key (and, for a submit, the client-minted turn id).
+    pub unsent_id: String,
     pub text: String,
     pub images: Vec<manox_agent::language_model::MessageContent>,
     pub meta: UserTurnMeta,
@@ -790,6 +793,7 @@ mod tests {
 
     fn turn(text: &str) -> DeferredUserTurn {
         DeferredUserTurn {
+            unsent_id: uuid::Uuid::new_v4().to_string(),
             text: text.to_string(),
             images: Vec::new(),
             meta: UserTurnMeta::new(0, "test-model".to_string(), None),

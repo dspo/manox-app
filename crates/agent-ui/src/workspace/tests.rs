@@ -193,6 +193,7 @@ mod suite {
     fn steer_group_insert_index_keeps_steers_before_the_queue() {
         use crate::conversation::{UserImage, UserTurnMeta};
         let turn = |text: &str| crate::workspace::DeferredUserTurn {
+            unsent_id: uuid::Uuid::new_v4().to_string(),
             text: text.to_string(),
             images: vec![],
             meta: UserTurnMeta::new(1, "m".into(), None),
@@ -239,6 +240,7 @@ mod suite {
     fn queue_move_index_reorders_only_the_queued_tail() {
         use crate::workspace::composer_render::{QueueDragEdge as E, QueueRowDrag as D};
         let turn = |text: &str| crate::workspace::DeferredUserTurn {
+            unsent_id: uuid::Uuid::new_v4().to_string(),
             text: text.to_string(),
             images: vec![],
             meta: crate::conversation::UserTurnMeta::new(1, "m".into(), None),

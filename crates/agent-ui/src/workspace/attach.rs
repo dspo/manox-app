@@ -541,6 +541,27 @@ impl Workspace {
         {
             saved = draft;
         }
+        // Undelivered turns for this session come back as a DRAFT, never as
+        // a replay: append them to the saved draft with a marker, and move
+        // the text into the durable conversation draft so a second crash
+        // still keeps it. Attachments are not recovered (the draft is text).
+        let unsent = self.unsent.take_for_session(&new_id);
+        if !unsent.is_empty() {
+            let marker = crate::i18n::t("workspace-unsent-draft-marker").to_string();
+            let mut text = saved;
+            for turn in unsent {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&marker);
+                text.push(' ');
+                text.push_str(&turn.text);
+            }
+            if let Some(objects) = manox_agent::object_store::ObjectStore::try_global() {
+                objects.set_draft(&new_id, Some(&text));
+            }
+            saved = text;
+        }
         self.chat_input(cx)
             .update(cx, |s, cx| s.set_value(saved, window, cx));
         self.sync_completion(window, cx);

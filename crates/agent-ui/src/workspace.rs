@@ -395,6 +395,9 @@ pub struct Workspace {
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
     pub(crate) chat: Entity<ChatColumn>,
+    /// User turns that have not reached the journal yet (durable across a
+    /// restart; see [`crate::unsent`]).
+    pub(crate) unsent: crate::unsent::UnsentOutbox,
     /// T-D: the shared single-connection multiplexer. One app-level
     /// `AgentClient` (client_id "desktop") carries every session; the
     /// per-session handles are leaves fed by its demux pump.
@@ -768,6 +771,12 @@ impl Workspace {
             conv.reconcile(nodes, &env, cx)
         });
         self.apply_projection(change, cx);
+        // Adoption is delivery: the fold carries the turn, so its unsent row
+        // retires.
+        let adopted = conversation.update(cx, |conv, _| conv.drain_adopted_turns());
+        for turn_id in adopted {
+            self.unsent.remove(&turn_id);
+        }
 
         // The chat's presence is the loading gate's whole question now: a
         // landed fold carries whatever history it has (possibly none — the
@@ -1016,6 +1025,7 @@ impl Workspace {
             cwd: cwd.clone(),
             nav: NavHistory::default(),
             multiplexer,
+            unsent: crate::unsent::UnsentOutbox::new(),
             background_threads: Vec::new(),
             _mux_lists,
             _rail_updates: rail_updates,
@@ -3147,6 +3157,7 @@ impl Workspace {
         &mut self,
         text: String,
         images: Vec<serde_json::Value>,
+        turn_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let Some((store, sid)) = self.chat.read(cx).store.clone() else {
@@ -3173,7 +3184,7 @@ impl Workspace {
                 }
             });
         }
-        let turn_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = turn_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         store.update(cx, |store, _| {
             store.submit_turn(&sid, &turn_id, text, None);
         });

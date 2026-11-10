@@ -292,7 +292,15 @@ impl Workspace {
             // bubble shows the compact `/key args` invocation, so these two
             // texts never match: the minted turn id is what pairs them.
             let submit_text = format!("/{key} {args}");
-            if let Some(turn_id) = self.send_submit_v2(submit_text, Vec::new(), cx) {
+            if let Some(turn_id) = self.send_submit_v2(submit_text.clone(), Vec::new(), None, cx) {
+                if let Some((_, session)) = self.chat.read(cx).store.clone() {
+                    self.unsent.push(&crate::unsent::UnsentTurn::new(
+                        turn_id.clone(),
+                        session,
+                        submit_text,
+                        Vec::new(),
+                    ));
+                }
                 self.push_optimistic_bubble(
                     display_text,
                     Vec::new(),
@@ -354,11 +362,27 @@ impl Workspace {
         let weak = cx.weak_entity();
         let user_images = Self::decode_user_images(&images);
         let turn = DeferredUserTurn {
+            unsent_id: uuid::Uuid::new_v4().to_string(),
             text,
             images,
             meta,
             user_images,
         };
+        // Durable before dispatch: a process death between here and the
+        // fold's echo must not lose the text. The row leaves when the turn is
+        // adopted (submit) or flushed (parked).
+        if let Some((_, session)) = self.chat.read(cx).store.clone() {
+            let images = serde_json::to_value(&turn.images)
+                .ok()
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default();
+            self.unsent.push(&crate::unsent::UnsentTurn::new(
+                turn.unsent_id.clone(),
+                session,
+                turn.text.clone(),
+                images,
+            ));
+        }
         let running = self.foreground_running(cx);
         if !running || behavior == SubmitBehavior::Send {
             // The thread is idle (not running). A free-form message dispatches
@@ -470,8 +494,13 @@ impl Workspace {
     ) -> Option<String> {
         let message_id = uuid::Uuid::new_v4().to_string();
         let attachments: Vec<serde_json::Value> = Vec::new();
-        self.send_steer_v2(cx, message_id.clone(), turn.text.clone(), attachments)
-            .then_some(message_id)
+        let sent = self.send_steer_v2(cx, message_id.clone(), turn.text.clone(), attachments);
+        if sent {
+            // The host owns the steer queue now; a restart must not replay
+            // the text as a draft.
+            self.unsent.remove(&turn.unsent_id);
+        }
+        sent.then_some(message_id)
     }
 
     /// Append the user turn (text plus any image content) to the thread and
@@ -486,7 +515,12 @@ impl Workspace {
         // is adopted by the turn the submit mints. A submit that never rode
         // the wire pushes no bubble: the row would have no turn behind it.
         let attachments: Vec<serde_json::Value> = Vec::new();
-        if let Some(turn_id) = self.send_submit_v2(turn.text.clone(), attachments, cx) {
+        if let Some(turn_id) = self.send_submit_v2(
+            turn.text.clone(),
+            attachments,
+            Some(turn.unsent_id.clone()),
+            cx,
+        ) {
             self.push_optimistic_bubble(
                 turn.text.clone(),
                 turn.user_images.clone(),
@@ -730,7 +764,7 @@ impl Workspace {
         let sent = if text.is_empty() {
             None
         } else {
-            self.send_submit_v2(text.clone(), Vec::new(), cx)
+            self.send_submit_v2(text.clone(), Vec::new(), None, cx)
         };
         if sent.is_none() {
             // Nothing rode the wire — re-park everything as retryable
@@ -746,6 +780,10 @@ impl Workspace {
             });
             cx.notify();
             return;
+        }
+        // The batch is on the wire: its rows leave the unsent ledger.
+        for turn in &due {
+            self.unsent.remove(&turn.unsent_id);
         }
         let meta = self.user_turn_meta(cx);
         self.push_optimistic_bubble(text, Vec::new(), meta, sent, None, cx);
@@ -958,18 +996,24 @@ impl Workspace {
         // queue drops it); an already-injected steer no-ops the withdrawal
         // and its row simply stays in the transcript. `Queued` / `Failed`
         // cards are local-only and drop freely.
-        let state = self
+        let (state, unsent_id) = self
             .chat
             .read(cx)
             .queued_follow_ups
             .get(idx)
-            .map(|i| i.state.clone());
+            .map(|i| (i.state.clone(), i.turn.unsent_id.clone()))
+            .unzip();
         match state {
             Some(FollowUpState::SteerPending { message_id }) => {
                 self.withdraw_steer(&message_id, cx)
             }
             Some(_) => {}
             None => return,
+        }
+        if let Some(id) = unsent_id {
+            // A deleted card is a withdrawn text: it must not come back as a
+            // draft after a restart.
+            self.unsent.remove(&id);
         }
         self.chat.update(cx, |chat, cx| {
             chat.queued_follow_ups.remove(idx);
