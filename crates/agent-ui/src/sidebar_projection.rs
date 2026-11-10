@@ -34,10 +34,10 @@ use steer_agent_chrome_ui::session_list::{
     LOOSE_BUCKET_KEY, PendingKind, SessionGroup, SessionRowData, SessionRowKind, SessionStatus,
 };
 
-/// One sidebar row: one SESSION CONTAINER (plan D1) — the fields the chrome
-/// list renders, derived from a session summary plus its extension fold.
-/// Replaces the retired v2 `ThreadListItem`; the sidebar's row vocabulary
-/// speaks containers, the wire's session vocabulary underneath is untouched.
+/// One sidebar row: one SESSION CONTAINER — the fields the chrome list
+/// renders, derived from a session summary plus its extension fold. The
+/// sidebar's row vocabulary speaks containers; the wire's session vocabulary
+/// underneath is untouched.
 #[derive(Debug, Clone)]
 pub struct ContainerRow {
     pub id: String,

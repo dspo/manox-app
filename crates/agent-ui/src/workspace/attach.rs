@@ -655,11 +655,6 @@ impl Workspace {
         // the rail reset above, straight from the persistent roster (live
         // and settled rows alike — the roster is the restore source).
         self.apply_subagent_rows(subagent_rows, cx);
-        // Replay the window's live-only tail (sub-agent child/progress rows, an
-        // in-flight tool's streamed output, a live retry notice): the parked
-        // subscription drops all of it, and none of it has a display
-        // projection, so the rebuild above cannot reproduce it.
-        self.catch_up_live_only_state(cx);
         // The user is now viewing this thread: clear any unread red dot it
         // carried from a prior background completion, and any pending-auth
         // badge. Re-surfacing a parked interaction rides the re-own above: the
