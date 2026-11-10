@@ -562,15 +562,10 @@ workspace-project-unfiled = Conversations
 
 workspace-empty-prompt = What should we do?
 
-follow-stop-stream-failing = Live follow stopped: repeated reconnects failed; the view keeps the last content it received. Retry to reconnect.
 
-follow-stop-indicator-stream-failing = Follow stopped
 
-follow-stop-retry = Retry
 
-follow-stop-dismiss = Dismiss
 
-follow-stop-indicator-retry = Click to reconnect the live follow
 ### views/composer_menu.rs
 
 composer-delivery-error = Connection not ready — your message may not have been delivered

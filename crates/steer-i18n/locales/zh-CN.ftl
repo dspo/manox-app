@@ -545,15 +545,10 @@ workspace-project-unfiled = 对话
 
 workspace-empty-prompt = 我们该做什么？
 
-follow-stop-stream-failing = 实时跟进已停止：多次重连失败，视图停留在最后收到的内容。点「重试」可重新连接。
 
-follow-stop-indicator-stream-failing = 跟进已停止
 
-follow-stop-retry = 重试
 
-follow-stop-dismiss = 关闭
 
-follow-stop-indicator-retry = 点击重新连接实时跟进
 ### views/composer_menu.rs
 
 composer-delivery-error = 连接未就绪，消息可能没有送达
