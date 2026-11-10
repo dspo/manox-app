@@ -170,7 +170,7 @@ fn compatible_agents_for_wire_api(config: &CxConfig, wire_api: WireApi) -> Vec<S
   cx --pty -- claude --dangerously-skip-permissions   跳过 agent 选择，透传该 flag
   cx --pty -- --dangerously-skip-permissions          进 TUI 选 agent，选定后透传该 flag
   cx --pty -S /tmp/cx.sock -- claude                 自定义 IPC socket 路径
-  cx -- ChatGPT.App        ChatGPT.app 桌面端（大小写不敏感，等价 `cx -- chatgpt.app`；旧名 `Codex.app` 仍兼容）"
+  cx -- ChatGPT.App        ChatGPT.app 桌面端（大小写不敏感）"
 )]
 struct Cli {
     /// 经 PTY 中继启动（cx 持 master，终端 IO 透传，并暴露外部 IPC 注入入口）；默认直连。
@@ -3156,11 +3156,10 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_agent_name_is_case_insensitive_with_aliases() {
-        assert_eq!(canonicalize_agent_name("CoDex.App"), "ChatGPT.app");
-        assert_eq!(canonicalize_agent_name("codex.app"), "ChatGPT.app");
-        assert_eq!(canonicalize_agent_name("CODEXAPP"), "ChatGPT.app");
-        assert_eq!(canonicalize_agent_name("codex_app"), "ChatGPT.app");
+    fn canonicalize_agent_name_is_case_insensitive() {
+        // The retired `Codex.app` aliases are ordinary unknown ids now.
+        assert_eq!(canonicalize_agent_name("CODEXAPP"), "codexapp");
+        assert_eq!(canonicalize_agent_name("codex_app"), "codex_app");
         assert_eq!(canonicalize_agent_name("ChatGPT.App"), "ChatGPT.app");
         assert_eq!(canonicalize_agent_name("chatgpt.app"), "ChatGPT.app");
         assert_eq!(canonicalize_agent_name("CHATGPTAPP"), "ChatGPT.app");
