@@ -1017,7 +1017,6 @@ workspace-stop-nothing-interrupted = 停止：没有找到可中断的运行（�
 workspace-stop-refused = 停止被拒绝：{ $err }
 workspace-stop-connection-closed = 停止失败：与宿主的连接已断开。
 workspace-unsent-draft-marker = 〔未送达〕
-composer-delivery-connecting = 正在连接宿主…
 composer-delivery-handshake = 宿主连接失败（握手未完成），消息可能没有送达。
 composer-delivery-dispatch = 消息发送失败：与宿主的传输已断开。
 composer-delivery-stalled = 消息仍在排队（超过投递预算），请检查宿主。

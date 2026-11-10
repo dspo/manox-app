@@ -2093,7 +2093,7 @@ impl Workspace {
             .store
             .as_ref()
             .map(|(store, _)| store.read(cx).link_state())?;
-        (state != steer_agent_chat_ui::ahp_store::LinkState::Ready)
+        matches!(state, steer_agent_chat_ui::ahp_store::LinkState::Lost(_))
             .then(|| self.render_delivery_error_strip(&state, cx))
     }
 
