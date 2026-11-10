@@ -1041,7 +1041,6 @@ workspace-stop-nothing-interrupted = Stop: no running turn was found to interrup
 workspace-stop-refused = Stop was refused: { $err }
 workspace-stop-connection-closed = Stop failed: the host connection is gone.
 workspace-unsent-draft-marker = [unsent]
-composer-delivery-connecting = Connecting to the host…
 composer-delivery-handshake = The host handshake failed; messages may not be delivered.
 composer-delivery-dispatch = Sending failed: the transport to the host is gone.
 composer-delivery-stalled = Messages are still queued past the delivery budget; check the host.

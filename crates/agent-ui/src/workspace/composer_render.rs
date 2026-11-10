@@ -267,7 +267,10 @@ impl Workspace {
             .when_some(
                 self.chat.read(cx).store.as_ref().and_then(|(store, _)| {
                     let state = store.read(cx).link_state();
-                    (state != steer_agent_chat_ui::ahp_store::LinkState::Ready).then_some(state)
+                    // Only a LOST link paints: a dial in flight must not
+                    // shift the layout under a geometry probe or a reader.
+                    matches!(state, steer_agent_chat_ui::ahp_store::LinkState::Lost(_))
+                        .then_some(state)
                 }),
                 |el, state| el.child(self.render_delivery_error_strip(&state, cx)),
             )
@@ -1206,7 +1209,9 @@ impl Workspace {
         // Lost is a warning; Connecting is a quiet status line (a dial is in
         // flight, nothing is wrong yet).
         let (text, danger, retryable) = match state {
-            LinkState::Connecting => (i18n::t("composer-delivery-connecting"), false, false),
+            // Unreachable through the call site (it paints Lost only); a
+            // quiet dial renders nothing even if a caller asks.
+            LinkState::Connecting => return gpui::div().into_any_element(),
             LinkState::Lost(DeliveryFailure::Handshake(_)) => {
                 (i18n::t("composer-delivery-handshake"), true, true)
             }
