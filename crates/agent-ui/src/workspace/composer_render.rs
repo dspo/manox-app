@@ -142,10 +142,10 @@ struct SendChipSpec {
 }
 
 /// The render-time snapshot of one queued row: the render borrows `cx`
-/// mutably, so the shared `&QueuedFollowUp` can't cross into the row builder.
+/// mutably, so the shared `&Submission` can't cross into the row builder.
 struct QueueRowSpec {
     idx: usize,
-    state: FollowUpState,
+    state: SubmissionState,
     line: String,
 }
 
@@ -495,7 +495,7 @@ impl Workspace {
         }
         let marker = self.chat.read(cx).queue_drag;
         // Snapshot the fields the row renders (the render borrows cx
-        // mutably, so the shared `&QueuedFollowUp` can't cross into it).
+        // mutably, so the shared `&Submission` can't cross into it).
         let snapshot: Vec<QueueRowSpec> = self
             .chat
             .read(cx)
@@ -557,7 +557,7 @@ impl Workspace {
     ) -> AnyElement {
         let QueueRowSpec { idx, state, line } = row;
         let idx = *idx;
-        let danger = matches!(state, FollowUpState::Failed);
+        let danger = matches!(state, SubmissionState::Failed);
         let line = line.clone();
 
         let icon_btn =
@@ -588,7 +588,7 @@ impl Workspace {
 
         // Lane-move + 编辑/删除 share one cluster shape across the states.
         let lane_btn = match state {
-            FollowUpState::SteerPending { .. } => icon_btn(
+            SubmissionState::SteerPending { .. } => icon_btn(
                 format!("queue-requeue-{idx}"),
                 gpui_kit_assets::IconName::Undo2,
                 "queue-requeue-action",
@@ -596,7 +596,7 @@ impl Workspace {
                 cx,
                 |this, idx, _window, cx| this.requeue_follow_up(idx, cx),
             ),
-            FollowUpState::Queued => icon_btn(
+            SubmissionState::Queued | SubmissionState::Interrupting => icon_btn(
                 format!("queue-steer-{idx}"),
                 gpui_kit_assets::IconName::CornerDownRight,
                 "queued-steer-now-action",
@@ -608,7 +608,7 @@ impl Workspace {
             // actions, the summary text in red as the only distinction. The
             // 进入引导 click re-sends the online steer under a fresh id (the
             // old "立即重试" labeled button; same path, converged face).
-            FollowUpState::Failed => icon_btn(
+            SubmissionState::Failed => icon_btn(
                 format!("queue-steer-{idx}"),
                 gpui_kit_assets::IconName::CornerDownRight,
                 "queued-steer-now-action",
@@ -643,7 +643,7 @@ impl Workspace {
         );
 
         let badge = match state {
-            FollowUpState::SteerPending { .. } => Some(
+            SubmissionState::SteerPending { .. } => Some(
                 gpui::div()
                     .px_1()
                     .py_0p5()
@@ -653,7 +653,7 @@ impl Workspace {
                     .text_color(theme.accent_foreground)
                     .child(i18n::t("message-steer-pending-badge")),
             ),
-            FollowUpState::Queued => Some(
+            SubmissionState::Queued => Some(
                 gpui::div()
                     .px_1()
                     .py_0p5()
@@ -663,7 +663,7 @@ impl Workspace {
                     .text_color(theme.muted_foreground)
                     .child(i18n::t("message-queued-badge")),
             ),
-            FollowUpState::Failed => None,
+            SubmissionState::Failed | SubmissionState::Interrupting => None,
         };
 
         // The whole row drags — sidebar gesture — but only a plain `Queued`
@@ -685,7 +685,7 @@ impl Workspace {
                     row.child(insertion_line(matches!(m.edge, QueueDragEdge::Top), theme))
                 },
             );
-        if matches!(state, FollowUpState::Queued) {
+        if matches!(state, SubmissionState::Queued) {
             let payload = DraggedQueueRow {
                 idx,
                 text: SharedString::from(line.to_owned()),

@@ -199,11 +199,11 @@ mod suite {
             meta: UserTurnMeta::new(1, "m".into(), None),
             user_images: Vec::<UserImage>::new(),
         };
-        let q = |state| crate::workspace::QueuedFollowUp {
+        let q = |state| crate::workspace::Submission {
             turn: turn("x"),
             state,
         };
-        use crate::workspace::FollowUpState as S;
+        use crate::workspace::SubmissionState as S;
         use crate::workspace::steer_group_insert_index;
 
         let empty = std::collections::VecDeque::new();
@@ -246,11 +246,11 @@ mod suite {
             meta: crate::conversation::UserTurnMeta::new(1, "m".into(), None),
             user_images: Vec::new(),
         };
-        let q = |state| crate::workspace::QueuedFollowUp {
+        let q = |state| crate::workspace::Submission {
             turn: turn("x"),
             state,
         };
-        use crate::workspace::FollowUpState as S;
+        use crate::workspace::SubmissionState as S;
 
         let queue: std::collections::VecDeque<_> = [
             q(S::SteerPending {
