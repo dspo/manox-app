@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use super::parser::RawEntry;
 use super::types::UsageRecord;
 
-pub(super) const DB_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScanState {
@@ -82,79 +81,12 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
             ON messages (agent, dedup_primary) WHERE dedup_primary IS NOT NULL;",
     )?;
 
-    let current_version: u32 = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'schema_version'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-
-    if current_version == 1 {
-        // v1 was an unreleased aggregate-cache schema. Reset it instead of
-        // mixing per-day aggregates into the final per-message schema.
-        with_transaction(conn, |tx| {
-            tx.execute("DROP TABLE IF EXISTS usage_records", [])?;
-            tx.execute("DROP TABLE IF EXISTS scanned_files", [])?;
-            tx.execute("DELETE FROM messages", [])?;
-            tx.execute_batch(
-                "CREATE TABLE scanned_files (
-                    path       TEXT PRIMARY KEY,
-                    mtime_secs INTEGER NOT NULL,
-                    size       INTEGER NOT NULL,
-                    parsed_upto_bytes INTEGER NOT NULL DEFAULT 0,
-                    file_id    TEXT
-                );",
-            )?;
-            set_schema_version(tx, DB_VERSION)?;
-            Ok(())
-        })?;
-    } else if current_version == 0 || current_version == 2 {
-        ensure_scanned_files_columns(conn)?;
-        set_schema_version(conn, DB_VERSION)?;
-    }
-
     Ok(())
 }
 
-fn set_schema_version(conn: &Connection, version: u32) -> Result<()> {
-    conn.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
-        params![version.to_string()],
-    )?;
-    Ok(())
-}
 
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let pragma = format!("PRAGMA table_info({table})");
-    let mut stmt = conn.prepare(&pragma)?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for row in rows {
-        if row? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
 
-fn ensure_scanned_files_columns(conn: &Connection) -> Result<()> {
-    if !column_exists(conn, "scanned_files", "parsed_upto_bytes")? {
-        conn.execute(
-            "ALTER TABLE scanned_files ADD COLUMN parsed_upto_bytes INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE scanned_files SET parsed_upto_bytes = size WHERE parsed_upto_bytes = 0",
-            [],
-        )?;
-    }
-    if !column_exists(conn, "scanned_files", "file_id")? {
-        conn.execute("ALTER TABLE scanned_files ADD COLUMN file_id TEXT", [])?;
-    }
-    Ok(())
-}
+
 
 /// 读取某源文件的扫描状态。
 pub(super) fn load_scan_state(conn: &Connection, path: &str) -> Option<ScanState> {
@@ -827,157 +759,9 @@ mod tests {
         assert!(file_unchanged(&conn, "/extra/copilot.log", 1000, 200));
     }
 
-    #[test]
-    fn migration_v1_to_v3_resets_unreleased_aggregate_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let conn = open_db(&path).unwrap();
 
-        // 先创建 v1 schema 并插入旧数据
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS scanned_files (
-                path       TEXT PRIMARY KEY,
-                mtime_secs INTEGER NOT NULL,
-                size       INTEGER NOT NULL,
-                raw_json   TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS usage_records (
-                agent      TEXT NOT NULL,
-                model      TEXT NOT NULL,
-                date       TEXT NOT NULL,
-                in_tokens  INTEGER NOT NULL DEFAULT 0,
-                out_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_read_input_tokens  INTEGER NOT NULL DEFAULT 0,
-                cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (agent, model, date)
-            );
-            INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1');
-            INSERT INTO usage_records (agent, model, date, in_tokens, out_tokens,
-                cache_read_input_tokens, cache_creation_input_tokens)
-                VALUES ('claude', 'opus', '2026-01-01', 999, 0, 0, 0);",
-        )
-        .unwrap();
 
-        // 运行 v3 init_schema
-        init_schema(&conn).unwrap();
 
-        // v1 是未发布的旧聚合缓存；终版 schema 不混入旧聚合数据。
-        assert!(
-            conn.query_row(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='usage_records'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .is_err()
-        );
-
-        // messages 表应存在
-        assert!(
-            conn.query_row(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .is_ok()
-        );
-
-        let records = load_aggregated(&conn).unwrap();
-        assert!(records.is_empty());
-
-        // schema_version 应为 3
-        let version_str: String = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let version: u32 = version_str.parse().unwrap();
-        assert_eq!(version, DB_VERSION);
-    }
-
-    #[test]
-    fn migration_v2_to_v3_preserves_existing_data() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let conn = open_db(&path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS scanned_files (
-                path       TEXT PRIMARY KEY,
-                mtime_secs INTEGER NOT NULL,
-                size       INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                agent TEXT NOT NULL,
-                model TEXT NOT NULL,
-                date TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL DEFAULT 0,
-                output_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
-                reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
-                session_id TEXT,
-                message_id TEXT,
-                dedup_primary TEXT,
-                dedup_secondary TEXT,
-                is_sidechain INTEGER NOT NULL DEFAULT 0,
-                source_path TEXT NOT NULL
-            );
-            INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2');
-            INSERT INTO scanned_files (path, mtime_secs, size)
-                VALUES ('/tmp/file.jsonl', 1000, 200);
-            INSERT INTO messages (agent, model, date, input_tokens, source_path)
-                VALUES ('claude', 'opus', '2026-01-01', 123, '/tmp/file.jsonl');",
-        )
-        .unwrap();
-
-        init_schema(&conn).unwrap();
-
-        let state = load_scan_state(&conn, "/tmp/file.jsonl").unwrap();
-        assert_eq!(state.mtime_secs, 1000);
-        assert_eq!(state.size, 200);
-        assert_eq!(state.parsed_upto_bytes, 200);
-        assert!(state.file_id.is_none());
-
-        let records = load_aggregated(&conn).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].in_tokens, 123);
-    }
-
-    #[test]
-    fn migration_without_schema_version_repairs_scanned_files_columns() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let conn = open_db(&path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS scanned_files (
-                path       TEXT PRIMARY KEY,
-                mtime_secs INTEGER NOT NULL,
-                size       INTEGER NOT NULL
-            );",
-        )
-        .unwrap();
-
-        init_schema(&conn).unwrap();
-        mark_file_scanned(&conn, "/tmp/file.jsonl", 1000, 200, 180, Some("dev:inode")).unwrap();
-
-        let state = load_scan_state(&conn, "/tmp/file.jsonl").unwrap();
-        assert_eq!(state.parsed_upto_bytes, 180);
-        assert_eq!(state.file_id.as_deref(), Some("dev:inode"));
-    }
 
     #[test]
     fn aggregate_normalizes_model_names() {

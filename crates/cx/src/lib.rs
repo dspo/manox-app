@@ -48,17 +48,14 @@ pub const ADD_PROVIDER_SENTINEL: &str = "+ 添加 Provider";
 pub const ADD_NEW_PROVIDER_SENTINEL: &str = "+ 新建 Provider";
 pub const ADD_WIRE_API_ACTION: &str = "添加 wire_api";
 pub const ADD_MODEL_ACTION: &str = "添加 model";
-/// Normalize a CLI-supplied agent name: case-insensitive, with alias collapsing.
+/// Normalize a CLI-supplied agent name: case-insensitive, with the
+/// punctuation variants of the two display-named agents collapsed.
 ///
-/// `CoDex.App` / `codexapp` / `codex_app` / `ChatGPT.App` / `chatgptapp` all resolve
-/// to the `ChatGPT.app` agent; the remaining ids (`claude`, `codex`, `copilot`)
-/// are lowercased verbatim. This only touches user-facing input — internal config/registry
-/// ids are already canonical.
+/// This only touches user-facing input — internal config/registry ids are
+/// already canonical.
 pub fn canonicalize_agent_name(input: &str) -> String {
     match input.to_lowercase().as_str() {
-        "codex_app" | "codexapp" | "codex.app" | "chatgpt_app" | "chatgptapp" | "chatgpt.app" => {
-            "ChatGPT.app".into()
-        }
+        "chatgpt_app" | "chatgptapp" | "chatgpt.app" => "ChatGPT.app".into(),
         "vscode" | "vs-code" | "vs_code" | "vs code" | "vscode.app" => "VS Code".into(),
         other => other.into(),
     }
