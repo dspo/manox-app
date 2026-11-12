@@ -568,7 +568,6 @@ workspace-empty-prompt = What should we do?
 
 ### views/composer_menu.rs
 
-composer-delivery-error = Connection not ready — your message may not have been delivered
 composer-delivery-retry = Retry
 
 composer-add-internal-browser = Internal Web Browser

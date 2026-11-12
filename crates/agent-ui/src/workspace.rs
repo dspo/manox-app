@@ -398,6 +398,12 @@ pub struct Workspace {
     /// User turns that have not reached the journal yet (durable across a
     /// restart; see [`crate::unsent`]).
     pub(crate) unsent: crate::unsent::UnsentOutbox,
+    /// Sessions this process has already attached. The unsent ledger's
+    /// draft recovery is a FIRST-open gesture: a session this process owns
+    /// in memory keeps its in-flight submits and parked cards, whose rows
+    /// retire on delivery — a re-attach must not pull them into the
+    /// composer as "unsent" drafts beside their live copies.
+    pub(crate) attached_sessions: std::collections::HashSet<String>,
     /// T-D: the shared single-connection multiplexer. One app-level
     /// `AgentClient` (client_id "desktop") carries every session; the
     /// per-session handles are leaves fed by its demux pump.
@@ -1026,6 +1032,7 @@ impl Workspace {
             nav: NavHistory::default(),
             multiplexer,
             unsent: crate::unsent::UnsentOutbox::new(),
+            attached_sessions: std::collections::HashSet::new(),
             background_threads: Vec::new(),
             _mux_lists,
             _rail_updates: rail_updates,

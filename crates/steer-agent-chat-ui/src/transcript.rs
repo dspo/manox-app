@@ -388,11 +388,6 @@ fn push_overlay_rows(overlays: &mut Overlays, nodes: &mut Vec<Node>) {
     }
 }
 
-/// Project one turn: its user row, then a bounded scan of the response
-/// parts — runs of reasoning/tool-call parts fold into one activity segment,
-/// markdown parts become answer bubbles, everything else is a card or a
-/// notice. The turn's settled process head is spliced above its first
-/// segment.
 /// The turn-opening message's author, peer flag and display text, read from
 /// the row's `x-manox` meta (manox folds authorship onto the journal row; the
 /// app is a pure AHP client, so this is the only face it has).
@@ -429,6 +424,11 @@ fn user_row_is_phantom(message: &ahp_types::state::Message) -> bool {
     message.text.trim().is_empty() && author == Some(manox_agent::MessageAuthor::Harness)
 }
 
+/// Project one turn: its user row, then a bounded scan of the response
+/// parts — runs of reasoning/tool-call parts fold into one activity segment,
+/// markdown parts become answer bubbles, everything else is a card or a
+/// notice. The turn's settled process head is spliced above its first
+/// segment.
 fn push_turn(
     turn: &TurnView,
     overlays: &mut Overlays,

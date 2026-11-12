@@ -118,8 +118,21 @@ impl UnsentOutbox {
     }
 
     fn rewrite(&self, mut keep: impl FnMut(&UnsentTurn) -> bool) -> std::io::Result<()> {
+        // A no-op must not touch the disk: `remove` fires on every landed
+        // turn's adoption, and most calls find nothing recorded (or a row
+        // that retired earlier) — creating or rewriting the file there
+        // would spend fsyncs on nothing.
+        if !self.path.exists() {
+            return Ok(());
+        }
         let turns = self.read()?;
+        let before = turns.len();
         let kept: Vec<UnsentTurn> = turns.into_iter().filter(|turn| keep(turn)).collect();
+        // Nothing matched: the file already holds exactly the kept rows —
+        // rewriting it would only spend two fsyncs re-writing the bytes.
+        if kept.len() == before {
+            return Ok(());
+        }
         let mut out = String::new();
         for turn in &kept {
             out.push_str(&serde_json::to_string(turn).map_err(std::io::Error::other)?);

@@ -998,8 +998,6 @@ struct HandshakeParams {
     fold_tx: async_channel::Sender<()>,
 }
 
-/// The GPUI-facing store. One per process: the host is a singleton (L11) and
-/// this is its only desktop client.
 /// What a stop gesture actually did, as the host's receipt reported it.
 ///
 /// The gesture's optimistic UI (the stop pill's spinner, the fold's turn
@@ -1029,6 +1027,8 @@ fn stop_outcome(receipt: &Value) -> Option<TeardownNotice> {
     (interrupted == 0 && stopped == 0).then_some(TeardownNotice::NothingInterrupted)
 }
 
+/// The GPUI-facing store. One per process: the host is a singleton (L11) and
+/// this is its only desktop client.
 pub struct AhpStore {
     pub book: ChannelBook,
     client: Option<Client>,
@@ -1198,7 +1198,9 @@ impl AhpStore {
     }
 
     /// The connection's state for the composer: a latched failure is `Lost`,
-    /// an in-flight dial is `Connecting`, a live client is `Ready`.
+    /// an in-flight dial is `Connecting`, otherwise `Ready` — including the
+    /// pre-dial state, which must stay as quiet as a live link (the strip
+    /// paints `Lost` only; "never connected" is not a failure to report).
     pub fn link_state(&self) -> LinkState {
         if let Some(failure) = self.delivery_failure() {
             return LinkState::Lost(failure);
@@ -1206,13 +1208,7 @@ impl AhpStore {
         if self.handshaking {
             return LinkState::Connecting;
         }
-        if self.client.is_some() {
-            LinkState::Ready
-        } else {
-            // Pre-dial (no handshake attempted yet): the strip stays quiet
-            // rather than claiming a connection that was never tried.
-            LinkState::Ready
-        }
+        LinkState::Ready
     }
 
     /// Re-dial the host after a handshake failure (the composer error
@@ -2884,15 +2880,15 @@ impl AhpStore {
         self.book.apply_snapshot(uri, state)
     }
 
-    /// Take the refusal notices accumulated for one session — the caller
-    /// that renders the foreground transcript (its sync already holds the
-    /// binding). The projection keys its rows by the refusals'
-    /// `server_seq`, so a record that outlives its row cannot duplicate.
     /// Take the stop-gesture notices recorded since the last sync.
     pub fn drain_teardown_notices(&mut self) -> Vec<TeardownNotice> {
         self.teardown_notices.drain(..).collect()
     }
 
+    /// Take the refusal notices accumulated for one session — the caller
+    /// that renders the foreground transcript (its sync already holds the
+    /// binding). The projection keys its rows by the refusals'
+    /// `server_seq`, so a record that outlives its row cannot duplicate.
     pub fn drain_refusals(&mut self, session_id: &str) -> Vec<RefusalRecord> {
         self.refusals
             .remove(session_id)

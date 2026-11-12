@@ -551,7 +551,6 @@ workspace-empty-prompt = 我们该做什么？
 
 ### views/composer_menu.rs
 
-composer-delivery-error = 连接未就绪，消息可能没有送达
 composer-delivery-retry = 重试
 
 composer-add-internal-browser = 内置浏览器
