@@ -545,18 +545,12 @@ workspace-project-unfiled = 对话
 
 workspace-empty-prompt = 我们该做什么？
 
-follow-stop-stream-failing = 实时跟进已停止：多次重连失败，视图停留在最后收到的内容。点「重试」可重新连接。
 
-follow-stop-indicator-stream-failing = 跟进已停止
 
-follow-stop-retry = 重试
 
-follow-stop-dismiss = 关闭
 
-follow-stop-indicator-retry = 点击重新连接实时跟进
 ### views/composer_menu.rs
 
-composer-delivery-error = 连接未就绪，消息可能没有送达
 composer-delivery-retry = 重试
 
 composer-add-internal-browser = 内置浏览器
@@ -1017,3 +1011,11 @@ update-failed = 更新失败：{ $err }
 update-retry = 重试
 update-uptodate = 已是最新版本
 update-not-bundle = 未以安装的 App 形态运行，无法自动更新
+
+workspace-stop-nothing-interrupted = 停止：没有找到可中断的运行（宿主可能已断开，或该对话已经结束）。
+workspace-stop-refused = 停止被拒绝：{ $err }
+workspace-stop-connection-closed = 停止失败：与宿主的连接已断开。
+workspace-unsent-draft-marker = 〔未送达〕
+composer-delivery-handshake = 宿主连接失败（握手未完成），消息可能没有送达。
+composer-delivery-dispatch = 消息发送失败：与宿主的传输已断开。
+composer-delivery-stalled = 消息仍在排队（超过投递预算），请检查宿主。

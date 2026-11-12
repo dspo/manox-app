@@ -1,7 +1,6 @@
 //! The workspace render face: the `Render` impl and its builders — the
 //! conversation column mounted as the chrome shell's main surface
 //! (`render_column`), the in-card settings swap (`render_settings_card`),
-//! the shared action decoration (`apply_chat_actions`), and the follow-stop
 //! notice. Split from `workspace.rs` as one contiguous run of impl blocks —
 //! `super` is the workspace module, so the builders reach the parent's
 //! private fields and methods unchanged.
@@ -425,7 +424,6 @@ impl Workspace {
                     .w_full()
                     .overflow_hidden()
                     .pb_2()
-                    .children(self.render_follow_stop_banner(&theme, cx))
                     .children(hero)
                     .when(history_loading, |this| {
                         this.child(crate::views::history_loading::render_history_loading(
@@ -852,28 +850,6 @@ impl Workspace {
             rows = rows.child(row);
         }
         Some(rows.into_any_element())
-    }
-
-    /// §二.3 stop notice — the dismissible BROADCAST arm. Shown above the
-    /// message area while the foreground leaf's reopen budget is exhausted
-    /// AND not dismissed. It names what stopped (the reason copy is keyed
-    /// by the leaf's observable cause) and carries the retry action, but
-    /// it is not the only signal: the persistent projection (`Workspace::
-    /// render_follow_stop_chip`, in the footer's composer chip group)
-    /// stays visible regardless of dismissal. Dismissing this banner hides
-    /// only the broadcast; the state and its retry entry survive in the
-    /// footer, so a stuck lease — which never self-heals — can never leave
-    /// the frozen transcript signal-less. Dismissal still belongs to the
-    /// leaf (per session): the banner stays out until the stream resumes
-    /// or a retry dies again.
-    fn render_follow_stop_banner(
-        &self,
-        _theme: &Theme,
-        _cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        // The retry notice retired with the v2 follow stream: a failed turn
-        // surfaces as the chat's error part now.
-        None
     }
 }
 

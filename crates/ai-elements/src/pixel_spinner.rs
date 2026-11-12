@@ -127,8 +127,8 @@ impl PixelSpinner {
             speed: 1.,
             smooth: false,
             sharp: false,
-            synced: false,
-            max_fps: None,
+            synced: true,
+            max_fps: Some(12.),
             frozen: false,
         }
     }
@@ -232,14 +232,16 @@ impl RenderOnce for PixelSpinner {
             .with_animation(
                 "pixel-spinner",
                 {
+                    // One shared App clock: `repeat_synced` phase-locks every
+                    // instance to the App frame ticker, so a screen of
+                    // spinners advances as one animation, not N mount-time
+                    // phases.
                     let mut animation = if self.synced {
                         Animation::new(Duration::from_millis(period_ms as u64)).repeat_synced()
                     } else {
                         Animation::new(Duration::from_millis(period_ms as u64)).repeat()
                     };
-                    if let Some(max_fps) = self.max_fps {
-                        animation = animation.with_max_fps(max_fps);
-                    }
+                    animation = animation.with_max_fps(self.max_fps.unwrap_or(12.));
                     animation
                 },
                 move |el, t| {

@@ -585,10 +585,6 @@ mod tests {
     /// cannot see them. Pin them here; the comment names the owning helper so
     /// a rename drags the pin along.
     const DYNAMICALLY_REFERENCED_KEYS: &[&str] = &[
-        // `FollowStopReason::{notice_key, indicator_key}` (agent-ui
-        // client_store_handle.rs).
-        "follow-stop-stream-failing",
-        "follow-stop-indicator-stream-failing",
         // `hover_tooltip` (chrome-ui session_list.rs).
         "chrome-sidebar-grouping",
         "chrome-sidebar-search",
@@ -605,10 +601,9 @@ mod tests {
 
     /// Every literal key an `i18n::t*` call site in agent-ui or the chrome
     /// shell crate passes must resolve in BOTH locales, and so must the
-    /// dynamically referenced set. This is the class gate for the follow-stop
-    /// leak: keys registered in code but never landed in the `.ftl` resources
-    /// render as their own names, and the parity gate cannot see a key
-    /// missing from both files at once. Lives here rather than in either UI
+    /// dynamically referenced set: a key registered in code but never landed
+    /// in the `.ftl` resources renders as its own name, and the parity gate
+    /// cannot see a key missing from both files at once. Lives here rather than in either UI
     /// crate because flipping the process-global `LANG` needs this module's
     /// `TEST_LANG_LOCK` serialization; the sibling sources sit one
     /// workspace-relative step away.

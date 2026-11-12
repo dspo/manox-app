@@ -18,6 +18,10 @@ use gpui_component::{Sizable, Size};
 /// Braille frames in animation order (classic 10-frame cycle).
 const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// The braille spinner's render cap: 800 ms / 12 fps ≈ 10 frames per cycle,
+/// matching the glyph set without a display-refresh timer.
+const BRAILLE_FPS: f32 = 12.;
+
 /// A text-based braille-dot spinner.
 #[derive(IntoElement)]
 pub struct BrailleSpinner {
@@ -64,10 +68,16 @@ impl RenderOnce for BrailleSpinner {
         };
         let frame_count = FRAMES.len() as f32;
 
+        // One shared App clock, capped at 12 fps: a braille spinner is a
+        // status glyph, not a 60 Hz animation, and every instance on screen
+        // advances on the same tick. Unmounting the spinner removes the only
+        // clock consumer, so an idle conversation draws no frames.
         el.when_some(self.color, |this, color| this.text_color(color))
             .with_animation(
                 "braille-spinner",
-                Animation::new(self.speed).repeat(),
+                Animation::new(self.speed)
+                    .repeat_synced()
+                    .with_max_fps(BRAILLE_FPS),
                 move |this, delta| {
                     let frame = ((delta * frame_count) as usize).min(FRAMES.len() - 1);
                     this.child(SharedString::from(FRAMES[frame]))

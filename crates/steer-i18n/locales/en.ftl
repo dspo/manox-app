@@ -562,18 +562,12 @@ workspace-project-unfiled = Conversations
 
 workspace-empty-prompt = What should we do?
 
-follow-stop-stream-failing = Live follow stopped: repeated reconnects failed; the view keeps the last content it received. Retry to reconnect.
 
-follow-stop-indicator-stream-failing = Follow stopped
 
-follow-stop-retry = Retry
 
-follow-stop-dismiss = Dismiss
 
-follow-stop-indicator-retry = Click to reconnect the live follow
 ### views/composer_menu.rs
 
-composer-delivery-error = Connection not ready — your message may not have been delivered
 composer-delivery-retry = Retry
 
 composer-add-internal-browser = Internal Web Browser
@@ -1041,3 +1035,11 @@ update-failed = Update failed: { $err }
 update-retry = Retry
 update-uptodate = Steer is up to date
 update-not-bundle = Not running from an installed app bundle; in-app updates are unavailable
+
+workspace-stop-nothing-interrupted = Stop: no running turn was found to interrupt (the host may be disconnected, or the turn already ended).
+workspace-stop-refused = Stop was refused: { $err }
+workspace-stop-connection-closed = Stop failed: the host connection is gone.
+workspace-unsent-draft-marker = [unsent]
+composer-delivery-handshake = The host handshake failed; messages may not be delivered.
+composer-delivery-dispatch = Sending failed: the transport to the host is gone.
+composer-delivery-stalled = Messages are still queued past the delivery budget; check the host.

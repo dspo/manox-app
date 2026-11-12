@@ -214,6 +214,9 @@ pub enum ComposerPlaceholderMode {
 }
 
 pub struct DeferredUserTurn {
+    /// The client id this turn is known by before any wire echo: the unsent
+    /// ledger key (and, for a submit, the client-minted turn id).
+    pub unsent_id: String,
     pub text: String,
     pub images: Vec<manox_agent::language_model::MessageContent>,
     pub meta: UserTurnMeta,
@@ -224,10 +227,14 @@ pub struct DeferredUserTurn {
 /// renders above the composer in the state its send mode gave it, and the
 /// wire (steer) or the turn boundary (queue/interrupt) moves it out.
 #[derive(Clone)]
-pub enum FollowUpState {
+pub enum SubmissionState {
     /// Parked locally, waiting to flush as part of the next user turn at the
     /// turn boundary (or to be promoted to a steer via the Steer action).
     Queued,
+    /// An interrupt's message, waiting for the running turn to settle before
+    /// it flushes. Hidden from the queue strip; it is the cancel gesture's
+    /// payload, not a follow-up the user can reorder.
+    Interrupting,
     /// Handed to the server's steer queue under the client-minted id. The
     /// card retires when the wire reports the consumption — a
     /// `chat/pendingMessageRemoved{steering}` echo (injection into the
@@ -236,7 +243,7 @@ pub enum FollowUpState {
     /// stays editable/removable/requeueable: every one of those first
     /// withdraws the steer from the wire (`chat/pendingMessageRemoved`,
     /// which the backend maps to a kernel-queue drop). A cancelled settle
-    /// strands it into [`FollowUpState::Failed`] (the engine retracts the
+    /// strands it into [`SubmissionState::Failed`] (the engine retracts the
     /// not-yet-injected tail without publishing a removal).
     SteerPending { message_id: String },
     /// The turn ended (cancelled/failed) before consuming the steer — the
@@ -248,9 +255,12 @@ pub enum FollowUpState {
 
 /// A follow-up submitted while a turn is running. Every new item starts queued;
 /// only an explicit Steer action promotes it to `SteerPending`.
-pub struct QueuedFollowUp {
+/// One outbound turn the ledger is holding: a queued follow-up, a steer card,
+/// a failed retry, or an interrupt's message waiting for the settle. The
+/// durable unsent ledger keys every instance by its turn's `unsent_id`.
+pub struct Submission {
     pub turn: DeferredUserTurn,
-    pub state: FollowUpState,
+    pub state: SubmissionState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -484,17 +494,17 @@ pub struct ChatColumn {
     /// Follow-ups submitted while a turn is running. Steer items are injected
     /// into the running turn at the next safe join point; queue items flush as
     /// the next user turn at `TurnFinished`.
-    pub queued_follow_ups: std::collections::VecDeque<QueuedFollowUp>,
+    pub queued_follow_ups: std::collections::VecDeque<Submission>,
     /// Messages whose 立即打断 already fired: the running turn's cancel was
     /// dispatched and these go out as the next turn the moment it settles.
     /// Not rendered — the card left the queue at the click (there is no
     /// 「待打断」 card state; the interrupt is an action, not a lane).
-    pub interrupt_outbox: Vec<DeferredUserTurn>,
+    pub interrupt_outbox: Vec<Submission>,
     /// Per-thread twin of [`Self::interrupt_outbox`] across thread switches.
-    pub interrupt_outbox_by_thread: HashMap<String, Vec<DeferredUserTurn>>,
+    pub interrupt_outbox_by_thread: HashMap<String, Vec<Submission>>,
     /// Session-only per-thread queue stash. Switching tasks moves the active
     /// deque here and restores it on return; no database persistence is used.
-    pub queued_follow_ups_by_thread: HashMap<String, std::collections::VecDeque<QueuedFollowUp>>,
+    pub queued_follow_ups_by_thread: HashMap<String, std::collections::VecDeque<Submission>>,
     /// In-flight queue-row drag (the composer queue's grip handle): the
     /// insertion marker cleared on commit / cancel / thread switch. Mirrors
     /// the sidebar's `drag_row` cue for the same gesture.
@@ -710,14 +720,14 @@ impl ChatColumn {
 
     /// The pure drag rule over any queue (the unit-tested form).
     pub fn queue_move_index_in(
-        queue: &std::collections::VecDeque<QueuedFollowUp>,
+        queue: &std::collections::VecDeque<Submission>,
         drag: QueueRowDrag,
     ) -> Option<usize> {
         let from = drag.dragged;
         if from == drag.line_on {
             return None;
         }
-        if !matches!(queue.get(from)?.state, FollowUpState::Queued) {
+        if !matches!(queue.get(from)?.state, SubmissionState::Queued) {
             return None;
         }
         let target = match drag.edge {
@@ -731,7 +741,7 @@ impl ChatColumn {
         // group and is not a legal destination.
         let head = queue
             .iter()
-            .position(|item| matches!(item.state, FollowUpState::Queued))
+            .position(|item| matches!(item.state, SubmissionState::Queued))
             .unwrap_or(queue.len());
         if insert < head || insert > queue.len() - 1 {
             return None;
@@ -759,14 +769,16 @@ impl ChatColumn {
 /// at all is the caller's cancelled-settle decision — a user's stop must not
 /// start a surprise new run behind the queue.
 pub fn drain_queued_follow_ups(
-    queue: &mut std::collections::VecDeque<QueuedFollowUp>,
+    queue: &mut std::collections::VecDeque<Submission>,
 ) -> Vec<DeferredUserTurn> {
     let mut due = Vec::new();
     let mut kept = std::collections::VecDeque::new();
     for item in queue.drain(..) {
         match item.state {
-            FollowUpState::Queued => due.push(item.turn),
-            FollowUpState::SteerPending { .. } | FollowUpState::Failed => kept.push_back(item),
+            SubmissionState::Queued => due.push(item.turn),
+            SubmissionState::SteerPending { .. }
+            | SubmissionState::Failed
+            | SubmissionState::Interrupting => kept.push_back(item),
         }
     }
     *queue = kept;
@@ -777,10 +789,10 @@ pub fn drain_queued_follow_ups(
 /// invariant `[SteerPending|Failed …] ++ [Queued …]`: the head of the queued
 /// group — i.e. the end of the steer group — which is also `queue.len()`
 /// when there are no plain `Queued` items.
-pub fn steer_group_insert_index(queue: &std::collections::VecDeque<QueuedFollowUp>) -> usize {
+pub fn steer_group_insert_index(queue: &std::collections::VecDeque<Submission>) -> usize {
     queue
         .iter()
-        .position(|item| matches!(item.state, FollowUpState::Queued))
+        .position(|item| matches!(item.state, SubmissionState::Queued))
         .unwrap_or(queue.len())
 }
 
@@ -790,6 +802,7 @@ mod tests {
 
     fn turn(text: &str) -> DeferredUserTurn {
         DeferredUserTurn {
+            unsent_id: uuid::Uuid::new_v4().to_string(),
             text: text.to_string(),
             images: Vec::new(),
             meta: UserTurnMeta::new(0, "test-model".to_string(), None),
@@ -797,14 +810,14 @@ mod tests {
         }
     }
 
-    fn item(text: &str, state: FollowUpState) -> QueuedFollowUp {
-        QueuedFollowUp {
+    fn item(text: &str, state: SubmissionState) -> Submission {
+        Submission {
             turn: turn(text),
             state,
         }
     }
 
-    fn queue(rows: Vec<QueuedFollowUp>) -> std::collections::VecDeque<QueuedFollowUp> {
+    fn queue(rows: Vec<Submission>) -> std::collections::VecDeque<Submission> {
         rows.into()
     }
 
@@ -813,13 +826,13 @@ mod tests {
         let mut q = queue(vec![
             item(
                 "s-1",
-                FollowUpState::SteerPending {
+                SubmissionState::SteerPending {
                     message_id: "steer-1".to_string(),
                 },
             ),
-            item("q-1", FollowUpState::Queued),
-            item("f-1", FollowUpState::Failed),
-            item("q-2", FollowUpState::Queued),
+            item("q-1", SubmissionState::Queued),
+            item("f-1", SubmissionState::Failed),
+            item("q-2", SubmissionState::Queued),
         ]);
         let due = drain_queued_follow_ups(&mut q);
         let texts: Vec<&str> = due.iter().map(|t| t.text.as_str()).collect();
@@ -840,22 +853,22 @@ mod tests {
         let q = queue(vec![
             item(
                 "s-1",
-                FollowUpState::SteerPending {
+                SubmissionState::SteerPending {
                     message_id: "steer-1".to_string(),
                 },
             ),
-            item("f-1", FollowUpState::Failed),
-            item("q-1", FollowUpState::Queued),
+            item("f-1", SubmissionState::Failed),
+            item("q-1", SubmissionState::Queued),
         ]);
         assert_eq!(steer_group_insert_index(&q), 2);
         let no_queue = queue(vec![
             item(
                 "s-1",
-                FollowUpState::SteerPending {
+                SubmissionState::SteerPending {
                     message_id: "steer-1".to_string(),
                 },
             ),
-            item("f-1", FollowUpState::Failed),
+            item("f-1", SubmissionState::Failed),
         ]);
         assert_eq!(steer_group_insert_index(&no_queue), 2);
     }

@@ -86,6 +86,16 @@ impl Workspace {
             self.submit_pending_ask(cx);
             return;
         }
+        // An empty composer is a valid interrupt gesture: ⇧⌘↩ (and the send
+        // menu's 打断) must cancel the running turn even with nothing typed.
+        // It cancels only — no empty turn rides the outbox, or the settle
+        // would flush an empty user message.
+        if text.trim().is_empty() && attachments.is_empty() && behavior == SubmitBehavior::Interrupt
+        {
+            self.cancel_turn(cx);
+            cx.notify();
+            return;
+        }
         // Block submit on empty input. A message submitted while a turn is
         // running is *not* dropped here — it is routed through
         // `send_user_turn`, which enqueues it as a follow-up instead of
@@ -282,7 +292,15 @@ impl Workspace {
             // bubble shows the compact `/key args` invocation, so these two
             // texts never match: the minted turn id is what pairs them.
             let submit_text = format!("/{key} {args}");
-            if let Some(turn_id) = self.send_submit_v2(submit_text, Vec::new(), cx) {
+            if let Some(turn_id) = self.send_submit_v2(submit_text.clone(), Vec::new(), None, cx) {
+                if let Some((_, session)) = self.chat.read(cx).store.clone() {
+                    self.unsent.push(&crate::unsent::UnsentTurn::new(
+                        turn_id.clone(),
+                        session,
+                        submit_text,
+                        Vec::new(),
+                    ));
+                }
                 self.push_optimistic_bubble(
                     display_text,
                     Vec::new(),
@@ -344,11 +362,27 @@ impl Workspace {
         let weak = cx.weak_entity();
         let user_images = Self::decode_user_images(&images);
         let turn = DeferredUserTurn {
+            unsent_id: uuid::Uuid::new_v4().to_string(),
             text,
             images,
             meta,
             user_images,
         };
+        // Durable before dispatch: a process death between here and the
+        // fold's echo must not lose the text. The row leaves when the turn is
+        // adopted (submit) or flushed (parked).
+        if let Some((_, session)) = self.chat.read(cx).store.clone() {
+            let images = serde_json::to_value(&turn.images)
+                .ok()
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default();
+            self.unsent.push(&crate::unsent::UnsentTurn::new(
+                turn.unsent_id.clone(),
+                session,
+                turn.text.clone(),
+                images,
+            ));
+        }
         let running = self.foreground_running(cx);
         if !running || behavior == SubmitBehavior::Send {
             // The thread is idle (not running). A free-form message dispatches
@@ -377,7 +411,10 @@ impl Workspace {
                 // grows a 「待打断」 lane.
                 self.cancel_turn(cx);
                 self.chat.update(cx, |chat, cc| {
-                    chat.interrupt_outbox.push(turn);
+                    chat.interrupt_outbox.push(Submission {
+                        turn,
+                        state: SubmissionState::Interrupting,
+                    });
                     cc.notify();
                 });
                 // The settle may have landed between the running read and the
@@ -399,9 +436,9 @@ impl Workspace {
                         let insert_at = steer_group_insert_index(&chat.queued_follow_ups);
                         chat.queued_follow_ups.insert(
                             insert_at,
-                            QueuedFollowUp {
+                            Submission {
                                 turn,
-                                state: FollowUpState::SteerPending { message_id },
+                                state: SubmissionState::SteerPending { message_id },
                             },
                         );
                         cx.notify();
@@ -424,9 +461,9 @@ impl Workspace {
     /// Park a turn as a plain `Queued` card above the composer.
     fn park_queued_turn(&mut self, turn: DeferredUserTurn, cx: &mut Context<Self>) {
         self.chat.update(cx, |chat, cc| {
-            chat.queued_follow_ups.push_back(QueuedFollowUp {
+            chat.queued_follow_ups.push_back(Submission {
                 turn,
-                state: FollowUpState::Queued,
+                state: SubmissionState::Queued,
             });
             cc.notify();
         });
@@ -460,8 +497,13 @@ impl Workspace {
     ) -> Option<String> {
         let message_id = uuid::Uuid::new_v4().to_string();
         let attachments: Vec<serde_json::Value> = Vec::new();
-        self.send_steer_v2(cx, message_id.clone(), turn.text.clone(), attachments)
-            .then_some(message_id)
+        let sent = self.send_steer_v2(cx, message_id.clone(), turn.text.clone(), attachments);
+        if sent {
+            // The host owns the steer queue now; a restart must not replay
+            // the text as a draft.
+            self.unsent.remove(&turn.unsent_id);
+        }
+        sent.then_some(message_id)
     }
 
     /// Append the user turn (text plus any image content) to the thread and
@@ -476,7 +518,12 @@ impl Workspace {
         // is adopted by the turn the submit mints. A submit that never rode
         // the wire pushes no bubble: the row would have no turn behind it.
         let attachments: Vec<serde_json::Value> = Vec::new();
-        if let Some(turn_id) = self.send_submit_v2(turn.text.clone(), attachments, cx) {
+        if let Some(turn_id) = self.send_submit_v2(
+            turn.text.clone(),
+            attachments,
+            Some(turn.unsent_id.clone()),
+            cx,
+        ) {
             self.push_optimistic_bubble(
                 turn.text.clone(),
                 turn.user_images.clone(),
@@ -505,7 +552,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let matched = self.chat.read(cx).queued_follow_ups.iter().position(|item| {
-            matches!(&item.state, FollowUpState::SteerPending { message_id: id } if id == message_id)
+            matches!(&item.state, SubmissionState::SteerPending { message_id: id } if id == message_id)
         });
         self.retire_matched_steer(matched, turn_id, cx)
     }
@@ -528,7 +575,7 @@ impl Workspace {
             .queued_follow_ups
             .iter()
             .position(|item| {
-                matches!(&item.state, FollowUpState::SteerPending { .. } if item.turn.text == text)
+                matches!(&item.state, SubmissionState::SteerPending { .. } if item.turn.text == text)
             });
         self.retire_matched_steer(matched, turn_id, cx)
     }
@@ -598,8 +645,10 @@ impl Workspace {
             // fold row adopts this row instead of sitting beside it (the
             // receipts can drain in one sync on a parked re-attach).
             let steer_id = match &item.state {
-                FollowUpState::SteerPending { message_id } => Some(message_id.clone()),
-                FollowUpState::Queued | FollowUpState::Failed => None,
+                SubmissionState::SteerPending { message_id } => Some(message_id.clone()),
+                SubmissionState::Queued
+                | SubmissionState::Failed
+                | SubmissionState::Interrupting => None,
             };
             let mut meta = item.turn.meta.clone();
             meta.steered = true;
@@ -652,15 +701,15 @@ impl Workspace {
                 .queued_follow_ups
                 .iter()
                 .filter_map(|item| match &item.state {
-                    FollowUpState::SteerPending { message_id } => Some(message_id.clone()),
+                    SubmissionState::SteerPending { message_id } => Some(message_id.clone()),
                     _ => None,
                 })
                 .collect();
             if !stranded.is_empty() {
                 self.chat.update(cx, |chat, cc| {
                     for item in chat.queued_follow_ups.iter_mut() {
-                        if matches!(item.state, FollowUpState::SteerPending { .. }) {
-                            item.state = FollowUpState::Failed;
+                        if matches!(item.state, SubmissionState::SteerPending { .. }) {
+                            item.state = SubmissionState::Failed;
                         }
                     }
                     cc.notify();
@@ -684,6 +733,7 @@ impl Workspace {
             outbox
         });
         if !outbox.is_empty() {
+            let outbox: Vec<DeferredUserTurn> = outbox.into_iter().map(|s| s.turn).collect();
             // The outbox turn goes first — and while it RUNS the queue stays
             // parked: a second back-to-back submit would be the one mid-run
             // chat/submit no other client path ever issues (the queue exists
@@ -720,22 +770,26 @@ impl Workspace {
         let sent = if text.is_empty() {
             None
         } else {
-            self.send_submit_v2(text.clone(), Vec::new(), cx)
+            self.send_submit_v2(text.clone(), Vec::new(), None, cx)
         };
         if sent.is_none() {
             // Nothing rode the wire — re-park everything as retryable
             // Failed cards (front-first, preserving the original order).
             self.chat.update(cx, |chat, cc| {
                 for turn in due.into_iter().rev() {
-                    chat.queued_follow_ups.push_front(QueuedFollowUp {
+                    chat.queued_follow_ups.push_front(Submission {
                         turn,
-                        state: FollowUpState::Failed,
+                        state: SubmissionState::Failed,
                     });
                 }
                 cc.notify();
             });
             cx.notify();
             return;
+        }
+        // The batch is on the wire: its rows leave the unsent ledger.
+        for turn in &due {
+            self.unsent.remove(&turn.unsent_id);
         }
         let meta = self.user_turn_meta(cx);
         self.push_optimistic_bubble(text, Vec::new(), meta, sent, None, cx);
@@ -770,7 +824,8 @@ impl Workspace {
             return;
         };
         match item.state {
-            FollowUpState::Queued | FollowUpState::Failed => {
+            SubmissionState::Interrupting => {}
+            SubmissionState::Queued | SubmissionState::Failed => {
                 if running {
                     // (Re-)send the online steer and re-insert at the steer-group
                     // boundary, so the promoted card joins the trailing group of
@@ -779,7 +834,7 @@ impl Workspace {
                     // `SteerPending` — the untouched card simply rejoins the
                     // queue and flushes normally later.
                     if let Some(message_id) = self.enqueue_steer_pending(&item.turn, cx) {
-                        item.state = FollowUpState::SteerPending { message_id };
+                        item.state = SubmissionState::SteerPending { message_id };
                     }
                     // The group just changed: any in-flight drag's indices are
                     // stale (undo is a keyboard action and can land mid-drag).
@@ -798,7 +853,7 @@ impl Workspace {
                     self.append_and_run_user_turn(item.turn, weak, cx);
                 }
             }
-            FollowUpState::SteerPending { .. } => {
+            SubmissionState::SteerPending { .. } => {
                 // Already handed to the server steer queue; restore untouched
                 // (wherever the last settle left it).
                 let insert_at = steer_group_insert_index(&self.chat.read(cx).queued_follow_ups);
@@ -837,9 +892,9 @@ impl Workspace {
             return;
         };
         let insert_at = match &item.state {
-            FollowUpState::SteerPending { message_id } => {
+            SubmissionState::SteerPending { message_id } => {
                 self.withdraw_steer(message_id, cx);
-                item.state = FollowUpState::Queued;
+                item.state = SubmissionState::Queued;
                 steer_group_insert_index(&self.chat.read(cx).queued_follow_ups)
             }
             _ => steer_group_insert_index(&self.chat.read(cx).queued_follow_ups),
@@ -863,12 +918,15 @@ impl Workspace {
         }) else {
             return;
         };
-        if let FollowUpState::SteerPending { message_id } = &item.state {
+        if let SubmissionState::SteerPending { message_id } = &item.state {
             self.withdraw_steer(message_id, cx);
         }
         let running = self.foreground_running(cx);
         self.chat.update(cx, |chat, cc| {
-            chat.interrupt_outbox.push(item.turn);
+            chat.interrupt_outbox.push(Submission {
+                turn: item.turn,
+                state: SubmissionState::Interrupting,
+            });
             cc.notify();
         });
         if running {
@@ -916,7 +974,7 @@ impl Workspace {
         // can never deliver twice (a steer the server already injected
         // no-ops the withdrawal — that row stays, and the edited draft
         // becomes a fresh send).
-        if let FollowUpState::SteerPending { message_id } = &item.state {
+        if let SubmissionState::SteerPending { message_id } = &item.state {
             self.withdraw_steer(message_id, cx);
         }
         self.chat.update(cx, |chat, cx| {
@@ -948,18 +1006,24 @@ impl Workspace {
         // queue drops it); an already-injected steer no-ops the withdrawal
         // and its row simply stays in the transcript. `Queued` / `Failed`
         // cards are local-only and drop freely.
-        let state = self
+        let (state, unsent_id) = self
             .chat
             .read(cx)
             .queued_follow_ups
             .get(idx)
-            .map(|i| i.state.clone());
+            .map(|i| (i.state.clone(), i.turn.unsent_id.clone()))
+            .unzip();
         match state {
-            Some(FollowUpState::SteerPending { message_id }) => {
+            Some(SubmissionState::SteerPending { message_id }) => {
                 self.withdraw_steer(&message_id, cx)
             }
             Some(_) => {}
             None => return,
+        }
+        if let Some(id) = unsent_id {
+            // A deleted card is a withdrawn text: it must not come back as a
+            // draft after a restart.
+            self.unsent.remove(&id);
         }
         self.chat.update(cx, |chat, cx| {
             chat.queued_follow_ups.remove(idx);
@@ -980,7 +1044,7 @@ impl Workspace {
         let Some(item) = self.chat.read(cx).queued_follow_ups.back() else {
             return;
         };
-        if matches!(item.state, FollowUpState::Queued) {
+        if matches!(item.state, SubmissionState::Queued) {
             self.chat.update(cx, |chat, cc| {
                 chat.queued_follow_ups.pop_back();
                 cc.notify();

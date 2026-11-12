@@ -1,12 +1,11 @@
 //! steer-agent-chat-ui — the chat column's state foundation.
 //!
-//! What lives here: the journal→UI projection pipeline
-//! (`journal_translate` / `journal_fold` / `server_note_translate`), the
-//! store mirror it feeds (`client_store` + `client_store_handle` — the
-//! foreground leaf the conversation renders against), the conversation
-//! column's rendering (`conversation` — ConversationState, message views,
-//! composer) behind the [`host::ChatHost`] port, and the rail's data
-//! sources (`cockpit`, `git_status`).
+//! What lives here: the AHP store the transparent AHP client folds into
+//! (`ahp_store`), the pure projection from its `ChatState` to transcript
+//! nodes (`transcript`), the conversation column's keyed row state
+//! (`conversation`), the ask-card and composer rendering surface, and the
+//! rail's data sources (`cockpit`, `git_status`) behind the
+//! [`host::ChatHost`] port.
 //!
 //! Dependency invariant (the executable definition of the chrome/chat
 //! decoupling): this crate never touches terminals, webviews, or

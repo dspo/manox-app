@@ -144,9 +144,13 @@ fn handle_unlisten(request: http::Request<Vec<u8>>) -> Response<Vec<u8>> {
             }
             response_json(StatusCode::OK, &serde_json::json!({}))
         }
-        Err(_) => {
-            // Fallback: just acknowledge (for backwards compatibility)
-            response_json(StatusCode::OK, &serde_json::json!({}))
+        Err(err) => {
+            // A malformed listener request is a protocol error: acknowledging
+            // it would leave the caller believing a listener was registered.
+            response_json(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": err.to_string() }),
+            )
         }
     }
 }

@@ -142,10 +142,10 @@ struct SendChipSpec {
 }
 
 /// The render-time snapshot of one queued row: the render borrows `cx`
-/// mutably, so the shared `&QueuedFollowUp` can't cross into the row builder.
+/// mutably, so the shared `&Submission` can't cross into the row builder.
 struct QueueRowSpec {
     idx: usize,
-    state: FollowUpState,
+    state: SubmissionState,
     line: String,
 }
 
@@ -234,7 +234,6 @@ impl Workspace {
         let queue = self.render_queued_follow_ups(theme, cx);
         let project_chip = self.render_project_chip_pi(theme, cx);
         let goal_chip = self.render_goal_chip(theme, cx);
-        let follow_stop_chip = self.render_follow_stop_chip(theme, cx);
         let access = self.render_access_switch(theme, cx);
         let model = self.render_model_selector_pi(theme, cx);
         // Absolute cancel priority: the stop form is driven by the raw
@@ -266,12 +265,14 @@ impl Workspace {
             .children(completion_overlay)
             .children(mention_tip)
             .when_some(
-                self.chat
-                    .read(cx)
-                    .store
-                    .as_ref()
-                    .and_then(|(store, _)| store.read(cx).delivery_failure()),
-                |el, failure| el.child(self.render_delivery_error_strip(&failure, cx)),
+                self.chat.read(cx).store.as_ref().and_then(|(store, _)| {
+                    let state = store.read(cx).link_state();
+                    // Only a LOST link paints: a dial in flight must not
+                    // shift the layout under a geometry probe or a reader.
+                    matches!(state, steer_agent_chat_ui::ahp_store::LinkState::Lost(_))
+                        .then_some(state)
+                }),
+                |el, state| el.child(self.render_delivery_error_strip(&state, cx)),
             )
             .child(
                 // Composer input is message content in the mono family (Lilex)
@@ -450,11 +451,7 @@ impl Workspace {
                             .gap_1()
                             .child(project_chip)
                             .when_some(goal_chip, |el, chip| el.child(chip))
-                            .child(access)
-                            // The stopped-follow projection rides at the
-                            // group's tail: its arrival must never shift
-                            // the stable controls, only extend the row.
-                            .when_some(follow_stop_chip, |el, chip| el.child(chip)),
+                            .child(access),
                     )
                     .child(
                         h_flex()
@@ -501,7 +498,7 @@ impl Workspace {
         }
         let marker = self.chat.read(cx).queue_drag;
         // Snapshot the fields the row renders (the render borrows cx
-        // mutably, so the shared `&QueuedFollowUp` can't cross into it).
+        // mutably, so the shared `&Submission` can't cross into it).
         let snapshot: Vec<QueueRowSpec> = self
             .chat
             .read(cx)
@@ -563,7 +560,7 @@ impl Workspace {
     ) -> AnyElement {
         let QueueRowSpec { idx, state, line } = row;
         let idx = *idx;
-        let danger = matches!(state, FollowUpState::Failed);
+        let danger = matches!(state, SubmissionState::Failed);
         let line = line.clone();
 
         let icon_btn =
@@ -594,7 +591,7 @@ impl Workspace {
 
         // Lane-move + 编辑/删除 share one cluster shape across the states.
         let lane_btn = match state {
-            FollowUpState::SteerPending { .. } => icon_btn(
+            SubmissionState::SteerPending { .. } => icon_btn(
                 format!("queue-requeue-{idx}"),
                 gpui_kit_assets::IconName::Undo2,
                 "queue-requeue-action",
@@ -602,7 +599,7 @@ impl Workspace {
                 cx,
                 |this, idx, _window, cx| this.requeue_follow_up(idx, cx),
             ),
-            FollowUpState::Queued => icon_btn(
+            SubmissionState::Queued | SubmissionState::Interrupting => icon_btn(
                 format!("queue-steer-{idx}"),
                 gpui_kit_assets::IconName::CornerDownRight,
                 "queued-steer-now-action",
@@ -614,7 +611,7 @@ impl Workspace {
             // actions, the summary text in red as the only distinction. The
             // 进入引导 click re-sends the online steer under a fresh id (the
             // old "立即重试" labeled button; same path, converged face).
-            FollowUpState::Failed => icon_btn(
+            SubmissionState::Failed => icon_btn(
                 format!("queue-steer-{idx}"),
                 gpui_kit_assets::IconName::CornerDownRight,
                 "queued-steer-now-action",
@@ -649,7 +646,7 @@ impl Workspace {
         );
 
         let badge = match state {
-            FollowUpState::SteerPending { .. } => Some(
+            SubmissionState::SteerPending { .. } => Some(
                 gpui::div()
                     .px_1()
                     .py_0p5()
@@ -659,7 +656,7 @@ impl Workspace {
                     .text_color(theme.accent_foreground)
                     .child(i18n::t("message-steer-pending-badge")),
             ),
-            FollowUpState::Queued => Some(
+            SubmissionState::Queued => Some(
                 gpui::div()
                     .px_1()
                     .py_0p5()
@@ -669,7 +666,7 @@ impl Workspace {
                     .text_color(theme.muted_foreground)
                     .child(i18n::t("message-queued-badge")),
             ),
-            FollowUpState::Failed => None,
+            SubmissionState::Failed | SubmissionState::Interrupting => None,
         };
 
         // The whole row drags — sidebar gesture — but only a plain `Queued`
@@ -691,7 +688,7 @@ impl Workspace {
                     row.child(insertion_line(matches!(m.edge, QueueDragEdge::Top), theme))
                 },
             );
-        if matches!(state, FollowUpState::Queued) {
+        if matches!(state, SubmissionState::Queued) {
             let payload = DraggedQueueRow {
                 idx,
                 text: SharedString::from(line.to_owned()),
@@ -761,32 +758,6 @@ impl Workspace {
                 .child(delete_btn),
         )
         .into_any_element()
-    }
-
-    /// Persistent projection of the §二.3 follow-stop state: a compact
-    /// footer chip that lives in the composer's own chip group — the
-    /// place the user reaches to resend/retry — and NEVER disappears on
-    /// its own. Unlike the dismissible banner (which hides only the
-    /// broadcast), the chip's condition reads `follow_stop()` and
-    /// deliberately ignores `dismissed`: the state outlives the
-    /// dismissal, so a stuck lease or an exhausted budget always leaves a
-    /// visible status and a live retry entry; the frozen transcript is
-    /// never left signal-less. The chip IS the retry action: clicking it
-    /// fires the same `retry_follow` the banner's Retry button wires (a
-    /// no-op with no multiplexer, keeping the contract that the entry
-    /// never vanishes on a click), and its tooltip previews that
-    /// consequence. Geometry: `flex_shrink_0` at the chip-group tail so
-    /// the chip's arrival or departure can never squeeze or shift the
-    /// pinned model/send controls. Copy is keyed per reason via
-    /// `indicator_key()`.
-    fn render_follow_stop_chip(
-        &self,
-        _theme: &Theme,
-        _cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        // The retry chip retired with the v2 follow stream: a failed turn
-        // surfaces as the chat's error part now.
-        None
     }
 
     /// The composer footer's inline access-mode switch (see
@@ -1230,14 +1201,28 @@ impl Workspace {
     /// reason is always the pipeline's own.
     pub(super) fn render_delivery_error_strip(
         &self,
-        failure: &steer_agent_chat_ui::ahp_store::DeliveryFailure,
+        state: &steer_agent_chat_ui::ahp_store::LinkState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        use steer_agent_chat_ui::ahp_store::{DeliveryFailure, LinkState};
         let theme = cx.theme().clone();
-        let retryable = matches!(
-            failure,
-            steer_agent_chat_ui::ahp_store::DeliveryFailure::Handshake(_)
-        );
+        // Lost is a warning; Connecting is a quiet status line (a dial is in
+        // flight, nothing is wrong yet).
+        let (text, danger, retryable) = match state {
+            // Unreachable through the call site (it paints Lost only); a
+            // quiet dial renders nothing even if a caller asks.
+            LinkState::Connecting => return gpui::div().into_any_element(),
+            LinkState::Lost(DeliveryFailure::Handshake(_)) => {
+                (i18n::t("composer-delivery-handshake"), true, true)
+            }
+            LinkState::Lost(DeliveryFailure::Dispatch(_)) => {
+                (i18n::t("composer-delivery-dispatch"), true, false)
+            }
+            LinkState::Lost(DeliveryFailure::Stalled) => {
+                (i18n::t("composer-delivery-stalled"), true, false)
+            }
+            LinkState::Ready => return gpui::div().into_any_element(),
+        };
         h_flex()
             .id("delivery-error-strip")
             .debug_selector(|| "delivery-error-strip".to_string())
@@ -1247,18 +1232,34 @@ impl Workspace {
             .px_2()
             .py_1()
             .rounded(theme.radius)
-            .bg(theme.danger.opacity(0.08))
+            .bg(if danger {
+                theme.danger.opacity(0.08)
+            } else {
+                theme.muted.opacity(0.5)
+            })
             .child(
-                Icon::new(IconName::TriangleAlert)
-                    .xsmall()
-                    .text_color(theme.danger),
+                Icon::new(if danger {
+                    IconName::TriangleAlert
+                } else {
+                    IconName::Info
+                })
+                .xsmall()
+                .text_color(if danger {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                }),
             )
             .child(
                 gpui::div()
                     .flex_1()
                     .text_xs()
-                    .text_color(theme.danger)
-                    .child(i18n::t("composer-delivery-error")),
+                    .text_color(if danger {
+                        theme.danger
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(text),
             )
             .when(retryable, |el| {
                 el.child(

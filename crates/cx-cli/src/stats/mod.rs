@@ -360,8 +360,7 @@ pub(crate) fn count_recent_session_tokens(
 
     let source = log_sources().into_iter().find(|s| match agent_id {
         "claude" => matches!(s.kind, SourceKind::Claude),
-        // `Codex.app` 为更名前的旧 ID，保留别名防止旧调用方漏计。
-        "codex" | "ChatGPT.app" | "Codex.app" => {
+        "codex" | "ChatGPT.app" => {
             matches!(s.kind, SourceKind::CodexLike(a) if a == AGENT_CODEX)
         }
         "copilot" => {

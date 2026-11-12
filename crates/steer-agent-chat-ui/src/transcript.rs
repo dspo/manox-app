@@ -164,6 +164,9 @@ pub struct Overlays {
     pub turn_seen: HashMap<String, Instant>,
     /// The next optimistic-bubble / ui-notice serial.
     pub next_serial: usize,
+    /// Turn ids an adoption consumed since the last drain: the durable
+    /// unsent ledger retires exactly these rows.
+    pub adopted_turns: Vec<String>,
 }
 
 /// A locally submitted user turn not yet confirmed by the fold.
@@ -346,6 +349,9 @@ fn adopt_bubbles(chat: &ChatState, overlays: &mut Overlays, nodes: &mut [Node]) 
         .filter(|(ix, _)| !paired.contains(ix))
         .map(|(_, bubble)| bubble)
         .collect();
+    for (turn_id, _) in &adopted {
+        overlays.adopted_turns.push(turn_id.clone());
+    }
     for node in nodes.iter_mut() {
         if let ItemKey::User(turn) = &node.key
             && let Some((_, steered)) = adopted.iter().find(|(id, _)| id == turn)
@@ -382,6 +388,42 @@ fn push_overlay_rows(overlays: &mut Overlays, nodes: &mut Vec<Node>) {
     }
 }
 
+/// The turn-opening message's author, peer flag and display text, read from
+/// the row's `x-manox` meta (manox folds authorship onto the journal row; the
+/// app is a pure AHP client, so this is the only face it has).
+fn turn_attribution(
+    message: &ahp_types::state::Message,
+) -> (Option<manox_agent::MessageAuthor>, bool, Option<String>) {
+    let Some(meta) = message
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get(manox_ahp::ext::META_KEY))
+    else {
+        return (None, false, None);
+    };
+    let author = meta
+        .get("author")
+        .and_then(|author| author.as_str())
+        .map(manox_agent::MessageAuthor::from_routing);
+    let peer = meta
+        .get("peer")
+        .and_then(|peer| peer.as_bool())
+        .unwrap_or(false);
+    let display_text = meta
+        .get("displayText")
+        .and_then(|text| text.as_str())
+        .map(str::to_string);
+    (author, peer, display_text)
+}
+
+/// A harness-injected opening with no body is not a user prompt: the fold
+/// still owes the response rows, but an empty authored frame is a phantom
+/// user turn. A human turn cannot be empty (the composer blocks empty sends).
+fn user_row_is_phantom(message: &ahp_types::state::Message) -> bool {
+    let (author, _, _) = turn_attribution(message);
+    message.text.trim().is_empty() && author == Some(manox_agent::MessageAuthor::Harness)
+}
+
 /// Project one turn: its user row, then a bounded scan of the response
 /// parts — runs of reasoning/tool-call parts fold into one activity segment,
 /// markdown parts become answer bubbles, everything else is a card or a
@@ -402,28 +444,33 @@ fn push_turn(
         .unwrap_or_else(|| env.role.to_string());
     let tag = ModelTag::resolve(&model_id);
     let timestamp = epoch_of(&turn.started_at);
-    nodes.push(Node {
-        key: ItemKey::User(turn.id.to_string()),
-        kind: ConvItem::User {
-            text: turn.message.text.clone(),
-            images: Vec::new(),
-            meta: Some(UserTurnMeta {
-                timestamp,
-                model_id: model_id.clone(),
-                access_mode: None,
-                // The badge is a projection fact: the fold says which turns
-                // opened on a steer row, so every projection of the row —
-                // first mount, re-projection, re-attach replay — stamps it
-                // identically.
-                steered: env.steered_turns.contains(turn.id),
-                author: None,
-                recipient: Some(env.recipient.clone()),
-                peer: false,
-            }),
-        },
-        role: model_id.clone(),
-        model_repeats: false,
-    });
+    let (author, peer, display_text) = turn_attribution(turn.message);
+    // A harness-authored empty opening is a synthetic boundary, not a prompt:
+    // skip the user row and start the turn at its first segment.
+    if !user_row_is_phantom(turn.message) {
+        nodes.push(Node {
+            key: ItemKey::User(turn.id.to_string()),
+            kind: ConvItem::User {
+                text: display_text.unwrap_or_else(|| turn.message.text.clone()),
+                images: Vec::new(),
+                meta: Some(UserTurnMeta {
+                    timestamp,
+                    model_id: model_id.clone(),
+                    access_mode: None,
+                    // The badge is a projection fact: the fold says which turns
+                    // opened on a steer row, so every projection of the row —
+                    // first mount, re-projection, re-attach replay — stamps it
+                    // identically.
+                    steered: env.steered_turns.contains(turn.id),
+                    author,
+                    recipient: Some(env.recipient.clone()),
+                    peer,
+                }),
+            },
+            role: model_id.clone(),
+            model_repeats: false,
+        });
+    }
 
     // The head splices above the turn's first segment — the index the first
     // segment will occupy if one appears. A segment-free turn earns no head
@@ -1283,6 +1330,59 @@ pub fn is_user(message: &ahp_types::state::Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opening(text: &str, meta: Option<serde_json::Value>) -> ahp_types::state::Message {
+        ahp_types::state::Message {
+            text: text.to_string(),
+            origin: ahp_types::state::MessageOrigin {
+                kind: ahp_types::state::MessageKind::User,
+            },
+            attachments: None,
+            model: None,
+            agent: None,
+            meta: meta.and_then(|meta| meta.as_object().cloned()),
+        }
+    }
+
+    /// The turn-opening row carries its author in the `x-manox` meta; the
+    /// app is a pure AHP client, so that is the only attribution face.
+    #[test]
+    fn a_turn_opening_reads_its_author_from_the_x_manox_meta() {
+        let message = opening(
+            "seed",
+            Some(serde_json::json!({
+                "x-manox": { "author": "harness", "peer": true, "displayText": "shown" }
+            })),
+        );
+        let (author, peer, display) = turn_attribution(&message);
+        assert_eq!(author, Some(manox_agent::MessageAuthor::Harness));
+        assert!(peer, "the peer flag rides the same meta");
+        assert_eq!(display.as_deref(), Some("shown"));
+    }
+
+    /// Human rows carry no attribution; a bodyless harness opening is a
+    /// phantom user frame and must not render as a prompt.
+    #[test]
+    fn a_bodyless_harness_opening_is_a_phantom_row() {
+        let human = opening("hi", None);
+        assert_eq!(turn_attribution(&human).0, None);
+        assert!(!user_row_is_phantom(&human));
+
+        let empty_harness = opening(
+            "",
+            Some(serde_json::json!({ "x-manox": { "author": "harness" } })),
+        );
+        assert!(user_row_is_phantom(&empty_harness));
+
+        let harness_notice = opening(
+            "[harness] the model was switched",
+            Some(serde_json::json!({ "x-manox": { "author": "harness" } })),
+        );
+        assert!(
+            !user_row_is_phantom(&harness_notice),
+            "a harness notice with a body is a real row"
+        );
+    }
 
     /// A create dispatch: `reason: "Dispatch"` + `to.spawn` + `prompt` —
     /// the unified Steer envelope the card renders.

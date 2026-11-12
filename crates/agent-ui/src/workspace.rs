@@ -62,7 +62,6 @@ pub use composer::SubmitBehavior;
 
 mod attach;
 
-mod catch_up;
 mod chat_column;
 /// The send-mode gallery (test-support only): a driver strip over the real
 /// composer, driven against a detached store. See `examples/send_mode_gallery.rs`.
@@ -297,8 +296,8 @@ enum RegistryTurnKind {
 // module (Phase 2 tail); these re-exports keep every bare/`super::` name in
 // the workspace family resolving unchanged.
 pub use steer_agent_chat_ui::column::{
-    AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, FollowUpState, PendingAsk,
-    PendingConfirmation, QueuedFollowUp, drain_queued_follow_ups, parse_pending_ask,
+    AskOption, AskQuestion, ComposerPlaceholderMode, DeferredUserTurn, PendingAsk,
+    PendingConfirmation, Submission, SubmissionState, drain_queued_follow_ups, parse_pending_ask,
     steer_group_insert_index,
 };
 
@@ -396,15 +395,19 @@ pub struct Workspace {
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
     pub(crate) chat: Entity<ChatColumn>,
+    /// User turns that have not reached the journal yet (durable across a
+    /// restart; see [`crate::unsent`]).
+    pub(crate) unsent: crate::unsent::UnsentOutbox,
+    /// Sessions this process has already attached. The unsent ledger's
+    /// draft recovery is a FIRST-open gesture: a session this process owns
+    /// in memory keeps its in-flight submits and parked cards, whose rows
+    /// retire on delivery — a re-attach must not pull them into the
+    /// composer as "unsent" drafts beside their live copies.
+    pub(crate) attached_sessions: std::collections::HashSet<String>,
     /// T-D: the shared single-connection multiplexer. One app-level
     /// `AgentClient` (client_id "desktop") carries every session; the
     /// per-session handles are leaves fed by its demux pump.
     pub(crate) multiplexer: gpui::Entity<crate::multiplexer::SessionMultiplexer>,
-    /// T-D: the shared app-level client used by the fire-and-forget
-    /// `send_note` and `Reply` verdict paths (no per-session connection).
-    /// (retired: the protocol client lives in the AhpStore)
-    #[allow(dead_code)]
-    pub(crate) client: (),
     /// Threads that were running when the user switched away (U6b⑤: the
     /// turn runs server-side and survives the switch on its own — the park
     /// keeps the session ATTACHED so the reclaim re-attaches in place with
@@ -658,6 +661,25 @@ impl Workspace {
         };
         let was_running = self.chat.read(cx).turn_active;
 
+        // A stop gesture whose receipt names nothing must say so: the host's
+        // answer (or its absence) is the only proof the user gets, and a
+        // silent no-op is exactly what made "stop did nothing" undebuggable.
+        let teardown = store.update(cx, |s, _| s.drain_teardown_notices());
+        for notice in teardown {
+            let text = match notice {
+                steer_agent_chat_ui::ahp_store::TeardownNotice::NothingInterrupted => {
+                    i18n::t("workspace-stop-nothing-interrupted").to_string()
+                }
+                steer_agent_chat_ui::ahp_store::TeardownNotice::Refused(err) => {
+                    i18n::t_str("workspace-stop-refused", &[("err", &err)]).to_string()
+                }
+                steer_agent_chat_ui::ahp_store::TeardownNotice::Closed => {
+                    i18n::t("workspace-stop-connection-closed").to_string()
+                }
+            };
+            self.add_info_message(text, cx);
+        }
+
         // Steer-consumption receipts retire their cards first, so the badge
         // they stamp (through a turn-id-bearing bubble the adoption consumes)
         // and the entrance ride they name land in the same projection pass.
@@ -755,6 +777,12 @@ impl Workspace {
             conv.reconcile(nodes, &env, cx)
         });
         self.apply_projection(change, cx);
+        // Adoption is delivery: the fold carries the turn, so its unsent row
+        // retires.
+        let adopted = conversation.update(cx, |conv, _| conv.drain_adopted_turns());
+        for turn_id in adopted {
+            self.unsent.remove(&turn_id);
+        }
 
         // The chat's presence is the loading gate's whole question now: a
         // landed fold carries whatever history it has (possibly none — the
@@ -1003,7 +1031,8 @@ impl Workspace {
             cwd: cwd.clone(),
             nav: NavHistory::default(),
             multiplexer,
-            client: (),
+            unsent: crate::unsent::UnsentOutbox::new(),
+            attached_sessions: std::collections::HashSet::new(),
             background_threads: Vec::new(),
             _mux_lists,
             _rail_updates: rail_updates,
@@ -2065,13 +2094,14 @@ impl Workspace {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let failure = self
+        let state = self
             .chat
             .read(cx)
             .store
             .as_ref()
-            .and_then(|(store, _)| store.read(cx).delivery_failure())?;
-        Some(self.render_delivery_error_strip(&failure, cx))
+            .map(|(store, _)| store.read(cx).link_state())?;
+        matches!(state, steer_agent_chat_ui::ahp_store::LinkState::Lost(_))
+            .then(|| self.render_delivery_error_strip(&state, cx))
     }
 
     /// The pending ask's interactive card state (diagnostic-only): the page
@@ -3135,6 +3165,7 @@ impl Workspace {
         &mut self,
         text: String,
         images: Vec<serde_json::Value>,
+        turn_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let Some((store, sid)) = self.chat.read(cx).store.clone() else {
@@ -3161,7 +3192,7 @@ impl Workspace {
                 }
             });
         }
-        let turn_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = turn_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         store.update(cx, |store, _| {
             store.submit_turn(&sid, &turn_id, text, None);
         });
@@ -3308,14 +3339,5 @@ fn wire_commands_has(commands: &serde_json::Value, name: &str, kind: &str) -> bo
         })
 }
 
-/// Read the sidebar decoration columns the wire `ThreadListItem` does not
-/// carry yet (U2 dual-track): per-thread project/tag/access-mode plus the
-/// registered-project folder list. Returns `(meta by id, distinct active
-/// project paths in list order, known projects)`. The meta map spans both
-/// store partitions (active rows win) so a tag lookup addresses archived
-/// rows too; the project-path list drives the chip's "recent, unregistered"
-/// section. This is the last kernel read feeding the sidebar — the cross-
-/// domain ask is to extend §D.5 `ThreadsUpdated` with these columns so it
-/// retires.
 #[cfg(test)]
 mod tests;

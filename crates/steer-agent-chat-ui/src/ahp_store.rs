@@ -964,6 +964,20 @@ pub enum DeliveryFailure {
     Stalled,
 }
 
+/// The connection's user-facing state: the honest answer to "can this
+/// conversation reach its host right now?".
+///
+/// `DeliveryFailure` is the reason a link is lost; this is the state machine
+/// around it. A dead handshake is `Connecting` until it gives up, a delivered
+/// write is `Ready`, and any latched transport/handshake/budget failure is
+/// `Lost` with the reason the composer can explain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkState {
+    Connecting,
+    Ready,
+    Lost(DeliveryFailure),
+}
+
 /// One dispatch outcome bound for the store's own pump: a failure latches
 /// the delivery face, a recovery retires a latched `Dispatch` face (a
 /// dispatch that leaves proves the transport answers again).
@@ -984,6 +998,35 @@ struct HandshakeParams {
     fold_tx: async_channel::Sender<()>,
 }
 
+/// What a stop gesture actually did, as the host's receipt reported it.
+///
+/// The gesture's optimistic UI (the stop pill's spinner, the fold's turn
+/// edges) is not proof: a host that is wedged or whose row id no longer
+/// resolves answers with an empty receipt, and the user must see that the
+/// stop did nothing rather than watching a turn that will never end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TeardownNotice {
+    /// Stop-all found no run to interrupt (and no task to stop).
+    NothingInterrupted,
+    /// The host refused the teardown command.
+    Refused(String),
+    /// The reply never landed (the connection closed first).
+    Closed,
+}
+
+/// Read a stop-all receipt: `None` when the host names something it stopped.
+fn stop_outcome(receipt: &Value) -> Option<TeardownNotice> {
+    let interrupted = receipt
+        .get("interruptedRuns")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let stopped = receipt
+        .get("stoppedTasks")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (interrupted == 0 && stopped == 0).then_some(TeardownNotice::NothingInterrupted)
+}
+
 /// The GPUI-facing store. One per process: the host is a singleton (L11) and
 /// this is its only desktop client.
 pub struct AhpStore {
@@ -998,6 +1041,10 @@ pub struct AhpStore {
     /// record time (through `session_of_chat`, exactly as the retired
     /// display-event bucket did).
     refusals: HashMap<String, VecDeque<RefusalRecord>>,
+    /// Stop-gesture outcomes the host's receipt (or its absence) reported.
+    /// Global, not per-session: the gesture is the user's, and the workspace
+    /// drains this on its next sync into a visible notice.
+    teardown_notices: VecDeque<TeardownNotice>,
     /// Steer-consumption receipts, keyed by the owning session — the
     /// composer's steer cards retire through these (a removal echo, or a
     /// wake turn-start carrying the pending id). State-keyed, not display
@@ -1091,6 +1138,7 @@ impl AhpStore {
             client: None,
             replay_pending: false,
             refusals: HashMap::new(),
+            teardown_notices: VecDeque::new(),
             steer_receipts: HashMap::new(),
             steered_turns: HashMap::new(),
             steer_boundaries: HashSet::new(),
@@ -1147,6 +1195,20 @@ impl AhpStore {
             return Some(DeliveryFailure::Stalled);
         }
         None
+    }
+
+    /// The connection's state for the composer: a latched failure is `Lost`,
+    /// an in-flight dial is `Connecting`, otherwise `Ready` — including the
+    /// pre-dial state, which must stay as quiet as a live link (the strip
+    /// paints `Lost` only; "never connected" is not a failure to report).
+    pub fn link_state(&self) -> LinkState {
+        if let Some(failure) = self.delivery_failure() {
+            return LinkState::Lost(failure);
+        }
+        if self.handshaking {
+            return LinkState::Connecting;
+        }
+        LinkState::Ready
     }
 
     /// Re-dial the host after a handshake failure (the composer error
@@ -1218,6 +1280,7 @@ impl AhpStore {
             client: None,
             replay_pending: false,
             refusals: HashMap::new(),
+            teardown_notices: VecDeque::new(),
             steer_receipts: HashMap::new(),
             steered_turns: HashMap::new(),
             steer_boundaries: HashSet::new(),
@@ -2269,10 +2332,28 @@ impl AhpStore {
                         let _ = this.update(cx, |store, _| {
                             store.reconcile_teardown_receipt(&receipt);
                         });
+                    } else if let Some(notice) = stop_outcome(&receipt) {
+                        let _ = this.update(cx, |store, cx| {
+                            store.teardown_notices.push_back(notice);
+                            cx.notify();
+                        });
                     }
                 }
-                Ok(Err(err)) => tracing::warn!(error = %err, "container teardown refused"),
-                Err(_) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(error = %err, "container teardown refused");
+                    let _ = this.update(cx, |store, cx| {
+                        store
+                            .teardown_notices
+                            .push_back(TeardownNotice::Refused(err.to_string()));
+                        cx.notify();
+                    });
+                }
+                Err(_) => {
+                    let _ = this.update(cx, |store, cx| {
+                        store.teardown_notices.push_back(TeardownNotice::Closed);
+                        cx.notify();
+                    });
+                }
             },
         )
         .detach();
@@ -2797,6 +2878,11 @@ impl AhpStore {
             self.optimistic_undo.retain(|(sid, ..)| sid != id_of(uri));
         }
         self.book.apply_snapshot(uri, state)
+    }
+
+    /// Take the stop-gesture notices recorded since the last sync.
+    pub fn drain_teardown_notices(&mut self) -> Vec<TeardownNotice> {
+        self.teardown_notices.drain(..).collect()
     }
 
     /// Take the refusal notices accumulated for one session — the caller
@@ -4801,6 +4887,7 @@ mod tests {
             client: None,
             replay_pending: false,
             refusals: HashMap::new(),
+            teardown_notices: VecDeque::new(),
             steer_receipts: HashMap::new(),
             steered_turns: HashMap::new(),
             steer_boundaries: HashSet::new(),
@@ -6002,6 +6089,7 @@ mod tests {
             client: None,
             replay_pending: false,
             refusals: HashMap::new(),
+            teardown_notices: VecDeque::new(),
             steer_receipts: HashMap::new(),
             steered_turns: HashMap::new(),
             steer_boundaries: HashSet::new(),
@@ -6403,5 +6491,35 @@ mod tests {
         // burst reversed — still one row per event, in the drain's sequence.
         let expected: Vec<String> = (0..BURST).rev().map(|i| format!("s-{i}")).collect();
         assert_eq!(order, expected, "the fold keeps the drain's order");
+    }
+
+    /// A stop receipt that names nothing is a visible notice; a receipt that
+    /// names an interrupted run (or a stopped task) is not.
+    #[test]
+    fn a_stop_receipt_with_no_interruptions_is_a_notice() {
+        assert_eq!(
+            stop_outcome(&serde_json::json!({
+                "interruptedRuns": [],
+                "stoppedTasks": 0,
+                "archived": []
+            })),
+            Some(TeardownNotice::NothingInterrupted)
+        );
+        assert_eq!(
+            stop_outcome(&serde_json::json!({
+                "interruptedRuns": ["t-1"],
+                "stoppedTasks": 0,
+                "archived": []
+            })),
+            None
+        );
+        assert_eq!(
+            stop_outcome(&serde_json::json!({
+                "interruptedRuns": [],
+                "stoppedTasks": 2,
+                "archived": []
+            })),
+            None
+        );
     }
 }

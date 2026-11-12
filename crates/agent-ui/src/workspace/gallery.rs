@@ -115,11 +115,12 @@ fn set_running(ws: &mut Workspace, on: bool, cx: &mut Context<Workspace>) {
     cx.notify();
 }
 
-/// Queue one card per [`FollowUpState`] so every badge and button cluster
+/// Queue one card per [`SubmissionState`] so every badge and button cluster
 /// is on screen at once.
 fn preset_queue(ws: &mut Workspace, cx: &mut Context<Workspace>) {
-    let card = |text: &str, state| QueuedFollowUp {
+    let card = |text: &str, state| Submission {
         turn: DeferredUserTurn {
+            unsent_id: uuid::Uuid::new_v4().to_string(),
             text: text.to_string(),
             images: Vec::new(),
             meta: crate::conversation::UserTurnMeta::new(0, "gallery".to_string(), None),
@@ -131,12 +132,12 @@ fn preset_queue(ws: &mut Workspace, cx: &mut Context<Workspace>) {
         chat.queued_follow_ups = [
             card(
                 "先只看失败的测试",
-                FollowUpState::SteerPending {
+                SubmissionState::SteerPending {
                     message_id: "gallery-steer-1".to_string(),
                 },
             ),
-            card("这条发送没能上线，可重试", FollowUpState::Failed),
-            card("把错误日志再贴一遍", FollowUpState::Queued),
+            card("这条发送没能上线，可重试", SubmissionState::Failed),
+            card("把错误日志再贴一遍", SubmissionState::Queued),
         ]
         .into_iter()
         .collect();
@@ -165,7 +166,7 @@ impl Workspace {
             .queued_follow_ups
             .iter()
             .find_map(|item| match &item.state {
-                FollowUpState::SteerPending { message_id } => Some(message_id.clone()),
+                SubmissionState::SteerPending { message_id } => Some(message_id.clone()),
                 _ => None,
             });
         if let Some(id) = id {
@@ -193,6 +194,18 @@ impl Workspace {
     /// Submit a draft with one of the three streaming behaviors.
     pub fn gallery_submit(&mut self, text: &str, behavior: SubmitBehavior, cx: &mut Context<Self>) {
         self.send_user_turn(text.to_string(), Vec::new(), behavior, cx);
+    }
+
+    /// Drive the composer's real interrupt gesture (⇧⌘↩): the empty-input
+    /// guard is part of this path, so this is the regression seam.
+    pub fn gallery_submit_interrupt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit_interrupt(window, cx);
+    }
+
+    /// Clear the composer's current draft.
+    pub fn gallery_clear_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat_input(cx)
+            .update(cx, |state, cx| state.set_value("", window, cx));
     }
 
     /// Settle with (or without) the cancelled bit — the pump's
@@ -265,9 +278,10 @@ impl Workspace {
             .iter()
             .map(|item| {
                 let lane = match &item.state {
-                    FollowUpState::Queued => "queued",
-                    FollowUpState::SteerPending { message_id: _ } => "steer",
-                    FollowUpState::Failed => "failed",
+                    SubmissionState::Queued => "queued",
+                    SubmissionState::SteerPending { message_id: _ } => "steer",
+                    SubmissionState::Failed => "failed",
+                    SubmissionState::Interrupting => "interrupt",
                 };
                 (
                     lane.to_string(),
@@ -357,7 +371,7 @@ impl Workspace {
             .queued_follow_ups
             .iter()
             .find_map(|item| match &item.state {
-                FollowUpState::SteerPending { message_id } => Some(message_id.clone()),
+                SubmissionState::SteerPending { message_id } => Some(message_id.clone()),
                 _ => None,
             })
     }
