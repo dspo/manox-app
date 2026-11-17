@@ -1486,6 +1486,11 @@ pub fn render_notice(
 /// the path's language resolves (`Read`'s hashline body, `Write`'s written
 /// content).
 fn tool_lang(entry: &ToolCallItem) -> Option<String> {
+    // The Codemode panel's body leads with the script, so the highlighter
+    // reads it as the JavaScript it is.
+    if entry.name.as_str() == manox_agent::tools::CODEMODE {
+        return Some("javascript".to_string());
+    }
     let file_shaped = matches!(
         entry.name.as_str(),
         manox_agent::tools::READ | manox_agent::tools::WRITE
@@ -3215,6 +3220,29 @@ fn tool_panel_body(entry: &ToolCallItem) -> (PanelKind, String) {
             (PanelKind::File, content)
         }
         x if x == manox_agent::tools::EDIT => (PanelKind::Diff, raw),
+        // Codemode (the retired Py tool's successor): the script IS the
+        // intent — Bash's command, Codemode's `code` — so the body leads
+        // with it and appends the run's rendered output under an i18n
+        // marker. On failure the output carries the error, so the default
+        // arm surfaces that instead of the attempted script.
+        x if x == manox_agent::tools::CODEMODE && !entry.is_error => {
+            let code = entry
+                .input
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let body = if code.is_empty() {
+                raw
+            } else if raw.is_empty() {
+                code.to_string()
+            } else {
+                format!(
+                    "{code}\n\n// ── {} ──\n{raw}",
+                    i18n::t("tool-codemode-output")
+                )
+            };
+            (PanelKind::Plain, body)
+        }
         _ => (PanelKind::Plain, raw),
     }
 }
@@ -3459,6 +3487,46 @@ mod tests {
     fn live_tail_short_output_unchanged() {
         let s = "line\nline2\n";
         assert_eq!(live_tail(s), s);
+    }
+
+    /// The Codemode panel leads with the script (the tool's intent — Bash's
+    /// command, Codemode's `code`) and appends the run's rendered output
+    /// under the i18n marker; a failing run shows the error alone.
+    #[test]
+    fn codemode_panel_leads_with_the_script_and_appends_the_output() {
+        let entry_for = |is_error: bool| ToolCallItem {
+            id: "cm-1".into(),
+            name: manox_agent::tools::CODEMODE.into(),
+            title: "run".into(),
+            status: ToolCallStatus::Success,
+            input: serde_json::json!({"code": "text('hi');"}),
+            streaming: false,
+            collapsed: false,
+            user_toggled: false,
+            panel: None,
+            card: None,
+            cwd: None,
+            is_error,
+            stream: Default::default(),
+            output: "hi".into(),
+        };
+        let (kind, body) = tool_panel_body(&entry_for(false));
+        assert!(matches!(
+            kind,
+            steer_components::markdown::terminal_panel::PanelKind::Plain
+        ));
+        assert!(
+            body.starts_with("text('hi');"),
+            "the script leads the body: {body}"
+        );
+        let marker = i18n::t("tool-codemode-output");
+        assert!(
+            body.contains(&format!("// ── {marker} ──\nhi")),
+            "the output rides under the marker: {body}"
+        );
+        // A failed run's output is the error — the script yields to it.
+        let (_, failed) = tool_panel_body(&entry_for(true));
+        assert_eq!(failed, "hi", "the error stands alone: {failed}");
     }
 
     /// A host that records what the ask card asked it to do.
