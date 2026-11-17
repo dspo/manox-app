@@ -1486,6 +1486,11 @@ pub fn render_notice(
 /// the path's language resolves (`Read`'s hashline body, `Write`'s written
 /// content).
 fn tool_lang(entry: &ToolCallItem) -> Option<String> {
+    // The Codemode panel's body leads with the script, so the highlighter
+    // reads it as the JavaScript it is.
+    if entry.name.as_str() == manox_agent::tools::CODEMODE {
+        return Some("javascript".to_string());
+    }
     let file_shaped = matches!(
         entry.name.as_str(),
         manox_agent::tools::READ | manox_agent::tools::WRITE
@@ -1811,6 +1816,7 @@ fn render_activity_entry(
             collapsed,
             user_toggled: _,
             markdown,
+            duration_ms,
         } => reasoning_step(
             id,
             entry_id,
@@ -1818,6 +1824,7 @@ fn render_activity_entry(
             *streaming,
             *collapsed,
             markdown.clone(),
+            *duration_ms,
             owner.clone(),
             eix,
             cix,
@@ -1959,6 +1966,7 @@ fn reasoning_step(
     streaming: bool,
     collapsed: bool,
     markdown: Option<ChatDocument>,
+    duration_ms: Option<i64>,
     owner: Option<WeakEntity<MessageItem>>,
     eix: usize,
     cix: usize,
@@ -1983,9 +1991,22 @@ fn reasoning_step(
     if !first_line.is_empty() {
         step = step.summary(first_line);
     }
-    let mut step = step
-        .title(i18n::t("message-reasoning").to_string())
-        .disclosed(!collapsed, toggle);
+    // The settled label is numeric when the anchor says so: the `x-manox`
+    // timing row's milliseconds, on the same whole-second floor every other
+    // duration on the screen uses (the turn head's `ms / 1000`, the live
+    // timer's `as_secs`). `max(1)` keeps a sub-second run off a false "0s";
+    // 0ms — the <1ms contract — stays durationless entirely, and a round
+    // without an anchor (pre-anchor journals, missing ext fold) keeps the
+    // plain label.
+    let title = match (!streaming, duration_ms) {
+        (true, Some(ms)) if ms > 0 => i18n::t_str(
+            "message-reasoning-thought",
+            &[("secs", &((ms / 1000).max(1)).to_string())],
+        )
+        .to_string(),
+        _ => i18n::t("message-reasoning").to_string(),
+    };
+    let mut step = step.title(title).disclosed(!collapsed, toggle);
     if !collapsed && !text.is_empty() {
         // The persistent `ChatDocument` (synced by the streaming/rebuild path)
         // carries the document; fall back to a per-frame mount only before the
@@ -3200,6 +3221,29 @@ fn tool_panel_body(entry: &ToolCallItem) -> (PanelKind, String) {
             (PanelKind::File, content)
         }
         x if x == manox_agent::tools::EDIT => (PanelKind::Diff, raw),
+        // Codemode (the retired Py tool's successor): the script IS the
+        // intent — Bash's command, Codemode's `code` — so the body leads
+        // with it and appends the run's rendered output under an i18n
+        // marker. On failure the output carries the error, so the default
+        // arm surfaces that instead of the attempted script.
+        x if x == manox_agent::tools::CODEMODE && !entry.is_error => {
+            let code = entry
+                .input
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let body = if code.is_empty() {
+                raw
+            } else if raw.is_empty() {
+                code.to_string()
+            } else {
+                format!(
+                    "{code}\n\n// ── {} ──\n{raw}",
+                    i18n::t("tool-codemode-output")
+                )
+            };
+            (PanelKind::Plain, body)
+        }
         _ => (PanelKind::Plain, raw),
     }
 }
@@ -3444,6 +3488,46 @@ mod tests {
     fn live_tail_short_output_unchanged() {
         let s = "line\nline2\n";
         assert_eq!(live_tail(s), s);
+    }
+
+    /// The Codemode panel leads with the script (the tool's intent — Bash's
+    /// command, Codemode's `code`) and appends the run's rendered output
+    /// under the i18n marker; a failing run shows the error alone.
+    #[test]
+    fn codemode_panel_leads_with_the_script_and_appends_the_output() {
+        let entry_for = |is_error: bool| ToolCallItem {
+            id: "cm-1".into(),
+            name: manox_agent::tools::CODEMODE.into(),
+            title: "run".into(),
+            status: ToolCallStatus::Success,
+            input: serde_json::json!({"code": "text('hi');"}),
+            streaming: false,
+            collapsed: false,
+            user_toggled: false,
+            panel: None,
+            card: None,
+            cwd: None,
+            is_error,
+            stream: Default::default(),
+            output: "hi".into(),
+        };
+        let (kind, body) = tool_panel_body(&entry_for(false));
+        assert!(matches!(
+            kind,
+            steer_components::markdown::terminal_panel::PanelKind::Plain
+        ));
+        assert!(
+            body.starts_with("text('hi');"),
+            "the script leads the body: {body}"
+        );
+        let marker = i18n::t("tool-codemode-output");
+        assert!(
+            body.contains(&format!("// ── {marker} ──\nhi")),
+            "the output rides under the marker: {body}"
+        );
+        // A failed run's output is the error — the script yields to it.
+        let (_, failed) = tool_panel_body(&entry_for(true));
+        assert_eq!(failed, "hi", "the error stands alone: {failed}");
     }
 
     /// A host that records what the ask card asked it to do.
@@ -3753,6 +3837,7 @@ mod tests {
                 collapsed: false,
                 user_toggled: true,
                 markdown: None,
+                duration_ms: None,
             });
             thinking.entries.push(ActivityEntry::Tool(ToolCallItem {
                 id: "tool-long-final-output".into(),
@@ -4120,6 +4205,7 @@ body", cx);
             collapsed: true,
             user_toggled: false,
             markdown: None,
+            duration_ms: None,
         });
         t.entries.push(tool("1", "Read", ToolCallStatus::Success));
         t.entries.push(tool("2", "Edit", ToolCallStatus::Error));

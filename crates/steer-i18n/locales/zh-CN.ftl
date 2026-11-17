@@ -108,6 +108,10 @@ sidebar-status-unread = 未读
 ### message.rs
 
 message-reasoning = 思考
+# 落定思考块的标题（#1022 的耗时锚点；无锚点的回合仍用 message-reasoning）。
+message-reasoning-thought = 思考了 { $secs }s
+# Codemode 卡输出段的分隔标记（脚本本体之后、运行输出之前）。
+tool-codemode-output = 输出
 
 message-error = 错误
 

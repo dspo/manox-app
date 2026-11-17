@@ -154,6 +154,7 @@ fn env() -> ProjectEnv<'static> {
         promoted_confirmation: None,
         entering_turns: &[],
         steered_turns: no_steered_turns(),
+        reasoning_timings: None,
     }
 }
 
@@ -641,6 +642,7 @@ async fn a_panel_above_does_not_eat_a_folded_card_s_click(cx: &mut TestAppContex
         promoted_confirmation: None,
         entering_turns: &[],
         steered_turns: no_steered_turns(),
+        reasoning_timings: None,
     };
     cx.update(|cx| {
         conversation.update(cx, |conversation, cx| {
@@ -713,6 +715,7 @@ async fn clicking_a_folded_card_header_flips_the_fold_authority(cx: &mut TestApp
         promoted_confirmation: None,
         entering_turns: &[],
         steered_turns: no_steered_turns(),
+        reasoning_timings: None,
     };
     cx.update(|cx| {
         conversation.update(cx, |conversation, cx| {

@@ -285,6 +285,7 @@ fn project_fold(
 
         entering_turns: &[],
         steered_turns: steer_agent_chat_ui::transcript::no_steered_turns(),
+        reasoning_timings: None,
     };
     conversation.update(cx, |c, cx| {
         let nodes = c.stage(Some(&fold.chat), &env);

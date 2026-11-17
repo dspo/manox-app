@@ -202,6 +202,13 @@ pub enum ActivityEntry {
         /// path), mirroring the top-level reasoning body. `None` until first
         /// sync (`MessageItem::sync_reasoning_entry`).
         markdown: Option<steer_components::markdown::ChatDocument>,
+        /// The round's settled duration in milliseconds, from the
+        /// `x-manox/reasoningTiming` ext row keyed by the wire part id
+        /// (`x-manox` carries the clock AHP's `ReasoningResponsePart`
+        /// lacks). `None` while the round streams, before the row lands,
+        /// or when the anchor predates it — each face renders the
+        /// durationless label.
+        duration_ms: Option<i64>,
     },
     /// One tool invocation (reuses `ToolCallItem` for status/output/collapse).
     Tool(ToolCallItem),
@@ -1078,11 +1085,13 @@ fn sync_segment(
                                 text,
                                 streaming,
                                 markdown,
+                                duration_ms,
                                 ..
                             },
                             ActivityEntry::Reasoning {
                                 text: n_text,
                                 streaming: n_streaming,
+                                duration_ms: n_duration_ms,
                                 ..
                             },
                         ) => {
@@ -1094,6 +1103,11 @@ fn sync_segment(
                                 }
                             }
                             dirty |= set(streaming, *n_streaming);
+                            // The timing row lands at the run's close — the
+                            // projection carries it from then on, and this
+                            // in-place set is what turns the settled label
+                            // numeric without a remount.
+                            dirty |= set(duration_ms, *n_duration_ms);
                             dirty
                         }
                         (ActivityEntry::Tool(old), ActivityEntry::Tool(new)) => {
@@ -1135,6 +1149,7 @@ fn sync_segment(
                             id,
                             text,
                             streaming,
+                            duration_ms,
                             ..
                         } => {
                             let at = t.entries.len();
@@ -1145,6 +1160,7 @@ fn sync_segment(
                                 collapsed: false,
                                 user_toggled: false,
                                 markdown: None,
+                                duration_ms: *duration_ms,
                             });
                             mount_reasoning.push(at);
                         }
@@ -1376,6 +1392,7 @@ mod tests {
                 promoted_confirmation: None,
                 entering_turns: &[],
                 steered_turns: steered,
+                reasoning_timings: None,
             },
             host.clone(),
         )

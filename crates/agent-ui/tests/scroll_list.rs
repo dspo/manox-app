@@ -571,6 +571,7 @@ fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
             collapsed: false,
             user_toggled: true,
             markdown: None,
+            duration_ms: None,
         },
         ActivityEntry::Tool(ToolCallItem {
             id: "grep-properties".into(),

@@ -122,6 +122,12 @@ sidebar-status-unread = Unread
 ### message.rs
 
 message-reasoning = Reasoning
+# Settled thinking round title (the #1022 timing anchor; rounds without an
+# anchor keep the durationless message-reasoning label).
+message-reasoning-thought = Thought for { $secs }s
+# The Codemode card's output-section marker (after the script body, before
+# the run's rendered output).
+tool-codemode-output = Output
 
 message-error = Error
 

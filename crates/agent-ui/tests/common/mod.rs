@@ -557,6 +557,7 @@ pub fn conversation_from_chat(
         promoted_confirmation: None,
         entering_turns: &[],
         steered_turns: steer_agent_chat_ui::transcript::no_steered_turns(),
+        reasoning_timings: None,
     };
     cx.new(|cx| {
         let mut conversation = agent_ui::conversation::ConversationState::new(recipient.clone());
