@@ -246,6 +246,12 @@ pub struct ProjectEnv<'a> {
     /// card's retire), so the badge survives re-attach replays and the
     /// removal-before-partition wire order alike.
     pub steered_turns: &'a std::collections::HashSet<String>,
+    /// The chat's reasoning-timing registry — the `x-manox-metrics:/<chat-id>`
+    /// ext fold's `reasoning_timings` (wire part id → the settled timing
+    /// row `x-manox/reasoningTiming` published; the clock AHP's
+    /// `ReasoningResponsePart` lacks). `None` renders the durationless
+    /// label, the pre-anchor face.
+    pub reasoning_timings: Option<&'a std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 /// The empty steered set, for projections that cannot carry steers (a
@@ -518,9 +524,20 @@ fn push_turn(
                 if reasoning.content.is_empty() {
                     continue;
                 }
+                // The round's settled clock: the ext fold's timing row keyed
+                // by the wire part id (`durationMs`; 0 stays 0 — the
+                // <1ms contract leaves the label durationless).
+                let duration_ms = env
+                    .reasoning_timings
+                    .and_then(|rows| rows.get(&reasoning.id))
+                    .and_then(|row| row.get("durationMs"))
+                    .and_then(serde_json::Value::as_i64);
                 segment_parts.push((
                     reasoning_entry_id(&reasoning.id),
-                    SegmentEntryNode::Reasoning(reasoning),
+                    SegmentEntryNode::Reasoning {
+                        part: reasoning,
+                        duration_ms,
+                    },
                 ));
             }
             ResponsePart::ToolCall(call) => {
@@ -796,7 +813,11 @@ fn tool_card_node(call_id: &str, state: &ToolCallState, env: &ProjectEnv) -> Nod
 /// One segment entry mid-projection: the raw part reference, lowered into an
 /// activity entry when the segment flushes.
 enum SegmentEntryNode<'a> {
-    Reasoning(&'a ReasoningResponsePart),
+    Reasoning {
+        part: &'a ReasoningResponsePart,
+        /// The settled duration from the ext timing row, if it has landed.
+        duration_ms: Option<i64>,
+    },
     Tool(&'a ToolCallState),
 }
 
@@ -819,13 +840,14 @@ fn flush_segment(
     let entries: Vec<ActivityEntry> = parts
         .drain(..)
         .map(|(id, entry)| match entry {
-            SegmentEntryNode::Reasoning(reasoning) => ActivityEntry::Reasoning {
+            SegmentEntryNode::Reasoning { part, duration_ms } => ActivityEntry::Reasoning {
                 id,
-                text: reasoning.content.clone(),
+                text: part.content.clone(),
                 streaming: turn.active,
                 collapsed: !turn.active,
                 user_toggled: false,
                 markdown: None,
+                duration_ms,
             },
             SegmentEntryNode::Tool(state) => {
                 ActivityEntry::Tool(tool_entry_item(&id, state, turn.active))

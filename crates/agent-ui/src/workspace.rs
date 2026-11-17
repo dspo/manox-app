@@ -746,6 +746,13 @@ impl Workspace {
             .as_ref()
             .map(|parked| parked.tool_call_id.clone());
         let conversation = self.chat_conversation(cx);
+        // The reasoning rounds' settled clocks, cloned out of the fold so the
+        // env borrows a local (the stage below re-borrows the store).
+        let reasoning_timings = {
+            let view = store.read(cx);
+            let leaf = crate::ahp_store::leaf(&view.book, &sid);
+            leaf.reasoning_timings.cloned()
+        };
         let env = steer_agent_chat_ui::transcript::ProjectEnv {
             role: &role,
             recipient: &recipient,
@@ -755,6 +762,7 @@ impl Workspace {
             promoted_confirmation: promoted.as_deref(),
             entering_turns: &entering,
             steered_turns: &steered_turns,
+            reasoning_timings: reasoning_timings.as_ref(),
         };
         let change = conversation.update(cx, |conv, cx| {
             let refusals = store.update(cx, |s, _| s.drain_refusals(&sid));
@@ -856,6 +864,11 @@ impl Workspace {
             .as_ref()
             .map(|parked| parked.tool_call_id.clone());
         let steered_turns = store.update(cx, |s, _| s.steered_turns(&sid));
+        let reasoning_timings = {
+            let view = store.read(cx);
+            let leaf = crate::ahp_store::leaf(&view.book, &sid);
+            leaf.reasoning_timings.cloned()
+        };
         let env = steer_agent_chat_ui::transcript::ProjectEnv {
             role: &role,
             recipient: &recipient,
@@ -865,6 +878,7 @@ impl Workspace {
             promoted_confirmation: promoted.as_deref(),
             entering_turns: &[],
             steered_turns: &steered_turns,
+            reasoning_timings: reasoning_timings.as_ref(),
         };
         conversation.update(cx, |conv, cx| {
             let chat = {

@@ -1811,6 +1811,7 @@ fn render_activity_entry(
             collapsed,
             user_toggled: _,
             markdown,
+            duration_ms,
         } => reasoning_step(
             id,
             entry_id,
@@ -1818,6 +1819,7 @@ fn render_activity_entry(
             *streaming,
             *collapsed,
             markdown.clone(),
+            *duration_ms,
             owner.clone(),
             eix,
             cix,
@@ -1959,6 +1961,7 @@ fn reasoning_step(
     streaming: bool,
     collapsed: bool,
     markdown: Option<ChatDocument>,
+    duration_ms: Option<i64>,
     owner: Option<WeakEntity<MessageItem>>,
     eix: usize,
     cix: usize,
@@ -1983,9 +1986,21 @@ fn reasoning_step(
     if !first_line.is_empty() {
         step = step.summary(first_line);
     }
-    let mut step = step
-        .title(i18n::t("message-reasoning").to_string())
-        .disclosed(!collapsed, toggle);
+    // The settled label is numeric when the anchor says so: the `x-manox`
+    // timing row's milliseconds, ceilinged into the same whole-second face
+    // the live self-timer renders. 0ms is the <1ms contract — it stays
+    // durationless rather than reading "thought for 0s" — and a round
+    // without an anchor (pre-anchor journals, missing ext fold) keeps the
+    // plain label.
+    let title = match (!streaming, duration_ms) {
+        (true, Some(ms)) if ms > 0 => i18n::t_str(
+            "message-reasoning-thought",
+            &[("secs", &((ms as u64).div_ceil(1000)).to_string())],
+        )
+        .to_string(),
+        _ => i18n::t("message-reasoning").to_string(),
+    };
+    let mut step = step.title(title).disclosed(!collapsed, toggle);
     if !collapsed && !text.is_empty() {
         // The persistent `ChatDocument` (synced by the streaming/rebuild path)
         // carries the document; fall back to a per-frame mount only before the
@@ -3753,6 +3768,7 @@ mod tests {
                 collapsed: false,
                 user_toggled: true,
                 markdown: None,
+                duration_ms: None,
             });
             thinking.entries.push(ActivityEntry::Tool(ToolCallItem {
                 id: "tool-long-final-output".into(),
@@ -4120,6 +4136,7 @@ body", cx);
             collapsed: true,
             user_toggled: false,
             markdown: None,
+            duration_ms: None,
         });
         t.entries.push(tool("1", "Read", ToolCallStatus::Success));
         t.entries.push(tool("2", "Edit", ToolCallStatus::Error));

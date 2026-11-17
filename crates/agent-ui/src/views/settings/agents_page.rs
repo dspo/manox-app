@@ -620,9 +620,9 @@ fn prompt_toggle(view: &SettingsView, theme: &Theme, cx: &mut Context<SettingsVi
 /// delegation tools (those are agents, not tools).
 fn preset_tool_groups() -> Vec<(&'static str, Vec<&'static str>)> {
     use manox_agent::tools::{
-        ASK_USER_QUESTION, BASH, BASH_OUTPUT, CLIPBOARD_READ, CREATE_GOAL, EDIT, GET_GOAL, GLOB,
-        GREP, OPEN, PY, READ, STEER, TASK_LIST, TASK_STOP, UPDATE_GOAL, UPDATE_PLAN, WEB_FETCH,
-        WRITE,
+        ASK_USER_QUESTION, BASH, BASH_OUTPUT, CLIPBOARD_READ, CODEMODE, CREATE_GOAL, EDIT,
+        GET_GOAL, GLOB, GREP, OPEN, READ, STEER, TASK_LIST, TASK_STOP, UPDATE_GOAL, UPDATE_PLAN,
+        WEB_FETCH, WRITE,
     };
 
     let mut web = vec![WEB_FETCH];
@@ -632,7 +632,10 @@ fn preset_tool_groups() -> Vec<(&'static str, Vec<&'static str>)> {
             "agents-tools-group-files",
             vec![READ, WRITE, EDIT, GREP, GLOB, "Ls"],
         ),
-        ("agents-tools-group-shell", vec![BASH, BASH_OUTPUT, PY]),
+        (
+            "agents-tools-group-shell",
+            vec![BASH, BASH_OUTPUT, CODEMODE],
+        ),
         ("agents-tools-group-web", web),
         (
             "agents-tools-group-interaction",

@@ -402,6 +402,20 @@ impl ChannelBook {
         })
     }
 
+    /// The chat's reasoning-timing registry — the `x-manox-metrics:/<chat-id>`
+    /// ext bucket's `reasoning_timings` (wire part id → the settled timing
+    /// row `x-manox/reasoningTiming` published; the clock AHP's
+    /// `ReasoningResponsePart` lacks). `None` when no timing row has folded
+    /// for the chat — the caller renders the durationless label.
+    pub fn reasoning_timings(
+        &self,
+        chat_id: &str,
+    ) -> Option<&std::collections::BTreeMap<String, Value>> {
+        self.ext
+            .get(&format!("{}{chat_id}", ext::channels::METRICS))
+            .and_then(|state| state.reasoning_timings.as_ref())
+    }
+
     /// Apply one action envelope's action. Typed actions fold through the AHP
     /// reducers; extension actions (and the baseline) fold through the x-manox
     /// reducer, which is unknown-tolerant by design.
@@ -3285,6 +3299,9 @@ pub struct LeafView<'a> {
     pub chat: Option<&'a ChatState>,
     pub ext: Option<&'a XManoxState>,
     pub metrics: Option<&'a ConversationMetrics>,
+    /// The chat's reasoning-timing registry — the metrics bucket's
+    /// `reasoning_timings` (same key authority as `metrics`).
+    pub reasoning_timings: Option<&'a std::collections::BTreeMap<String, Value>>,
 }
 
 /// Parse a tool call's inline input when it has the unified Steer Dispatch
@@ -3409,6 +3426,7 @@ pub fn leaf<'a>(book: &'a ChannelBook, session_id: &'a str) -> LeafView<'a> {
         metrics: book
             .metrics
             .get(&format!("{}{chat_id}", manox_ahp::ext::channels::METRICS)),
+        reasoning_timings: book.reasoning_timings(&chat_id),
     }
 }
 
@@ -4296,6 +4314,22 @@ mod tests {
         for action in &actions {
             book.apply(&uri, action);
         }
+        // The run's settled clock lands on the metrics channel's ext bag
+        // (upstream's `x-manox/reasoningTiming` row) — the store reads the
+        // round's duration off the same key authority as its metrics.
+        book.apply_unknown(
+            "x-manox-metrics:/c-1",
+            &serde_json::json!({
+                "type": manox_ahp::ext::actions::BASELINE,
+                "state": {
+                    "reasoningTimings": {
+                        "p-r1": {"partId": "p-r1", "turnId": "t-1",
+                                 "startedAt": "2026-10-14T00:00:00Z",
+                                 "durationMs": 4200},
+                    }
+                }
+            }),
+        );
         let chat = book.chats.get("c-1").expect("the fold holds the chat");
         let recipient = manox_agent::MessageAuthor::Lead;
         let host = crate::host::noop_host();
@@ -4308,6 +4342,7 @@ mod tests {
             promoted_confirmation: None,
             entering_turns: &[],
             steered_turns: no_steered_turns(),
+            reasoning_timings: book.reasoning_timings("c-1"),
         };
         let mut overlays = Overlays::default();
         let nodes = project(Some(chat), &mut overlays, &env);
@@ -4329,6 +4364,16 @@ mod tests {
         assert!(
             segment.entries.iter().any(|e| matches!(e, crate::conversation::ActivityEntry::Reasoning { text, .. } if text == "thinking about it")),
             "the reasoning round folds into the segment"
+        );
+        assert!(
+            segment.entries.iter().any(|e| matches!(
+                e,
+                crate::conversation::ActivityEntry::Reasoning {
+                    duration_ms: Some(4200),
+                    ..
+                }
+            )),
+            "the settled round carries the ext timing row's duration"
         );
         // The settled turn derives its process head from the state's duration,
         // spliced between its user row and the first segment.

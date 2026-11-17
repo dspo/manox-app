@@ -122,6 +122,9 @@ sidebar-status-unread = Unread
 ### message.rs
 
 message-reasoning = Reasoning
+# Settled thinking round title (the #1022 timing anchor; rounds without an
+# anchor keep the durationless message-reasoning label).
+message-reasoning-thought = Thought for { $secs }s
 
 message-error = Error
 

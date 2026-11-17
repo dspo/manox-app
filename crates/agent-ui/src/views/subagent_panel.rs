@@ -120,6 +120,7 @@ impl SubagentPanel {
 
             entering_turns: &[],
             steered_turns: steer_agent_chat_ui::transcript::no_steered_turns(),
+            reasoning_timings: None,
         };
         let change = self.conversation.update(cx, |conv, cx| {
             let nodes = {

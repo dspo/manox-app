@@ -108,6 +108,8 @@ sidebar-status-unread = 未读
 ### message.rs
 
 message-reasoning = 思考
+# 落定思考块的标题（#1022 的耗时锚点；无锚点的回合仍用 message-reasoning）。
+message-reasoning-thought = 思考了 { $secs }s
 
 message-error = 错误
 
