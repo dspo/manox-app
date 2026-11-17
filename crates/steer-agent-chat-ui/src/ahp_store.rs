@@ -523,22 +523,29 @@ impl ChannelBook {
         if let Some(reason) = value.get("rejectionReason").and_then(Value::as_str) {
             return FoldEffect::Rejected(reason.to_string());
         }
-        if channel.starts_with(ext::channels::METRICS) {
-            if value.get("type").and_then(Value::as_str) == Some(ext::actions::METRICS_CHANGED) {
-                let kind = value
-                    .pointer("/state/kind")
-                    .or_else(|| value.get("kind"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let data = value
-                    .pointer("/state/data")
-                    .or_else(|| value.get("data"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                let book = self.metrics.entry(channel.to_string()).or_default();
-                if book.apply(kind, &data) {
-                    return FoldEffect::Changed;
-                }
+        // The aggregate arm owns `metricsChanged` completely — both outcomes
+        // return here. Everything else on the metrics channel falls through
+        // to the generic ext fold below: the reasoning-timing row among them
+        // (`x-manox/reasoningTiming`) is extension state like any other,
+        // its bucket created by the channel's own baseline. An early
+        // `Ignored` here would strand a timing row until the next
+        // (re)subscribe, and the settle frame's number would never show.
+        if channel.starts_with(ext::channels::METRICS)
+            && value.get("type").and_then(Value::as_str) == Some(ext::actions::METRICS_CHANGED)
+        {
+            let kind = value
+                .pointer("/state/kind")
+                .or_else(|| value.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let data = value
+                .pointer("/state/data")
+                .or_else(|| value.get("data"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let book = self.metrics.entry(channel.to_string()).or_default();
+            if book.apply(kind, &data) {
+                return FoldEffect::Changed;
             }
             return FoldEffect::Ignored;
         }
@@ -862,6 +869,14 @@ pub fn work_uri(id: &str) -> String {
     format!("{}{id}", manox_ahp::ext::channels::WORK)
 }
 
+/// Build the metrics extension channel URI for a chat id — the home of the
+/// conversation-metrics aggregate and the reasoning-timing rows (upstream's
+/// `x-manox/reasoningTiming`). Keyed by the chat id; the landing form is the
+/// session id (see `leaf`).
+pub fn metrics_uri(id: &str) -> String {
+    format!("{}{id}", manox_ahp::ext::channels::METRICS)
+}
+
 // ---------------------------------------------------------------------------
 // AhpStore: the entity the UI binds.
 // ---------------------------------------------------------------------------
@@ -1109,6 +1124,10 @@ pub struct AhpStore {
     /// would otherwise re-issue the subscribe and pile host-side
     /// subscriptions. The store never unsubscribes, so the set only grows.
     thread_subs: std::collections::HashSet<String>,
+    /// The sessions whose metrics channel is already subscribed (see
+    /// [`Self::subscribe_metrics_once`]). The store never unsubscribes, so
+    /// the set only grows.
+    metrics_subs: std::collections::HashSet<String>,
     /// The submit pipeline's LATCHED failure: a handshake that never landed
     /// or a dispatch that failed to leave. The lazy `Stalled` face (a
     /// pre-connect queue past the budget) is computed on read, never stored.
@@ -1162,6 +1181,7 @@ impl AhpStore {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
+            metrics_subs: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -1304,6 +1324,7 @@ impl AhpStore {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
+            metrics_subs: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -2454,6 +2475,19 @@ impl AhpStore {
     pub fn subscribe_thread_once(&mut self, session_id: &str, cx: &mut gpui::Context<Self>) {
         if self.thread_subs.insert(session_id.to_string()) {
             self.subscribe(thread_uri(session_id), cx);
+        }
+    }
+
+    /// Subscribe the chat's metrics channel once per session — the home of
+    /// the conversation-metrics aggregate and the reasoning-timing rows. The
+    /// host delivers by exact subscription match, so without this nothing on
+    /// the channel ever folds (the context rail's per-model block starves
+    /// with it). Keyed by the session id, the landing form of the chat id —
+    /// the same assumption the chat-channel subscription at attach already
+    /// makes (`leaf` resolves the read side by the same key).
+    pub fn subscribe_metrics_once(&mut self, session_id: &str, cx: &mut gpui::Context<Self>) {
+        if self.metrics_subs.insert(session_id.to_string()) {
+            self.subscribe(metrics_uri(session_id), cx);
         }
     }
 
@@ -4396,6 +4430,64 @@ mod tests {
         );
     }
 
+    /// The reasoning-timing row's LIVE shape: a delta (not the baseline) on
+    /// the metrics channel folds into the ext bag's registry — the settle
+    /// frame's number shows without a re-subscribe. The channel's baseline
+    /// must have created the bucket first (an ext delta for a
+    /// never-baselined channel is dropped by design).
+    #[test]
+    fn a_reasoning_timing_delta_folds_into_the_registry() {
+        let mut book = ChannelBook::default();
+        book.apply_unknown(
+            &metrics_uri("c-1"),
+            &serde_json::json!({"type": manox_ahp::ext::actions::BASELINE, "state": {}}),
+        );
+        let effect = book.apply_unknown(
+            &metrics_uri("c-1"),
+            &serde_json::json!({
+                "type": manox_ahp::ext::actions::REASONING_TIMING,
+                "timing": {"partId": "p-r1", "turnId": "t-1",
+                           "startedAt": "2026-10-14T00:00:00Z", "durationMs": 3500},
+            }),
+        );
+        assert_eq!(effect, FoldEffect::Changed, "the delta is not stranded");
+        let rows = book.reasoning_timings("c-1").expect("the bucket folds");
+        assert_eq!(rows["p-r1"]["durationMs"], 3500);
+    }
+
+    /// The aggregate arm owns `metricsChanged` completely: with the
+    /// fall-through in place, a `metricsChanged` that leaked past it would
+    /// land in the ext fold and overwrite the bag's `session_info` slot
+    /// with the aggregate payload. It never does — the arm returns both
+    /// ways (Changed on a fresh fact, Ignored on a restatement).
+    #[test]
+    fn a_restatement_of_the_aggregate_stops_at_the_metrics_arm() {
+        let mut book = ChannelBook::default();
+        book.apply_unknown(
+            &metrics_uri("c-1"),
+            &serde_json::json!({"type": manox_ahp::ext::actions::BASELINE, "state": {}}),
+        );
+        let action = serde_json::json!({
+            "type": manox_ahp::ext::actions::METRICS_CHANGED,
+            "kind": "token_usage",
+            "data": {"input": 1},
+        });
+        assert_eq!(
+            book.apply_unknown(&metrics_uri("c-1"), &action),
+            FoldEffect::Ignored,
+            "this fixture's payload restates nothing new for the aggregate"
+        );
+        let bag = book
+            .ext
+            .get(&metrics_uri("c-1"))
+            .expect("the baseline created the bucket");
+        assert!(
+            bag.session_info.is_none(),
+            "the aggregate arm never touches the ext bag: {:?}",
+            bag.session_info
+        );
+    }
+
     #[test]
     fn chat_deltas_fold_into_the_chat_state() {
         let mut book = ChannelBook::default();
@@ -4942,6 +5034,7 @@ mod tests {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
+            metrics_subs: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -6144,6 +6237,7 @@ mod tests {
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
+            metrics_subs: std::collections::HashSet::new(),
             delivery_failure: None,
             queue_head_at: None,
             handshake_params: None,
@@ -6536,6 +6630,43 @@ mod tests {
         // burst reversed — still one row per event, in the drain's sequence.
         let expected: Vec<String> = (0..BURST).rev().map(|i| format!("s-{i}")).collect();
         assert_eq!(order, expected, "the fold keeps the drain's order");
+    }
+
+    /// Attaching subscribes the session's metrics channel — exactly once.
+    /// The host delivers by exact subscription match, so the missing
+    /// subscription was the hole the reasoning-timing wiring first fell
+    /// into: the rows folded nowhere, and no render-side fix could see
+    /// them. The dedup mirrors the thread channel's once-subscribe.
+    #[gpui::test]
+    fn attaching_a_session_subscribes_its_metrics_channel_once(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(|cx| cx.new(|_| AhpStore::detached()));
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.subscribe_metrics_once("s-1", cx);
+                store.subscribe_metrics_once("s-1", cx);
+                store.subscribe_metrics_once("s-2", cx);
+            });
+        });
+        let metrics: Vec<String> = cx.read(|cx| {
+            let store = store.read(cx);
+            store
+                .pending_writes
+                .iter()
+                .filter_map(|w| match w {
+                    PendingWrite::SubscribeThen(uri, _) if uri.starts_with("x-manox-metrics:/") => {
+                        Some(uri.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(
+            metrics.len(),
+            2,
+            "one metrics subscribe per session, deduped: {metrics:?}"
+        );
+        assert!(metrics.contains(&metrics_uri("s-1")));
+        assert!(metrics.contains(&metrics_uri("s-2")));
     }
 
     /// A stop receipt that names nothing is a visible notice; a receipt that

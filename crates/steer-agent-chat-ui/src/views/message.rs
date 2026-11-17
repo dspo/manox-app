@@ -1992,15 +1992,16 @@ fn reasoning_step(
         step = step.summary(first_line);
     }
     // The settled label is numeric when the anchor says so: the `x-manox`
-    // timing row's milliseconds, ceilinged into the same whole-second face
-    // the live self-timer renders. 0ms is the <1ms contract — it stays
-    // durationless rather than reading "thought for 0s" — and a round
+    // timing row's milliseconds, on the same whole-second floor every other
+    // duration on the screen uses (the turn head's `ms / 1000`, the live
+    // timer's `as_secs`). `max(1)` keeps a sub-second run off a false "0s";
+    // 0ms — the <1ms contract — stays durationless entirely, and a round
     // without an anchor (pre-anchor journals, missing ext fold) keeps the
     // plain label.
     let title = match (!streaming, duration_ms) {
         (true, Some(ms)) if ms > 0 => i18n::t_str(
             "message-reasoning-thought",
-            &[("secs", &((ms as u64).div_ceil(1000)).to_string())],
+            &[("secs", &((ms / 1000).max(1)).to_string())],
         )
         .to_string(),
         _ => i18n::t("message-reasoning").to_string(),

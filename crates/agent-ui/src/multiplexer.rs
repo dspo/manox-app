@@ -152,8 +152,9 @@ impl SessionMultiplexer {
     /// plan channel rides along: it carries the execution-plan snapshots
     /// (`UpdatePlan`) the rail's restore fallback reads. The thread channel
     /// rides for the row state (pin/label/leaf — upstream #842 moved the rows
-    /// there and nothing on the session channel ever folded them), and the
-    /// work channel for the browser-suite surface.
+    /// there and nothing on the session channel ever folded them), the work
+    /// channel for the browser-suite surface, and the metrics channel for the
+    /// conversation aggregate and the reasoning-timing rows.
     pub fn open_or_create(&mut self, session_id: &str, _reopen: bool, cx: &mut Context<Self>) {
         if self.attached.iter().any(|id| id == session_id) {
             return;
@@ -171,6 +172,7 @@ impl SessionMultiplexer {
                 store.subscribe(plan_uri(&sid), cx);
                 store.subscribe(thread_uri(&sid), cx);
                 store.subscribe(work_uri(&sid), cx);
+                store.subscribe_metrics_once(&sid, cx);
                 store.claim_active_client(&sid);
             });
             let _ = this.update(cx, |_, _| {});
