@@ -1,0 +1,25 @@
+[package]
+name = "steer-canvas"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "The canvas model: sheet ids, layout trees, per-container canvas state, sheet-kind registry, layout persistence"
+
+# gpui enters only through `registry` (SheetKindSpec's view factory). Ids,
+# layout, state and persistence stay gpui-free so headless consumers — and the
+# pi sheet's own assembly — can take the model without a GUI stack.
+[features]
+default = ["registry"]
+registry = ["dep:gpui"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# `~/.steer/layouts` resolves through the state-root authority.
+steer-paths.workspace = true
+gpui = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+gpui = { workspace = true, features = ["test-support"] }
