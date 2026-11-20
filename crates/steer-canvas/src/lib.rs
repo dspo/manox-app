@@ -37,12 +37,16 @@ pub mod persist;
 #[cfg(feature = "registry")]
 pub mod registry;
 pub mod state;
+// The layout→geometry projection is pure data too; the renderer only places
+// what it returns.
+pub mod projection;
 
 pub use id::{
     TerminalResource, home_sheet_id, session_of_sheet, session_sheet_id, sheet_container,
     sheet_kind, terminal_resource, terminal_sheet_id,
 };
 pub use layout::{Axis, DockLayout, DockNode};
+pub use projection::{GroupFrame, Rect, SheetFrame, TabBarBox};
 #[cfg(feature = "registry")]
 pub use registry::{ParsedSheet, SheetKindSpec, SheetRegistry};
 pub use state::{
