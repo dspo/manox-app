@@ -174,6 +174,9 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             // and `active_row` reads — exactly the host contract (the shell
             // keeps no selection of its own).
             active_row: Some(Box::new(|_cx| selected_row())),
+            // No terminal-title bridge behind the example: the trigger shows
+            // the row title (the hook's absence is the contract).
+            active_program_title: None,
             on_select: Some(Box::new({
                 let titles = titles.clone();
                 move |id, _w, cx| {
