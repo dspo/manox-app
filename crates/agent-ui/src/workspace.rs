@@ -219,6 +219,7 @@ impl Workspace {
             .flatten()
     }
 }
+mod column_view;
 mod composer;
 pub mod container;
 mod external;
@@ -395,6 +396,10 @@ pub struct Workspace {
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
     pub(crate) chat: Entity<ChatColumn>,
+    /// The conversation column as its own entity (see `workspace::column_view`):
+    /// the session-scoped surface a canvas mounts as a sheet body. Created on
+    /// the first frame — it is a view over `chat`, not a state owner.
+    pub(crate) column_view: Option<Entity<crate::workspace::column_view::ChatColumnView>>,
     /// User turns that have not reached the journal yet (durable across a
     /// restart; see [`crate::unsent`]).
     pub(crate) unsent: crate::unsent::UnsentOutbox,
@@ -931,6 +936,25 @@ impl Workspace {
         self.chat.read(cx).context_rail.clone()
     }
 
+    /// The conversation column view, created on first use. It is a projection
+    /// over `chat` (which owns every piece of state), so creating it late costs
+    /// nothing and keeps `new()` free of a second entity dependency.
+    pub(crate) fn ensure_column_view(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::workspace::column_view::ChatColumnView> {
+        if let Some(view) = &self.column_view {
+            return view.clone();
+        }
+        let env = std::sync::Arc::new(crate::workspace::column_view::WorkspaceChatEnv::new(
+            cx.weak_entity(),
+        ));
+        let view =
+            cx.new(|_| crate::workspace::column_view::ChatColumnView::new(self.chat.clone(), env));
+        self.column_view = Some(view.clone());
+        view
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // The launch directory is the conversation's anchor: a terminal
         // launch from a project dir (e.g. `cargo run` inside the repo)
@@ -1098,6 +1122,7 @@ impl Workspace {
             settings_nav: 0,
             settings_nav_view: None,
             dialog: None,
+            column_view: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
                 thread,
@@ -1632,29 +1657,11 @@ impl Workspace {
         });
     }
 
-    /// Diagnostic entry to the gate's timeout prune ([`Self::prune_history_gate`]).
+    /// Diagnostic entry to the gate's timeout prune
+    /// ([`crate::workspace::column_view::prune_history_gate`]).
     #[cfg(feature = "test-support")]
     pub fn diagnostic_prune_history_gate(&mut self, cx: &mut Context<Self>) {
-        self.prune_history_gate(cx);
-    }
-
-    /// Drop the history-loading gate once it has outlived
-    /// [`crate::views::history_loading::HISTORY_TIMEOUT`]: the chat snapshot
-    /// never landed (host error, missing session), and a permanent
-    /// full-column loading page with no composer and no transcript is worse
-    /// than the hero screen. Render calls this every frame; tests call it
-    /// directly.
-    fn prune_history_gate(&mut self, cx: &mut Context<Self>) {
-        let expired =
-            self.chat.read(cx).awaiting_history.is_some_and(|since| {
-                since.elapsed() > crate::views::history_loading::HISTORY_TIMEOUT
-            });
-        if expired {
-            self.chat.update(cx, |chat, cx| {
-                chat.awaiting_history = None;
-                cx.notify();
-            });
-        }
+        crate::workspace::column_view::prune_history_gate(&self.chat, cx);
     }
 
     /// Bind a caller-built store as the foreground store, bypassing the
