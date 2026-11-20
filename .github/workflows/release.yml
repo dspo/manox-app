@@ -6,10 +6,16 @@ name: release
 #
 #   - macOS arm64:  Steer.app, ad-hoc signed — shipped as a .dmg (the install
 #                   artifact) and a .zip (scripting) — script/bundle-mac +
-#                   script/bundle-dmg
-#   - deb amd64:    steer + cx, Depends from the linked binaries (script/bundle-deb)
+#                   script/bundle-dmg. Carries the pi-acp sidecar in
+#                   Contents/Helpers (binary + two wasm modules + skills).
+#   - deb amd64:    steer + cx, Depends from the linked binaries (script/bundle-deb);
+#                   the sidecar lands in /usr/lib/steer
 #   - rpm x86_64:   built inside a Fedora container so the glibc baseline and
 #                   rpmbuild's dependency generators match the target distro
+#                   (same /usr/lib/steer sidecar layout as the deb)
+#
+# Every leg builds the harness first (`cd pi-harness && bun run build`): the
+# sidecar is a bun-compiled executable that no cargo step produces.
 #
 # The tag version must equal [workspace.package].version — the bundle scripts
 # read that version as their single source of truth, so a drifting tag is
@@ -117,6 +123,16 @@ jobs:
       - name: Cache ghostty-vt
         uses: ./.github/actions/ghostty-vt
 
+      - name: Install bun
+        uses: ./.github/actions/bun
+
+      # The .app carries the sidecar in Contents/Helpers; build it first.
+      - name: Build pi-harness
+        working-directory: pi-harness
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
       # The script builds both binaries itself (--release, explicit --target)
       # and assembles/signs Steer.app from [package.metadata.bundle].
       - name: Bundle Steer.app
@@ -132,8 +148,13 @@ jobs:
           app="${target_dir}/Steer.app"
           [[ -d "${app}" ]] || { echo "::error::${app} missing after bundle-mac"; exit 1; }
           lipo -archs "${target_dir}/steer" | grep -qw arm64
+          test -x "${app}/Contents/Helpers/pi-acp"
+          test -f "${app}/Contents/Helpers/photon_rs_bg.wasm"
+          test -f "${app}/Contents/Helpers/quickjs.wasm"
+          test -f "${app}/Contents/Helpers/skills/todos/SKILL.md"
           codesign --verify --strict "${app}"
           codesign --verify --strict "${app}/Contents/MacOS/cx"
+          codesign --verify --strict "${app}/Contents/Helpers/pi-acp"
           mkdir dist
           ditto -c -k --sequesterRsrc --keepParent "${app}" "dist/Steer_${VERSION}_macos_arm64.zip"
           unzip -t "dist/Steer_${VERSION}_macos_arm64.zip" > /dev/null
@@ -191,6 +212,16 @@ jobs:
       - name: Cache ghostty-vt
         uses: ./.github/actions/ghostty-vt
 
+      - name: Install bun
+        uses: ./.github/actions/bun
+
+      # The package embeds the compiled harness at /usr/lib/steer.
+      - name: Build pi-harness
+        working-directory: pi-harness
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
       # --release inside the script; it also derives Depends from the linked
       # binaries (ldd + dpkg -S), so the package metadata follows the real link
       # set instead of a hand-kept list.
@@ -206,6 +237,8 @@ jobs:
           dpkg -L steer
           test -x /usr/bin/steer
           test -x /usr/bin/cx
+          test -x /usr/lib/steer/pi-acp
+          test -f /usr/lib/steer/skills/todos/SKILL.md
           test -f /usr/share/applications/dev.dspo.steer.desktop
           desktop-file-validate /usr/share/applications/dev.dspo.steer.desktop
           if ldd /usr/bin/steer | grep -F 'not found'; then
@@ -242,6 +275,16 @@ jobs:
       - name: Install build dependencies
         uses: ./.github/actions/linux-deps-fedora
 
+      - name: Install bun
+        uses: ./.github/actions/bun
+
+      # The rpm embeds the compiled harness at /usr/lib/steer.
+      - name: Build pi-harness
+        working-directory: pi-harness
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
       - name: Install Rust toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
@@ -270,6 +313,8 @@ jobs:
           dnf install -y --nogpgcheck "$(realpath "${rpm_path}")"
           test -x /usr/bin/steer
           test -x /usr/bin/cx
+          test -x /usr/lib/steer/pi-acp
+          test -f /usr/lib/steer/skills/todos/SKILL.md
           test -f /usr/share/applications/dev.dspo.steer.desktop
           if ldd /usr/bin/steer | grep -F 'not found'; then
               echo "::error::the installed steer binary has unresolved libraries"

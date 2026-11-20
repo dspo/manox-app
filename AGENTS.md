@@ -4,12 +4,12 @@ Guidance for coding agents working in this repo.（本文件是 manox-app 仓库
 
 ## 项目概述
 
-manox-app（应用品牌 **Steer**，应用侧 crate 一律 steer-* 前缀；仓库名保持 dspo/manox-app）是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端、webview、系统托盘）与 cx 启动器（外部 agent CLI）。agent runtime（harness/agent/session-core/providers/supervisor，外加回流本仓消费的 hyperlinks）来自 **dspo/manox**，经 git 依赖（tag 锁发布，见「与 manox 仓的联动开发」）+ 提交的 Cargo.lock 消费。单二进制、单进程。逐文件架构靠读代码获得——本文件只承载不可从代码推导的约束。
+manox-app（应用品牌 **Steer**，应用侧 crate 一律 steer-* 前缀；仓库名保持 dspo/manox-app）是 **GPUI 桌面应用仓**：完整的应用（窗口、UI、终端、webview、系统托盘）与 cx 启动器（外部 agent CLI）。agent runtime（harness/agent/session-core/providers/supervisor，外加回流本仓消费的 hyperlinks）来自 **dspo/manox**，经 git 依赖（tag 锁发布，见「与 manox 仓的联动开发」）+ 提交的 Cargo.lock 消费。单二进制、单进程，外加一个特许 sidecar（`pi-harness` 编译出的 `pi-acp`，见「pi harness」一节）。逐文件架构靠读代码获得——本文件只承载不可从代码推导的约束。
 
 ### 代码结构
 
 ```
-crates/                    # 全部 workspace 成员平铺于此（本仓只有一个交付物：桌面 app + 独立 bin 的 cx CLI）
+crates/                    # 全部 workspace 成员平铺于此（cargo 交付物：桌面 app + 独立 bin 的 cx CLI）
   steer-app/              # 主二进制入口（应用品牌 Steer；crate steer-app，bin steer；窗口 + 主题 + 托盘 + 接线）
   agent-ui/                # 状态 + 装配层（multiplexer/client_store/browser_host/
                            #   dispatch/侧栏投影）+ 会话列（Workspace 的状态机与渲染）
@@ -26,6 +26,8 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
                            #   唯一终端实现，见「Ghostty 终端」一节）
   steer-term-process/      # 终端进程缝（TerminalProcess/ProcessOutput；gpui-free，
                            #   cx/cx-cli 经 steer-ext-agents 消费而不拉 GUI 栈）
+  steer-acp/               # pi harness 的 ACP 客户端缝（spawn、ndjson JSON-RPC、
+                           #   session 生命周期、updates/requests 双通道；gpui-free）
   ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
   steer-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
   steer-i18n/              # app chrome 本地化（Fluent 栈 + locales/{zh-CN,en}.ftl，无 gpui 依赖）
@@ -39,6 +41,11 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
   steer-ext-agents/        # ext-agent 启动 API、会话管理、IPC relay、
                            #   cx_process 桥（SessionHandle → steer-term-process 的 TerminalProcess）
 ```
+
+`pi-harness/` 与 `crates/` 平级但**不在 cargo workspace 里**：它是 pi 引擎的
+bun/TypeScript 工程（含自带的测试、构建脚本与 ACP 烟测），构建产物是自包含的
+`dist/pi-acp`。为什么它不在 `crates/`：版本、工具链与依赖解析（bun.lock）全部独立，
+随包分发的形态也不同（见「pi harness（sidecar）」一节）。
 
 组件层边界：`ai-elements` 承载 agent 对话语义（Reasoning、工具、消息流），渲染机械
 （markdown、终端输出）归 `steer-components`。`ai-elements` 不依赖
@@ -73,6 +80,34 @@ manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（d
 - **持久化**：`~/.steer/layouts/{percent-encoded cid}.json`（`{containerId, layout, zoom, updatedAt}`，temp 文件 + 换名原子写）；损坏文件 warn + 丢弃 → 默认画布（激进纪律：不修复不兼容读）；400ms 写防抖在调用方（保存泵）。
 - **gpui 边界**：`id`/`layout`/`state`/`persist` 不依赖 gpui，只有 `registry`（默认开、可关的 feature）拉 gpui；`script/check-chat-crate-deps.sh` 同时守「`--no-default-features` 树里无 gpui」与「canvas 不依赖 chat crate」。
 
+### pi harness（sidecar）
+
+pi 引擎以**特许 sidecar 第二二进制**形态分发：`pi-harness/`（bun/TS，仓根，不在
+cargo workspace）用 `bun build --compile` 产出 `dist/pi-acp`，与 manox 的 in-proc
+腿平级，经 ACP（ndjson JSON-RPC 2.0 over stdio）与宿主通信。协议权威是
+`pi-harness/src/acp/app.ts`；宿主侧只读缝在 `crates/steer-acp`（不拉 GUI 栈）。
+
+- **构建**：`cd pi-harness && bun install --frozen-lockfile && bun run build`。
+  build 先跑 `check-version`（`package.json` 的 pi pin == `src/version.ts`），再编译
+  host-target 二进制，最后把三件伴生物放进 `dist/`：`photon_rs_bg.wasm`、
+  `quickjs.wasm`、`skills/`。**四件不可分**——编译后的 pi-acp 从自身目录读 wasm 与
+  skill 树，少一件就是运行时缺件（打包脚本对缺失直接失败）。
+- **分发布局**：macOS `Steer.app/Contents/Helpers/`（pi-acp 与 cx 一样先单独
+  codesign，再签外层 bundle），deb/rpm `/usr/lib/steer/`；`steer_acp::resolve_pi_acp()`
+  是解析唯一入口（`STEER_PI_ACP` 覆盖 → Helpers → `/usr/lib/steer` → 仓内
+  `pi-harness/dist`）。
+- **env**：宿主注入 `ZU_STATE_DIR=<steer_home>`（settings/subagents 的读根）；
+  不注入 `MANOX_HOME`（两个 harness 的状态根不混用）；`PI_CODING_AGENT_DIR` 保持
+  缺省（pi 的 `~/.pi/agent`，与官方 CLI 共存），仅测试隔离时覆盖；
+  `ACP_NO_EXTENSIONS`/`ACP_EXTRA_EXTENSION_PATHS` 由父环境透传（测试缝）。
+- **互操纪律**：stdout 只走协议（日志一律 stderr）；client 关闭 stdin = 优雅退出
+  （5s 宽限后才杀进程组）；`session/load` 的 replay 帧先于响应到达（steer-acp 在
+  调用期内捕获并随响应返回，不竞速）；崩溃时所有 pending 请求以 stderr tail 失败。
+- **门禁**：CI 的 `pi_harness` 腿跑 `typecheck → bun test → build → smoke`（离线
+  smoke 不调模型）；真模型验收用 `bun run acceptance:live` 或
+  `ACP_SMOKE_LIVE=1 bun run smoke`；`cargo test -p steer-acp -- --ignored`（
+  `MANOX_RUN_LIVE=1`）对真实二进制跑握手/new/close 烟雾。
+
 ### 与 manox 仓的联动开发
 
 上游走双轨发布（当前线：修复进 `release/0.5` 分支打 `v0.5.x` tag，新特性进 main 打下一轨 tag；以 dspo/manox 的分支与 tag 实存为准，勿按旧轨名 bump）；本仓的 8 个 runtime git 依赖（manox-agent/harness/session-core/providers/supervisor/hyperlinks/manox-ahp/manox-ahp-runtime）共用同一个 rev/tag 声明。
@@ -90,6 +125,8 @@ runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题
 
 上游 PR 的 body 或 commit message 点名 dspo/manox-app 需要伴随改动的（「Companion change required in dspo/manox-app」及同类表述），其消费义务落在把锁推进到该发布的那个本仓 PR：**同一 PR 内完成订阅/换道/接线，或在 Assumptions 里显式申报滞留原因**——静默不消费等于上游白修（桌面端撞不到修复）。台账只列**未结清**义务（销账即删行；历史销账记录走 git 历史与 PR 描述，不驻留本文件，禁止「本 PR」类随时腐烂的指代）：
 
+- pi distro 版本跟进（`pi-harness/package.json` 的 `@earendil-works/pi-coding-agent` pin）：升级 = 独立小 PR，同步 `pi-harness/src/version.ts`，重跑 `typecheck / bun test / build / smoke` 与 `MANOX_RUN_LIVE=1 cargo test -p steer-acp --test live -- --ignored`。
+
 ## 构建与开发命令
 
 ```bash
@@ -99,6 +136,17 @@ cargo run -p cx-cli                  # cx CLI
 cargo test                           # live 测试用 MANOX_RUN_LIVE=1 env 门控，默认安全
 cargo clippy --all-targets
 cargo fmt --all
+```
+
+pi harness（`pi-harness/`，bun 工程；工具链走 `.github/actions/bun` 的 pin，本机需同版本 bun）：
+
+```bash
+cd pi-harness && bun install --frozen-lockfile   # 依赖（bun.lock 是唯一解析）
+cd pi-harness && bun run typecheck               # tsc --noEmit（src + scripts）
+cd pi-harness && bun test                        # 263 项单测
+cd pi-harness && bun run build                   # dist/pi-acp + 两个 wasm + skills/
+cd pi-harness && bun run smoke                   # 离线 ACP 烟测（不调模型）
+MANOX_RUN_LIVE=1 cargo test -p steer-acp -- --ignored   # 对真 pi-acp 的握手/new/close 烟雾
 ```
 
 Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 系统依赖的**唯一清单**是 `.github/actions/linux-deps/action.yml`（Fedora 侧对应 `.github/actions/linux-deps-fedora/action.yml`，两份声明同一包集合；集成浏览器在 Linux 编译排除，故两份都不含 GTK/WebKitGTK；改一处必须同步另一处）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
@@ -114,7 +162,7 @@ Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`ru
 
 ### Release（tag 触发）
 
-push 语义化版本 tag（`vMAJOR.MINOR.PATCH[-PRERELEASE]`）触发 `.github/workflows/release.yml`：三路构建并发布 GitHub Release——macOS arm64（`script/bundle-mac` 产 ad-hoc 签名的 Steer.app，再由 `script/bundle-dmg --skip-bundle` 打成 `.dmg`，zip 一并保留）、deb amd64（`script/bundle-deb`）、rpm x86_64（`script/bundle-rpm`，在 fedora 容器内构建 + `dnf` 冒烟安装）；tag 版本必须等于 `[workspace.package].version`（bundle 脚本以它为唯一版本源，发版前先 bump 再打 tag）。`workflow_dispatch` 可在任意分支跑同一管线做纯构建验证（不发布）。制品内均含 steer 与 cx 双 bin。
+push 语义化版本 tag（`vMAJOR.MINOR.PATCH[-PRERELEASE]`）触发 `.github/workflows/release.yml`：三路构建并发布 GitHub Release——macOS arm64（`script/bundle-mac` 产 ad-hoc 签名的 Steer.app，再由 `script/bundle-dmg --skip-bundle` 打成 `.dmg`，zip 一并保留）、deb amd64（`script/bundle-deb`）、rpm x86_64（`script/bundle-rpm`，在 fedora 容器内构建 + `dnf` 冒烟安装）；tag 版本必须等于 `[workspace.package].version`（bundle 脚本以它为唯一版本源，发版前先 bump 再打 tag）。`workflow_dispatch` 可在任意分支跑同一管线做纯构建验证（不发布）。制品内均含 steer 与 cx 双 bin，以及 `pi-acp` sidecar 四件套（macOS `Contents/Helpers/`，deb/rpm `/usr/lib/steer/`；打包腿先跑 `bun install --frozen-lockfile && bun run build`，缺件即失败）。
 
 ### 出 UI 图（chrome 壳）
 
@@ -173,7 +221,7 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
   （chrome crate 的 Shell + 投影侧栏 + 右栏 ToolTab 注册表 + 会话列作为主区卡内容）。
   双壳构建开关（`--features chrome-shell`）与 `agent-ui::Workspace` 的旧全壳渲染已删净；
   上一个双壳形态留在 tag `dual-shell-final`（计划文档已随退役删除，历史见 git log）。
-- **每 PR 门禁 = `.github/workflows/ci.yml` 的 `checks_pass`**（分支保护只 require 这一条；`no-coauthor.yml` 是第二条、事件集不同不能并入）：`guards`（`cargo fmt --check` + chat crate 依赖不变量 + chrome 边界不变量）→ 两条并行 verify（linux amd64 `ubuntu-24.04` / macOS arm64 `macos-26`，各自 `clippy -D warnings --all-targets` → 一次 feature-inclusive 全量 `cargo test --features agent-ui/test-support`；`--all-targets` 已把 bin 编过，所以没有单独的 build 步，shipping 二进制由打包腿的 release 构建产出）。本地等价：`cargo fmt --all -- --check`、`./script/check-chat-crate-deps.sh`、`./script/check-chrome-boundary.sh`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets --features agent-ui/test-support`。打包腿（`.deb` / `.dmg`）与 verify **并行**，但只随 main 推送与 `workflow_dispatch` 启用：PR 触发的 CI 恒为 verify-only，不跑 package（要打包某个 PR 分支就在该 ref 上 `workflow_dispatch`）——冷 release 构建不该躺在任何 PR 的必经路上；`.rpm` 只在 `release.yml` 出（Fedora 容器 + glibc baseline）。PR 写清 Test Plan 与 Assumptions。
+- **每 PR 门禁 = `.github/workflows/ci.yml` 的 `checks_pass`**（分支保护只 require 这一条；`no-coauthor.yml` 是第二条、事件集不同不能并入）：`guards`（`cargo fmt --check` + chat crate 依赖不变量 + chrome 边界不变量）→ `pi_harness`（bun：typecheck → bun test → build → 离线 ACP smoke）→ 两条并行 verify（linux amd64 `ubuntu-24.04` / macOS arm64 `macos-26`，各自 `clippy -D warnings --all-targets` → 一次 feature-inclusive 全量 `cargo test --features agent-ui/test-support`；`--all-targets` 已把 bin 编过，所以没有单独的 build 步，shipping 二进制由打包腿的 release 构建产出）。本地等价：`cargo fmt --all -- --check`、`./script/check-chat-crate-deps.sh`、`./script/check-chrome-boundary.sh`、`cd pi-harness && bun run typecheck && bun test && bun run build && bun run smoke`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets --features agent-ui/test-support`。打包腿（`.deb` / `.dmg`）与 verify **并行**，但只随 main 推送与 `workflow_dispatch` 启用：PR 触发的 CI 恒为 verify-only，不跑 package（要打包某个 PR 分支就在该 ref 上 `workflow_dispatch`）——冷 release 构建不该躺在任何 PR 的必经路上；`.rpm` 只在 `release.yml` 出（Fedora 容器 + glibc baseline）。PR 写清 Test Plan 与 Assumptions。
 - **合并前必须把 manox 依赖 bump 到最新兼容发布**：决定合并（含批准后的最后一步）前，在 `script/local-manox.sh off` 形态下确认 Cargo.toml 的 runtime tag 指向当前 release 线（release/0.5 的 v0.5.x，或 main 的下一轨）最新兼容 tag——8 个依赖共用同一 tag，改一处声明 + `cargo update -p manox-agent` 整体移动——重跑全部门禁，并把变更随合并一并提交。若最新上游与本仓不兼容，先在 dspo/manox 修出兼容发布再 bump，或在 PR 中显式声明滞留原因（旧 tag 停留是债务，不是默认状态）。
 - **chrome/host 边界**（#279 的结论，`script/check-chrome-boundary.sh` 守）：`Shell` 是宿主状态的投影。
   gpui 的「一次一个实体租约」让**跨实体同步调用在回调里必崩**（panic 跨不过 macOS 事件的 `extern "C"`
@@ -193,7 +241,7 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 - **技术选型喜新厌旧**：能选最新 stable 就选最新 stable（依赖、工具链、API）。
 - **禁止 vendor / submodule**：所有依赖经 Cargo 声明；上游 manox 仓一律 git 依赖，禁止改回 path 依赖提交。
 - **crate 依赖只认 crate 索引或 git 地址**：外部 crate 只能是 crates.io 版本或 `git = "..."`，禁止 `path = "..."` 指向本机路径（CI 不可复现）；workspace 内部成员间 `path` 例外；本地联动只经 gitignored 的 `.cargo/config.toml` [patch]。
-- **只允许单二进制、单进程交付**（桌面应用；cx CLI 为独立 bin）。
+- **只允许单二进制、单进程交付**（桌面应用；cx CLI 为独立 bin）。唯一特许 sidecar：`pi-harness` 的 bun 产物 `pi-acp`（随三产物分发、由 `steer-acp` 按需 spawn，生命周期随会话/容器；不引入第三个二进制，也不为它开第二条交付面）。
 - **禁止抄袭第三方 crate 代码**：可参考架构思想，禁止复制粘贴后修改。`git2` 被禁（plugin marketplace shell out 系统 `git`）。
 - **注释一律英文，面向终态**（描述不变量/意图）而非过程流水账，非必要不注释。详见 `~/.claude/rules/code-comments.md`。
 - **零构建告警**：CI 以 `-D warnings` 编译。提交前本地 `cargo clippy --all-targets -- -D warnings` 全绿。新增 `#[allow(...)]` 视为逃避而非修复，除非 lint 本身与项目设计冲突（如 GPUI 派生宏假阳性），且必须英文注释说明。`Result` 必须 `let _ =` 或 `?` 处理；test 模块在文件末尾。

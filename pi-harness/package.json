@@ -1,0 +1,24 @@
+{
+  "name": "zu-engine",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "2.6.0",
+    "@earendil-works/pi-coding-agent": "1.5.0"
+  },
+  "scripts": {
+    "dev": "bun run src/acp-main.ts",
+    "dev:acp": "bun run src/acp-main.ts",
+    "build": "bun run check-version && bun run scripts/build.ts",
+    "check-version": "bun scripts/check-version.mjs",
+    "typecheck": "tsc --noEmit",
+    "models:parity": "bun run scripts/models-parity.mjs",
+    "test": "bun test",
+    "smoke": "bun run scripts/acp-smoke.ts",
+    "acceptance:live": "bun run scripts/acp-live-acceptance.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.5",
+    "typescript": "5"
+  }
+}
