@@ -142,6 +142,11 @@ fn main() {
         // before `manox_agent::init` computes host-scoped state.
         manox_agent::host::set_host(manox_agent::host::Host::ManoxApp);
         manox_agent::init();
+        // The session-title bridge's capture leg: the harness tap is a process
+        // singleton and must be installed before the first session starts
+        // (Workspace::new creates sessions). Titles are decorative — a refused
+        // install only logs.
+        agent_ui::title_store::TitleStore::install();
         // UI-chrome locale before anything renders: menus, the tray, and the
         // first window all resolve labels through `steer_i18n::t`.
         steer_i18n::init();

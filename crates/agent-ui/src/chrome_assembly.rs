@@ -360,6 +360,23 @@ fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
     // switch together, so one live-owner pair moves in lockstep (the
     // container teardown clears them together when its container dies).
     let fg = ws.read(cx).foreground_container_id(cx);
+    // Session-scoped state: a program title is transient per session id — it
+    // leaves with the session (a catalogue removal, a journal walk that drops
+    // the row), never with a closed tab. The live set is the book's own memory
+    // (catalogue rows plus folded channels: a just-created session can carry a
+    // title before its summary lands) plus the foreground id. This is the title
+    // bridge's only write into chrome state, and the projection pump is its
+    // single writer (boundary invariant ①).
+    {
+        let store = mux.read(cx).store();
+        let view = store.read(cx);
+        let book = &view.book;
+        crate::title_store::TitleStore::global().retain_live(|id| {
+            book.summaries.contains_key(id)
+                || book.sessions.contains_key(id)
+                || fg.as_deref() == Some(id)
+        });
+    }
     let old_id = ws.read(cx).dock_owner();
     if fg != old_id && fg.is_some() {
         // The outgoing views leave the shell first, land under the
@@ -613,6 +630,19 @@ fn shell_config(
                 let ws = ws.clone();
                 move |cx| ws.read(cx).chrome_selection(cx)
             })),
+            // The terminal-title bridge's read face: the foreground session's
+            // program title (a title the model set with OSC 0/2 inside Bash
+            // output). Render-time query like the highlight — the title is
+            // session-scoped state the projection pump never has to push. It
+            // names the picker trigger only; sidebar rows keep the session's
+            // own title.
+            active_program_title: Some(Box::new({
+                let ws = ws.clone();
+                move |cx| {
+                    let session_id = ws.read(cx).chrome_selection(cx)?;
+                    crate::title_store::TitleStore::global().program_title(&session_id)
+                }
+            })),
             // ←/→ session history: the workspace owns the visited-thread
             // stack; the move changes the foreground, and the highlight
             // above follows it.
@@ -824,19 +854,32 @@ impl MainSurface for PendingMain {
         if let Some(label) = self.ws.read(cx).active_external_label() {
             return label.into();
         }
-        // The active thread's display title from the foreground store;
-        // "steer" before any interaction.
-        self.ws
+        // The active thread's program title (the terminal-title bridge) first,
+        // then its display title from the foreground store; "Steer" before
+        // any interaction. Sidebar rows are projected from the catalogue and
+        // never consult the program title.
+        let program_title = self
+            .ws
             .read(cx)
             .chat
             .read(cx)
             .store
             .as_ref()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid)
-                    .display_title()
-                    .map(str::to_string)
+            .and_then(|(_, sid)| crate::title_store::TitleStore::global().program_title(sid));
+        program_title
+            .or_else(|| {
+                self.ws
+                    .read(cx)
+                    .chat
+                    .read(cx)
+                    .store
+                    .as_ref()
+                    .and_then(|(store, sid)| {
+                        let view = store.read(cx);
+                        crate::ahp_store::leaf(&view.book, sid)
+                            .display_title()
+                            .map(str::to_string)
+                    })
             })
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| "Steer".to_string())

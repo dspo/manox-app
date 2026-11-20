@@ -186,6 +186,12 @@ pub struct HostHooks {
     /// site silently advertises the wrong session. Absent → no row is
     /// selected (a chrome with no data source).
     pub active_row: Option<HookQuery<Option<String>>>,
+    /// The active session's PROGRAM title (the terminal-title bridge),
+    /// queried at render time. It names the titlebar's session-picker trigger
+    /// — this chrome's tab equivalent — and nothing else: sidebar rows,
+    /// notifications and container names keep the session's own title. Absent
+    /// or `None` → the trigger shows the active row's title.
+    pub active_program_title: Option<HookQuery<Option<String>>>,
     /// ←/→ session-history navigation. The hook performs the host-side move;
     /// the landed row's highlight arrives through [`Self::active_row`] — the
     /// selection has no second source to keep in step.
@@ -576,6 +582,13 @@ impl Shell {
     /// field, no push, nothing to keep in step.
     pub fn active_row(&self, cx: &App) -> Option<String> {
         self.hooks.active_row.as_ref().and_then(|q| q(cx))
+    }
+
+    /// The active session's program title (the terminal-title bridge), read
+    /// through [`HostHooks::active_program_title`] at render time. Tab-only:
+    /// rows and container names never consult it.
+    pub fn active_program_title(&self, cx: &App) -> Option<String> {
+        self.hooks.active_program_title.as_ref().and_then(|q| q(cx))
     }
 
     /// Whether the two nav moves can fire right now (the host's history

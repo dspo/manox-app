@@ -35,6 +35,7 @@ pub mod projects;
 pub mod resource_registry;
 pub mod sidebar_projection;
 pub mod slash_command;
+pub mod title_store;
 pub mod tool_tabs;
 pub mod unsent;
 pub mod views;

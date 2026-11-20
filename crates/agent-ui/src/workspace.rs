@@ -1025,6 +1025,33 @@ impl Workspace {
         };
         let rail_updates = cx.observe(&context_rail, |_, _, cx| cx.notify());
 
+        // Program-title wakes (the terminal-title bridge): the bash output tap
+        // feeds `TitleStore` on a harness worker thread, and a title change
+        // wakes this pump so the projection re-reads the titlebar's active
+        // title. One channel slot: a burst of retitles collapses into a single
+        // repaint, and a wake that finds nothing dirty (a pruned session's
+        // late chunk) schedules none.
+        {
+            let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
+            crate::title_store::TitleStore::global().set_waker(std::sync::Arc::new(move || {
+                let _ = wake_tx.try_send(());
+            }));
+            cx.spawn(async move |this, cx| {
+                while wake_rx.recv().await.is_ok() {
+                    if crate::title_store::TitleStore::global()
+                        .take_dirty()
+                        .is_empty()
+                    {
+                        continue;
+                    }
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+
         // Composer dictation: one speech session state per composer. The mic
         // button self-hides wherever the platform cannot recognize; the
         // subscription lands the final transcript and surfaces failures.
