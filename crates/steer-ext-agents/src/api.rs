@@ -616,10 +616,23 @@ mod tests {
         assert!(res.termination.is_some());
     }
 
+    /// A short root for socket paths: `sun_path` is 104 bytes on macOS, and
+    /// the per-user `$TMPDIR` there is long enough that a socket name under it
+    /// fails to bind. The fixed short roots come first; the platform temp dir
+    /// is the last resort.
+    fn socket_root() -> PathBuf {
+        ["/tmp", "/private/tmp", "/var/tmp"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|root| root.is_dir())
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     #[test]
     fn session_handle_external_socket_injection_reaches_read() {
-        // Use a custom socket path under a temp dir so the test is hermetic.
-        let tmp = std::env::temp_dir().join(format!(
+        // A custom socket path keeps the test hermetic; the root is short so
+        // the path stays inside the kernel's limit.
+        let tmp = socket_root().join(format!(
             "cx-api-inject-{}-{}.sock",
             std::process::id(),
             uuid_v4_simple()
