@@ -94,7 +94,7 @@ impl AgentBuilder {
     }
 
     /// Override the IPC injection socket path (`--socket`). Only effective with
-    /// `pty(true)`. When unset, `spawn` uses `~/.manox/sessions/<id>.sock`.
+    /// `pty(true)`. When unset, `spawn` uses `<manox-home>/sessions/<id>.sock`.
     pub fn socket(mut self, path: impl Into<PathBuf>) -> Self {
         self.socket = Some(path.into());
         self

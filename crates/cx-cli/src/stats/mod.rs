@@ -36,6 +36,7 @@ use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+use steer_paths::manox_root;
 
 use overview::build_overview_data;
 use parser::{SourceKind, parse_file, parse_file_from_offset};
@@ -213,17 +214,6 @@ fn log_sources() -> Vec<LogSource> {
             extra_file: None,
             kind: SourceKind::PiSession(AGENT_PI),
         },
-        LogSource {
-            root: home.join(".manox"),
-            extra_file: None,
-            kind: SourceKind::ManoxSession,
-        },
-        // manox pi 化后的 session jsonl（新数据源，与上方 SQLite 历史源并存）。
-        LogSource {
-            root: home.join(".manox/sessions"),
-            extra_file: None,
-            kind: SourceKind::PiSession(AGENT_MANOX),
-        },
         // ZCode CLI 的 model-io rollout：主会话与 subagent 会话各一个 jsonl 文件。
         LogSource {
             root: home.join(".zcode/cli/rollout"),
@@ -231,6 +221,21 @@ fn log_sources() -> Vec<LogSource> {
             kind: SourceKind::Zcode,
         },
     ];
+    // The manox root resolves through the injected state root (the same
+    // `MANOX_HOME` the runtime resolves), not a hand-built `~/.manox`.
+    if let Some(manox) = manox_root() {
+        sources.push(LogSource {
+            root: manox.clone(),
+            extra_file: None,
+            kind: SourceKind::ManoxSession,
+        });
+        // manox pi 化后的 session jsonl（新数据源，与上方 SQLite 历史源并存）。
+        sources.push(LogSource {
+            root: manox.join("sessions"),
+            extra_file: None,
+            kind: SourceKind::PiSession(AGENT_MANOX),
+        });
+    }
     // deepseek-harness home resolves through $DSH_HOME, else ~/.dsh; a
     // deployment without either has no source to scan.
     if let Some(root) = dsh_sessions_root() {

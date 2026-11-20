@@ -1,7 +1,7 @@
 //! Settings → Models panel.
 //!
 //! A provider list with a drill-down detail, over the cx providers config
-//! (`~/.manox/cx.providers.config.yaml`, schema: `manox_providers::CxConfig`).
+//! (`<manox-home>/cx.providers.config.yaml`, schema: `manox_providers::CxConfig`).
 //! The list stacks one thin-bordered tile per provider; clicking a tile opens
 //! its detail, which stacks all five sections — 基本信息 / 环境变量 / 请求头
 //! / 端点配置 / 模型列表 — in one scrolling column (no nested split). Every edit

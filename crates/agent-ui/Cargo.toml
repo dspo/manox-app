@@ -64,6 +64,7 @@ rust-embed.workspace = true
 
 manox-agent.workspace = true
 steer-i18n.workspace = true
+steer-paths.workspace = true
 steer-agent-chat-ui.workspace = true
 steer-agent-chrome-ui.workspace = true
 steer-ghostty.workspace = true

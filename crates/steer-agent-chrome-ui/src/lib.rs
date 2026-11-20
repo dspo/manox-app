@@ -19,7 +19,7 @@
 //! It deliberately depends on no data source: session rows are pushed in as
 //! snapshots, state-changing actions mirror to [`shell::HostHooks`], and tab
 //! content is injected by the host. The `shell` example wires a full
-//! assembly (real `~/.manox` threads, a PTY terminal kind, an embedded
+//! assembly (real `<manox-home>` threads, a PTY terminal kind, an embedded
 //! browser kind) — run it with:
 //!
 //! ```sh

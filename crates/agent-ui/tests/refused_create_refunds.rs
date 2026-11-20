@@ -26,9 +26,9 @@ async fn a_refused_create_reopens_the_launcher_with_the_text_back(cx: &mut TestA
     // A hermetic settings file: the project entity and its membership table
     // land here, and the file's contents are the refusal's witness.
     let settings = tempfile::tempdir().expect("settings dir");
-    let settings_file = settings.path().join("settings.toml");
+    let projects_file = settings.path().join("projects.toml");
     cx.update(|_cx| {
-        agent_ui::projects::diagnostic_redirect_settings_file(Some(settings_file.clone()));
+        agent_ui::projects::diagnostic_redirect_projects_file(Some(projects_file.clone()));
     });
     let project = cx.update(|_cx| {
         agent_ui::projects::create_project(Some("P".into()), vec![std::env::temp_dir()], None)
@@ -93,7 +93,7 @@ async fn a_refused_create_reopens_the_launcher_with_the_text_back(cx: &mut TestA
     // The durable witness: no membership key may point at the id that never
     // became a session. The remembered default target is allowed (the chip's
     // target was an explicit pick at the mint).
-    let raw = std::fs::read_to_string(&settings_file).expect("settings file");
+    let raw = std::fs::read_to_string(&projects_file).expect("settings file");
     let doc: toml::Value = toml::from_str(&raw).expect("parse");
     let membership = doc
         .get("project_membership")
@@ -106,7 +106,7 @@ async fn a_refused_create_reopens_the_launcher_with_the_text_back(cx: &mut TestA
     );
 
     cx.update(|_cx| {
-        agent_ui::projects::diagnostic_redirect_settings_file(None);
+        agent_ui::projects::diagnostic_redirect_projects_file(None);
     });
     common::full_wiring_teardown(cx);
 }

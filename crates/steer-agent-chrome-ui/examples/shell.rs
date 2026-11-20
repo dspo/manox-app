@@ -2,7 +2,7 @@
 //! for `steer-agent-chrome-ui` (the `ai-elements` gallery pattern).
 //!
 //! What the host supplies here:
-//! - session rows from the real `~/.manox` thread store (project grouping,
+//! - session rows from the real `<manox-home>` thread store (project grouping,
 //!   pinned/unread state, recency order, live refresh pump);
 //! - tool-tab kinds for the right pane (an integrated browser, the user's
 //!   shell, and three CLI-agent terminals);
@@ -38,6 +38,9 @@ use steer_agent_chrome_ui::{
 };
 
 fn main() {
+    // Same state-root contract as the real binaries: without it the runtime
+    // would resolve the pre-split `<manox-home>` even after the app migrated.
+    let _ = steer_paths::install();
     // Real data source init (tokio runtime / providers / ThreadStore) — the
     // same embedding path as the freya original.
     manox_agent::init();
@@ -227,7 +230,7 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
     }
 }
 
-// ── session source (real ~/.manox threads) ────────────────────────────────
+// ── session source (real <manox-home> threads) ────────────────────────────────
 
 thread_local! {
     /// The fixture's nav state: an id snapshot + pointer + live edges.

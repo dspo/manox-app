@@ -104,7 +104,7 @@ thread_local! {
     static L10N: RefCell<Option<L10n>> = const { RefCell::new(None) };
 }
 
-/// Read `~/.manox/settings.toml`, resolve the UI locale, and build the bundle
+/// Read `<steer_home>/settings.toml`, resolve the UI locale, and build the bundle
 /// on the calling (startup) thread. Called once before any UI render. Any
 /// failure is non-fatal: warn and fall back to Simplified Chinese so a
 /// malformed config never blocks startup.

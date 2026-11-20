@@ -14,6 +14,7 @@ manox-agent.workspace = true
 steer-ext-agents.workspace = true
 manox-providers.workspace = true
 manox-session-core.workspace = true
+steer-paths.workspace = true
 anyhow = "1.0"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
