@@ -93,7 +93,9 @@ cargo workspace）用 `bun build --compile` 产出 `dist/pi-acp`，与 manox 的
   `quickjs.wasm`、`skills/`。**四件不可分**——编译后的 pi-acp 从自身目录读 wasm 与
   skill 树，少一件就是运行时缺件（打包脚本对缺失直接失败）。
 - **分发布局**：macOS `Steer.app/Contents/Helpers/`（pi-acp 与 cx 一样先单独
-  codesign，再签外层 bundle），deb/rpm `/usr/lib/steer/`；`steer_acp::resolve_pi_acp()`
+  codesign，再签外层 bundle；wasm 与 `skills/` 实体在 `Contents/Resources/pi-harness/`，
+  Helpers 下只留指向它们的 symlink——codesign 视嵌套代码位置里的普通文件/目录为
+  未签名的代码对象），deb/rpm `/usr/lib/steer/`；`steer_acp::resolve_pi_acp()`
   是解析唯一入口（`STEER_PI_ACP` 覆盖 → Helpers → `/usr/lib/steer` → 仓内
   `pi-harness/dist`）。
 - **env**：宿主注入 `ZU_STATE_DIR=<steer_home>`（settings/subagents 的读根）；

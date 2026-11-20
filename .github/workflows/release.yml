@@ -7,7 +7,10 @@ name: release
 #   - macOS arm64:  Steer.app, ad-hoc signed — shipped as a .dmg (the install
 #                   artifact) and a .zip (scripting) — script/bundle-mac +
 #                   script/bundle-dmg. Carries the pi-acp sidecar in
-#                   Contents/Helpers (binary + two wasm modules + skills).
+#                   Contents/Helpers (binary; the two wasm modules and the
+#                   skill tree live in Contents/Resources with symlinks beside
+#                   the binary, because codesign rejects non-code entries in a
+#                   nested-code location).
 #   - deb amd64:    steer + cx, Depends from the linked binaries (script/bundle-deb);
 #                   the sidecar lands in /usr/lib/steer
 #   - rpm x86_64:   built inside a Fedora container so the glibc baseline and
@@ -149,9 +152,11 @@ jobs:
           [[ -d "${app}" ]] || { echo "::error::${app} missing after bundle-mac"; exit 1; }
           lipo -archs "${target_dir}/steer" | grep -qw arm64
           test -x "${app}/Contents/Helpers/pi-acp"
-          test -f "${app}/Contents/Helpers/photon_rs_bg.wasm"
-          test -f "${app}/Contents/Helpers/quickjs.wasm"
+          test -L "${app}/Contents/Helpers/photon_rs_bg.wasm"
+          test -L "${app}/Contents/Helpers/quickjs.wasm"
+          test -L "${app}/Contents/Helpers/skills"
           test -f "${app}/Contents/Helpers/skills/todos/SKILL.md"
+          test -f "${app}/Contents/Resources/pi-harness/skills/todos/SKILL.md"
           codesign --verify --strict "${app}"
           codesign --verify --strict "${app}/Contents/MacOS/cx"
           codesign --verify --strict "${app}/Contents/Helpers/pi-acp"

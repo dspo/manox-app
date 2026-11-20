@@ -457,11 +457,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          helpers="target/aarch64-apple-darwin/release/Steer.app/Contents/Helpers"
+          app="target/aarch64-apple-darwin/release/Steer.app"
+          helpers="${app}/Contents/Helpers"
           test -x "${helpers}/pi-acp"
-          test -f "${helpers}/photon_rs_bg.wasm"
-          test -f "${helpers}/quickjs.wasm"
+          test -L "${helpers}/photon_rs_bg.wasm"
+          test -L "${helpers}/quickjs.wasm"
+          test -L "${helpers}/skills"
           test -f "${helpers}/skills/todos/SKILL.md"
+          test -f "${app}/Contents/Resources/pi-harness/skills/todos/SKILL.md"
           codesign --verify --strict "${helpers}/pi-acp"
 
       - name: Upload artifact

@@ -130,7 +130,12 @@ chmod 755 "${macos_dir}/cx"
 
 # --- pi harness sidecar ---
 # The ACP agent is a bun-compiled executable that reads its two wasm modules
-# and its skill tree from its own directory, so Helpers must ship as one unit.
+# and its skill tree from its own directory, so the four files ship together.
+# They cannot all live in Helpers: codesign treats every non-signable entry in
+# a nested-code location (Helpers, MacOS) as a code object and refuses the
+# bundle ("code object is not signed at all"). The payload therefore lives in
+# Resources — sealed as resources — and three symlinks beside the executable
+# keep the sidecar's own `dirname(execPath)/…` lookups working.
 # It is built outside cargo (`cd pi-harness && bun run build`); a missing tree
 # aborts rather than shipping an app whose pi sheet cannot start.
 pi_dist="pi-harness/dist"
@@ -141,11 +146,15 @@ for file in pi-acp photon_rs_bg.wasm quickjs.wasm; do
     }
 done
 helpers_dir="${app_path}/Contents/Helpers"
-mkdir -p "${helpers_dir}"
+pi_resources_dir="${resources_dir}/pi-harness"
+mkdir -p "${helpers_dir}" "${pi_resources_dir}"
 cp "${pi_dist}/pi-acp" "${helpers_dir}/pi-acp"
-cp "${pi_dist}/photon_rs_bg.wasm" "${helpers_dir}/photon_rs_bg.wasm"
-cp "${pi_dist}/quickjs.wasm" "${helpers_dir}/quickjs.wasm"
-cp -R "${pi_dist}/skills" "${helpers_dir}/skills"
+cp "${pi_dist}/photon_rs_bg.wasm" "${pi_resources_dir}/photon_rs_bg.wasm"
+cp "${pi_dist}/quickjs.wasm" "${pi_resources_dir}/quickjs.wasm"
+cp -R "${pi_dist}/skills" "${pi_resources_dir}/skills"
+ln -s "../Resources/pi-harness/photon_rs_bg.wasm" "${helpers_dir}/photon_rs_bg.wasm"
+ln -s "../Resources/pi-harness/quickjs.wasm" "${helpers_dir}/quickjs.wasm"
+ln -s "../Resources/pi-harness/skills" "${helpers_dir}/skills"
 chmod 755 "${helpers_dir}/pi-acp"
 
 # Copy icons (if present)
