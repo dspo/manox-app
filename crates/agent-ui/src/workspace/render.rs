@@ -284,46 +284,20 @@ impl Workspace {
     /// chrome shell around it). Hero-or-list, footer composer, the floating
     /// context rail, and the turn-navigator overlay.
     fn render_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui_component::{h_flex, v_flex};
+        use gpui_component::v_flex;
         let theme = cx.theme().clone();
 
         // History-loading gate: a reopened thread whose chat snapshot has not
         // landed yet (the fold still holds no chat channel) suppresses the
-        // hero / list / footer in favor of the meerkat loading page. Render
-        // re-checks the fold so a stale flag can never pin the page after the
-        // snapshot, and prunes the flag once the wait outlives the timeout so
-        // a failed reopen degrades to the hero screen.
-        self.prune_history_gate(cx);
-        let history_loading = self.chat.read(cx).awaiting_history.is_some()
-            && self
-                .chat
-                .read(cx)
-                .store
-                .as_ref()
-                .map(|(store, sid)| {
-                    crate::ahp_store::leaf(&store.read(cx).book, sid.as_str())
-                        .chat
-                        .is_none()
-                })
-                .unwrap_or(false);
-        let thread_id = if history_loading {
-            self.chat.read(cx).thread.read(|t| t.id.0.clone())
-        } else {
-            String::new()
-        };
-
-        let running = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid).running()
-            })
-            .unwrap_or(false);
-        let first_screen = self.chat_conversation(cx).read(cx).is_empty(cx) && !running;
-        let composer_placement = composer_placement(first_screen);
+        // hero / list / footer in favor of the meerkat loading page. The
+        // column entity derives it (and prunes an expired gate) — this frame
+        // only reads the answer, so the gate has one derivation.
+        super::column_view::prune_history_gate(&self.chat, cx);
+        let column_view = self.ensure_column_view(cx);
+        let body = column_view.read(cx).body_state(cx);
+        let thread_id = body.thread_id;
+        let running = body.running;
+        let composer_placement = composer_placement(body.first_screen);
         // The card's interior width — what this view was actually laid out
         // in. The window width is NOT a stand-in for it: the shell's sidebar
         // and right pane are siblings of the card, so it overstates the card
@@ -335,39 +309,13 @@ impl Workspace {
         let main_body_w = card_width
             .get()
             .unwrap_or_else(|| window.bounds().size.width);
-        // Left-edge turn rail: the user-turn anchors are re-derived every
-        // frame (the same projection reads the ⌘M navigator makes on open).
-        // The width gate is a constant compare, so it short-circuits BEFORE
-        // the projection — a narrow card pays nothing. The turn-count gate
-        // lives inside `render_turn_rail` (None below two turns), whose
-        // result is the single source for both the rail and the gutter, so
-        // the two can never fork. Independent of the context rail's own
-        // gate: either side can float alone.
-        let turn_rail = if main_body_w >= px(crate::views::turn_rail::MIN_CARD_WIDTH) {
-            let rail_turns = crate::views::turn_rail::collect_rail_turns(
-                self.chat
-                    .read(cx)
-                    .conversation
-                    .read(cx)
-                    .items()
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, item)| (ix, item.read(cx).kind())),
-            );
-            let workspace = cx.entity();
-            let on_jump: crate::views::turn_rail::JumpFn =
-                std::rc::Rc::new(move |item_ix, _window, cx| {
-                    workspace.update(cx, |workspace, cx| workspace.reveal_message(item_ix, cx));
-                });
-            crate::views::turn_rail::render_turn_rail(&theme, &self.chat, rail_turns, on_jump, cx)
-        } else {
-            None
-        };
-        let show_turn_rail = turn_rail.is_some();
+        // The turn rail lives in the column entity, next to the transcript it
+        // anchors to; only the ⌘M navigator overlay and the card width
+        // registration stay here.
         let turn_navigator_overlay = self.render_turn_navigator_overlay(&theme, main_body_w, cx);
 
-        let footer =
-            (composer_placement == ComposerPlacement::Footer && !history_loading).then(|| {
+        let footer = (composer_placement == ComposerPlacement::Footer && !body.history_loading)
+            .then(|| {
                 v_flex()
                     .w_full()
                     .flex_shrink_0()
@@ -382,7 +330,7 @@ impl Workspace {
                     .children(self.render_attachments(&theme, cx))
                     .child(centered(self.render_composer(running, window, &theme, cx)))
             });
-        let hero = if composer_placement != ComposerPlacement::Hero || history_loading {
+        let hero = if composer_placement != ComposerPlacement::Hero || body.history_loading {
             None
         } else {
             Some(
@@ -425,178 +373,15 @@ impl Workspace {
                     .overflow_hidden()
                     .pb_2()
                     .children(hero)
-                    .when(history_loading, |this| {
+                    .when(body.history_loading, |this| {
                         this.child(crate::views::history_loading::render_history_loading(
                             &theme, &thread_id,
                         ))
                     })
-                    .children({
-                        // The row factory is a pure read-only projection
-                        // over the conversation.
-                        let conversation = self.chat.read(cx).conversation.clone();
-                        let diag_enabled = crate::overlap_diag::enabled();
-                        let processor = move |ix: usize, _window: &mut Window, cx: &mut App| {
-                            // A folded whole-turn process head hides the
-                            // turn's segments (the reply is exempt) — the
-                            // row renders empty instead.
-                            if conversation.read(cx).hidden_by_turn_process(ix, cx) {
-                                return v_flex().w_full().min_w_0().into_any_element();
-                            }
-                            let item = conversation.read(cx).items().get(ix).cloned();
-                            match item {
-                                Some(item) => {
-                                    if diag_enabled {
-                                        crate::overlap_diag::record_mapping(
-                                            ix,
-                                            item.read(cx).diagnostic_id(),
-                                        );
-                                    }
-                                    // A reply immediately followed by an
-                                    // activity segment tightens its bottom
-                                    // gap: the segment's own header padding
-                                    // breathes, so the generic 16px reads as
-                                    // a hole (the reverse direction keeps it
-                                    // — a reply needs its air).
-                                    let tight_gap = conversation.read(cx).tight_gap_after(ix, cx);
-                                    v_flex()
-                                        .w_full()
-                                        .pt_1()
-                                        .when(tight_gap, |this| this.pb_1())
-                                        .when(!tight_gap, |this| this.pb_4())
-                                        .flex_shrink_0()
-                                        .min_w_0()
-                                        .debug_selector(move || {
-                                            format!("workspace-message-row-{ix}")
-                                        })
-                                        .when(diag_enabled, |this| {
-                                            this.on_prepaint(move |bounds, _window, _cx| {
-                                                crate::overlap_diag::record_row(ix, bounds);
-                                            })
-                                        })
-                                        .child(item)
-                                        .into_any_element()
-                                }
-                                None => gpui::div().into_any_element(),
-                            }
-                        };
-                        let list_state = self.chat.read(cx).list_state.clone();
-                        let bounce_state = self.chat.read(cx).list_state.clone();
-                        let chat_for_bounce = self.chat.clone();
-                        let chat_for_press = self.chat.clone();
-                        let chat_for_release = self.chat.clone();
-                        let width_state = self.chat.read(cx).list_state.clone();
-                        let message_list_width = self.chat.read(cx).message_list_width.clone();
-                        let diag_state = self.chat.read(cx).list_state.clone();
-                        let mono_family = theme.mono_font_family.clone();
-                        (!first_screen && !history_loading).then(move || {
-                            let list_el = gpui::list(list_state, processor)
-                                .w_full()
-                                .h_full()
-                                .min_h_0()
-                                .min_w_0();
-                            // macOS-native rubber-band on precise scrolling,
-                            // via gpui-kit 0.8's shared overscroll engine. The
-                            // bounce scrolls the ListState itself, past the
-                            // list's own scroll handler, so notify the chat
-                            // here as that handler would — render-time scroll
-                            // consumers (the turn rail's active mark) read
-                            // `logical_scroll_top` and must keep up. Tail
-                            // follow is native ListState state
-                            // (`FollowMode::Tail`), so the bounce's scroll
-                            // path keeps its disengage/re-arm semantics.
-                            let list_el = gpui_base::ScrollBounce::new(
-                                "chat-list-bounce",
-                                &bounce_state,
-                                list_el,
-                            )
-                            .on_scroll(move |_, cx| {
-                                chat_for_bounce.update(cx, |_, cx| cx.notify());
-                            });
-                            let list_wrap = v_flex()
-                                .debug_selector(|| "workspace-message-list".into())
-                                .flex_1()
-                                .h_full()
-                                .min_h_0()
-                                .min_w_0()
-                                .font_family(mono_family.clone())
-                                .font_weight(gpui::FontWeight::LIGHT)
-                                .child(list_el)
-                                // Grabbing the transcript pauses tail-follow
-                                // so the next streamed chunk cannot yank the
-                                // column away mid-drag. A release that produced
-                                // no text selection and left the view where the
-                                // press found it restores the press-time follow
-                                // state (plain clicks keep live-reading); a real
-                                // selection or a moved view (scrollbar drag)
-                                // stays paused until the user wheels back to the
-                                // bottom or submits — the pause keeps Tail mode,
-                                // so both re-arm it.
-                                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-                                    chat_for_press.update(cx, |chat, cx| {
-                                        chat.transcript_press.started(&chat.list_state);
-                                        cx.notify();
-                                    });
-                                })
-                                .on_mouse_up(gpui::MouseButton::Left, move |_, window, cx| {
-                                    // The bubble-phase handler runs before the
-                                    // engine's window-level mouse-up, but the
-                                    // selection snapshot is already readable.
-                                    let has_selection =
-                                        !gpui_base::TextSelection::selected_text(window, cx)
-                                            .is_empty();
-                                    chat_for_release.update(cx, |chat, cx| {
-                                        chat.transcript_press
-                                            .ended(&chat.list_state, has_selection);
-                                        cx.notify();
-                                    });
-                                })
-                                .on_prepaint(move |bounds, window, _app| {
-                                    if message_list_width.update(bounds.size.width, &width_state) {
-                                        window.refresh();
-                                    }
-                                    if crate::overlap_diag::enabled() {
-                                        crate::overlap_diag::check_completed_frame(
-                                            bounds,
-                                            diag_state.item_count(),
-                                        );
-                                    }
-                                });
-                            h_flex()
-                                .flex_1()
-                                .w_full()
-                                .min_h_0()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .relative()
-                                // h_flex presets items_center, which centers
-                                // the children vertically and collapses the
-                                // list's h_full to zero — the transcript band
-                                // must stretch them instead.
-                                .items_stretch()
-                                // The gutter pads the list itself, not this
-                                // band: the rail's absolute anchor is the
-                                // band, so padding the band would drag the
-                                // rail right along with the text it must
-                                // clear (the ticks would land ON the
-                                // transcript instead of hugging the edge).
-                                .child(
-                                    h_flex()
-                                        .flex_1()
-                                        .w_full()
-                                        .min_h_0()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .items_stretch()
-                                        .when(show_turn_rail, |this| {
-                                            this.pl(px(crate::views::turn_rail::GUTTER))
-                                        })
-                                        .child(list_wrap),
-                                )
-                                // The rail paints after the list so its marks
-                                // and preview float over the transcript band.
-                                .children(turn_rail)
-                        })
-                    })
+                    // The transcript is the column entity's: it owns its list,
+                    // its rubber-band, its turn rail and the history gate, and
+                    // keeps them mounted across tab and container switches.
+                    .child(column_view.clone())
                     .children(footer),
             );
         let root = gpui::div()
