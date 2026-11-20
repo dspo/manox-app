@@ -389,11 +389,20 @@ pub(crate) fn picker_left(window: &Window) -> Pixels {
 /// plus the trigger it overlays them.
 fn session_picker(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
     let left = picker_left(window);
+    // The program title is the tab voice (the terminal-title bridge): it
+    // renames this trigger only. The row title — the session's own name — is
+    // the fallback, and the main surface's title covers a window with no
+    // active row at all.
     let active_title: String = shell
-        .active_row(cx)
-        .as_ref()
-        .and_then(|id| shell.sessions.iter().find(|s| &s.id == id))
-        .map(|s| single_line_title(&s.title))
+        .active_program_title(cx)
+        .map(|title| single_line_title(&title))
+        .or_else(|| {
+            shell
+                .active_row(cx)
+                .as_ref()
+                .and_then(|id| shell.sessions.iter().find(|s| &s.id == id))
+                .map(|s| single_line_title(&s.title))
+        })
         .unwrap_or_else(|| shell.main.title(cx).to_string());
 
     let open_picker = cx.listener(|this, _: &ClickEvent, window, cx| {
