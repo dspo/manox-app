@@ -18,20 +18,17 @@ name: ci
 #
 # `checks_pass` is the ONLY check branch protection should require: it fans in
 # every job below and goes red unless each one is `success` or `skipped`
-# (skipped = packaging on a PR that did not touch the packaging surface). Legs
-# can therefore be split, renamed or re-imaged without touching repo settings.
+# (skipped = the packaging legs on a PR, where they never run). Legs can
+# therefore be split, renamed or re-imaged without touching repo settings.
 # `no-coauthor.yml` stays a second required check of its own (different event
 # set; it cannot be a `needs` entry here).
 #
-# Packaging is the expensive axis (a cold release build per target) and its
-# inputs are the packaging scripts themselves, so it runs on:
-#   - every push to main / workflow_dispatch (always),
-#   - a PR carrying the `ci:package` label,
-#   - a PR that touches script/bundle-*, the packaging actions, release.yml,
-#     this file, or crates/steer-app/Cargo.toml (the bundle metadata).
-# Flip packaging to unconditional by making the `prepare` job output `true`
-# unconditionally — one line, at the cost of ~20 min on every PR's critical
-# path.
+# Packaging never runs on a PR: PR-triggered CI is verify-only, keeping the
+# cold release build per target off the path every review iteration walks.
+# It runs on every push to main and every workflow_dispatch; to package a PR
+# branch, dispatch the workflow on that ref. Flip to unconditional by making
+# the `prepare` job output `true` unconditionally — one line, at the cost of
+# ~20 min on every PR's critical path.
 
 on:
   pull_request:
@@ -69,18 +66,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # Full history: the packaging decision diffs the PR against its merge
-          # base.
-          fetch-depth: 0
 
       - name: Resolve version and packaging trigger
         id: meta
         shell: bash
         env:
           EVENT: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
-          PACKAGE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:package') }}
         run: |
           set -euo pipefail
 
@@ -100,25 +91,14 @@ jobs:
           ' Cargo.toml)
           [[ -n "${version}" ]] || { echo "::error::no version under [workspace.package] in Cargo.toml"; exit 1; }
 
-          package=false
-          reason=""
-          if [[ "${EVENT}" != "pull_request" ]]; then
+          # PR-triggered CI verifies only; packaging belongs to main pushes
+          # and manual dispatches (dispatch on the branch ref to package it).
+          if [[ "${EVENT}" == "pull_request" ]]; then
+            package=false
+            reason="pull_request (verify only)"
+          else
             package=true
             reason="${EVENT} (not a PR)"
-          elif [[ "${PACKAGE_LABEL}" == "true" ]]; then
-            package=true
-            reason="ci:package label"
-          else
-            git fetch --no-tags origin "${BASE_REF}"
-            base=$(git merge-base FETCH_HEAD HEAD)
-            changed=$(git diff --name-only "${base}" HEAD)
-            if printf '%s\n' "${changed}" \
-                | grep -qE '^(script/bundle-|\.github/(workflows/ci\.yml|workflows/release\.yml|actions/linux-deps)|crates/steer-app/Cargo\.toml)'; then
-              package=true
-              reason="packaging surface changed"
-            else
-              reason="no packaging change (add the ci:package label to force it)"
-            fi
           fi
 
           {
@@ -405,9 +385,10 @@ jobs:
           if-no-files-found: error
 
   # The single required check. `always()` so it reports even when an upstream
-  # leg failed or was cancelled; `skipped` counts as pass so a PR that does not
-  # touch packaging stays green. Inspecting every `needs` entry (instead of
-  # listing names) means a leg added above can never be silently forgotten.
+  # leg failed or was cancelled; `skipped` counts as pass — on PRs the
+  # packaging legs are skipped by design. Inspecting every `needs` entry
+  # (instead of listing names) means a leg added above can never be silently
+  # forgotten.
   checks_pass:
     name: checks_pass
     needs:
