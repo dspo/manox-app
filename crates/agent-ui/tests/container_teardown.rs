@@ -178,9 +178,9 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     // reads already settled; the redirect drops the cache onto the test
     // file before the first write).
     let settings_dir = tempfile::tempdir().expect("settings dir");
-    let settings_file = settings_dir.path().join("settings.toml");
+    let projects_file = settings_dir.path().join("projects.toml");
     let project_root = tempfile::tempdir().expect("project root");
-    agent_ui::projects::diagnostic_redirect_settings_file(Some(settings_file.clone()));
+    agent_ui::projects::diagnostic_redirect_projects_file(Some(projects_file.clone()));
     let project = agent_ui::projects::create_project(
         Some("Teardown".into()),
         vec![project_root.path().to_path_buf()],
@@ -216,7 +216,7 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
         Some(project.id.as_str()),
         "the prune is keyed — a foreign container's membership survives"
     );
-    agent_ui::projects::diagnostic_redirect_settings_file(None);
+    agent_ui::projects::diagnostic_redirect_projects_file(None);
     assert!(
         wait_child_dead(cx, cat2),
         "the death reclaimed the container's CLI-tab child"

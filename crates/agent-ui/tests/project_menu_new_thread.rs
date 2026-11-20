@@ -32,7 +32,7 @@ const PARK_STEP: std::time::Duration = std::time::Duration::from_millis(50);
 #[gpui::test]
 async fn steer_row_click_lands_a_new_thread(cx: &mut TestAppContext) {
     // Hermetic HOME: the real host boots against a throwaway state root, not
-    // the developer's ~/.manox.
+    // the developer's real state root.
     cx.update(|_cx| {
         manox_agent::runtime::init_hermetic_for_test();
         manox_agent::provider_glue::init();

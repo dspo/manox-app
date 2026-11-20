@@ -6,14 +6,13 @@
 //! several projects and a container without a membership falls to the loose
 //! "Chats" bucket.
 //!
-//! Persistence lives on the app-owned keys of the shared
-//! `~/.manox/settings.toml`, read-modify-written with the only-touch-my-keys
-//! discipline — every other key (runtime ones included) survives verbatim,
-//! and a corrupt file is replaced rather than allowed to block the write.
-//! The swap is atomic (sibling temp file + rename): a crash mid-write leaves
-//! the previous content intact, and a failed write marks the registry dirty
-//! so the next write retries instead of the change silently dying at the
-//! next restart. The keys:
+//! Persistence lives on the app-owned `~/.steer/projects.toml`, written
+//! with the only-touch-my-keys discipline — any other key sharing the
+//! document survives verbatim, and a corrupt file is refused rather than
+//! replaced wholesale. The swap is atomic (sibling temp file + rename): a
+//! crash mid-write leaves the previous content intact, and a failed write
+//! marks the registry dirty so the next write retries instead of the change
+//! silently dying at the next restart. The keys:
 //!
 //! - `[[project]]`: one entry per project with nested `[[project.roots]]`
 //!   rows (`path` + `primary`).
@@ -21,6 +20,11 @@
 //!   keys persist quoted (TOML handles it) but are dropped at load — an
 //!   external container has no durable record and its death paths include
 //!   ones that skip the teardown, so the key is dead weight by construction.
+//!
+//! The pre-split layout kept these keys on the runtime's settings document
+//! (`<manox_root>/settings.toml`); the first load extracts them into the new
+//! document and deletes them there — one-time, idempotent, skipped when the
+//! new document already exists.
 //!
 //! The write face enforces every invariant (roots exist as directories,
 //! dedup + canonicalization, exactly one primary, primary among the roots);
@@ -85,41 +89,42 @@ static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
 static LAST_CREATED: Mutex<Option<String>> = Mutex::new(None);
 
 /// The one whole-stack test (and the test-support integration regressions'
-/// hermetic HOME) redirects the settings file here; every other test works on
+/// hermetic HOME) redirects the projects file here; every other test works on
 /// `Registry` values directly.
 #[cfg(any(test, feature = "test-support"))]
-static TEST_SETTINGS_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
+static TEST_PROJECTS_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// Point the settings file at `path` (`None` restores the real one) and drop
+/// Point the projects file at `path` (`None` restores the real one) and drop
 /// the registry cache, so the next read reloads. Test-support only: the
-/// integration regressions run against a hermetic HOME and must not touch the
-/// developer's `~/.manox/settings.toml`.
+/// integration regressions run against a hermetic HOME and must not touch
+/// the developer's `~/.steer/projects.toml`.
 #[cfg(feature = "test-support")]
-pub fn diagnostic_redirect_settings_file(path: Option<PathBuf>) {
-    *TEST_SETTINGS_FILE.lock().expect("test settings lock") = path;
+pub fn diagnostic_redirect_projects_file(path: Option<PathBuf>) {
+    *TEST_PROJECTS_FILE.lock().expect("test projects lock") = path;
     *REGISTRY.lock().expect("project registry lock") = None;
 }
-
 fn cached() -> std::sync::MutexGuard<'static, Option<Registry>> {
     REGISTRY.lock().expect("project registry lock")
 }
 
-fn settings_file() -> Option<PathBuf> {
+fn projects_file() -> Option<PathBuf> {
     #[cfg(any(test, feature = "test-support"))]
     {
-        if let Some(path) = TEST_SETTINGS_FILE
+        if let Some(path) = TEST_PROJECTS_FILE
             .lock()
-            .expect("test settings lock")
+            .expect("test projects lock")
             .clone()
         {
             return Some(path);
         }
     }
-    Some(
-        PathBuf::from(std::env::var_os("HOME")?)
-            .join(".manox")
-            .join("settings.toml"),
-    )
+    steer_paths::steer_home().map(|home| home.join("projects.toml"))
+}
+
+/// The runtime's settings document — the extraction source only; after the
+/// first extraction nothing here reads it again.
+fn legacy_settings_file() -> Option<PathBuf> {
+    steer_paths::manox_root().map(|root| root.join("settings.toml"))
 }
 
 // ── reads ─────────────────────────────────────────────────────────────
@@ -508,9 +513,60 @@ fn now_secs() -> i64 {
 }
 
 fn load() -> Registry {
-    settings_file()
-        .map(|path| load_at(&path))
-        .unwrap_or_default()
+    let Some(path) = projects_file() else {
+        return Registry::default();
+    };
+    if !path.exists()
+        && let Some(legacy) = legacy_settings_file()
+    {
+        extract_legacy_registry_at(&path, &legacy);
+    }
+    load_at(&path)
+}
+
+/// One-time extraction of `[[project]]` + `[project_membership]` from the
+/// legacy shared settings document into the app-owned projects document.
+/// The write is the read half's inverse: parse the legacy doc, carry the two
+/// registry keys over verbatim, then delete them there — and refuse to touch
+/// a document that does not parse, since the runtime shares it. Every
+/// failure leaves both files as found and a warning behind; the extraction
+/// retries on the next launch until the new document exists.
+fn extract_legacy_registry_at(new_path: &Path, old_path: &Path) {
+    let Ok(raw) = std::fs::read_to_string(old_path) else {
+        return;
+    };
+    let Ok(mut old_doc) = toml::from_str::<toml::Value>(&raw) else {
+        tracing::warn!(
+            path = %old_path.display(),
+            "legacy settings.toml does not parse; project registry extraction skipped"
+        );
+        return;
+    };
+    let Some(table) = old_doc.as_table_mut() else {
+        return;
+    };
+    let project = table.remove("project");
+    let membership = table.remove("project_membership");
+    if project.is_none() && membership.is_none() {
+        return;
+    }
+    let mut new_doc = toml::Value::Table(toml::map::Map::new());
+    {
+        let new_table = new_doc
+            .as_table_mut()
+            .expect("freshly built document is a table");
+        if let Some(project) = project {
+            new_table.insert("project".to_string(), project);
+        }
+        if let Some(membership) = membership {
+            new_table.insert("project_membership".to_string(), membership);
+        }
+    }
+    if write_document(new_path, &new_doc).is_err() {
+        // The legacy document was never modified, so the next launch retries.
+        return;
+    }
+    rewrite_document(old_path, &old_doc);
 }
 
 /// The registry parse of one settings file — the loader the cache uses and
@@ -520,7 +576,7 @@ fn load_at(path: &Path) -> Registry {
         return Registry::default();
     };
     let Ok(doc) = toml::from_str::<toml::Value>(&raw) else {
-        tracing::warn!("settings.toml parse failed; project registry starts empty");
+        tracing::warn!("projects.toml parse failed; project registry starts empty");
         return Registry::default();
     };
     Registry {
@@ -611,37 +667,34 @@ fn parse_roots(value: Option<&toml::Value>) -> Option<Vec<ProjectRoot>> {
 }
 
 fn persist(reg: &Registry) -> anyhow::Result<()> {
-    let path = settings_file().context("no HOME: nowhere to persist the project registry")?;
+    let path = projects_file().context("no HOME: nowhere to persist the project registry")?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("create settings dir")?;
+        std::fs::create_dir_all(parent).context("create projects dir")?;
     }
     persist_at(&path, reg)
 }
 
-/// The write half: parse-edit-serialize keeps every other key intact — the
-/// runtime tables share this file, so a file that cannot be read or parsed
-/// must NOT be rewritten from an empty doc (that would silently wipe every
-/// sibling key alongside the projects and membership). Such a write bails and
-/// the dirty flag keeps the retry channel alive (the next write re-attempts;
-/// a transient torn read heals instead of amplifying into data loss). A
-/// missing file is the first-boot shape — an empty doc is the whole truth
-/// there. The swap is ATOMIC — serialize fully, write a sibling temp file,
-/// rename over the target — so a crash mid-write leaves the previous content
-/// intact instead of a truncated file the next load would treat as empty. No
-/// cross-process lock: the file's other writer
-/// (`manox_agent::settings::save`) is itself unfile-locked, so locking on
-/// this side alone would not close the race — closing it needs an upstream
-/// counterpart.
+/// The write half: parse-edit-serialize keeps every other key intact — a file
+/// that cannot be read or parsed must NOT be rewritten from an empty doc
+/// (other keys may share the document now or later, and a wipe would silently
+/// destroy them alongside the projects and membership). Such a write bails
+/// and the dirty flag keeps the retry channel alive (the next write
+/// re-attempts; a transient torn read heals instead of amplifying into data
+/// loss). A missing file is the first-boot shape — an empty doc is the whole
+/// truth there. The swap is ATOMIC — serialize fully, write a sibling temp
+/// file, rename over the target — so a crash mid-write leaves the previous
+/// content intact instead of a truncated file the next load would treat as
+/// empty.
 fn persist_at(path: &Path, reg: &Registry) -> anyhow::Result<()> {
     let mut doc: toml::Value = match std::fs::read_to_string(path) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             toml::Value::Table(toml::map::Map::new())
         }
-        raw => toml::from_str(&raw.context("read settings.toml")?)
-            .context("settings.toml does not parse; refusing an empty-doc rewrite")?,
+        raw => toml::from_str(&raw.context("read projects.toml")?)
+            .context("projects.toml does not parse; refusing an empty-doc rewrite")?,
     };
     let Some(table) = doc.as_table_mut() else {
-        anyhow::bail!("settings.toml is not a table; refusing to overwrite it");
+        anyhow::bail!("projects.toml is not a table; refusing to overwrite it");
     };
     table.insert(
         "project".to_string(),
@@ -656,15 +709,34 @@ fn persist_at(path: &Path, reg: &Registry) -> anyhow::Result<()> {
         "project_membership".to_string(),
         toml::Value::Table(membership),
     );
-    let serialized = toml::to_string_pretty(&doc).context("serialize settings.toml")?;
+    write_document(path, &doc)
+}
+
+/// Serialize and swap a document into place atomically (sibling temp file +
+/// rename): a crash mid-write leaves the previous content intact instead of a
+/// truncated file the next load would treat as empty.
+fn write_document(path: &Path, doc: &toml::Value) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("create projects dir")?;
+    }
+    let serialized = toml::to_string_pretty(doc).context("serialize projects.toml")?;
     let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))
-        .context("create settings.toml temp file")?;
+        .context("create projects.toml temp file")?;
     use std::io::Write as _;
     temp.write_all(serialized.as_bytes())
-        .context("write settings.toml temp file")?;
+        .context("write projects.toml temp file")?;
     temp.persist(path)
-        .context("swap settings.toml into place")?;
+        .context("swap projects.toml into place")?;
     Ok(())
+}
+
+/// Best-effort rewrite of the legacy document (the key deletions after an
+/// extraction): failures are logged, never fatal — a lingering legacy key is
+/// dead weight, not a blocker.
+fn rewrite_document(path: &Path, doc: &toml::Value) {
+    if let Err(err) = write_document(path, doc) {
+        tracing::warn!(error = %err, "failed to rewrite the legacy settings document");
+    }
 }
 
 fn project_row(project: &Project) -> toml::Value {
@@ -768,8 +840,8 @@ mod tests {
         let (dir, root_a) = temp_root("a");
         let root_b = root_a.parent().expect("parent").join("b");
         std::fs::create_dir(&root_b).expect("mkdir");
-        let settings = dir.path().join("settings.toml");
-        std::fs::write(&settings, "ui_language = \"zh-CN\"\n\n[host]\nport = 42\n").expect("seed");
+        let projects = dir.path().join("projects.toml");
+        std::fs::write(&projects, "[host]\nport = 42\n").expect("seed");
 
         let mut reg = Registry::default();
         let first = create_in(
@@ -786,9 +858,9 @@ mod tests {
             "external:claude:abc",
             &first.id
         ));
-        persist_at(&settings, &reg).expect("persist");
+        persist_at(&projects, &reg).expect("persist");
 
-        let loaded = load_at(&settings);
+        let loaded = load_at(&projects);
         assert_eq!(loaded.projects, reg.projects);
         // The `external:` key persists (TOML quotes it — the file stays
         // honest) but the loader drops it: external containers have no
@@ -801,20 +873,17 @@ mod tests {
             .collect();
         assert_eq!(loaded.membership, native);
 
-        let raw = std::fs::read_to_string(&settings).expect("read");
+        let raw = std::fs::read_to_string(&projects).expect("read");
         assert!(raw.contains("[[project]]"));
         assert!(raw.contains("[[project.roots]]"));
         assert!(raw.contains("\"external:claude:abc\""), "quoted key");
         let doc: toml::Value = toml::from_str(&raw).expect("parse");
         assert_eq!(
-            doc.get("ui_language").and_then(|v| v.as_str()),
-            Some("zh-CN")
-        );
-        assert_eq!(
             doc.get("host")
                 .and_then(|v| v.get("port"))
                 .and_then(|v| v.as_integer()),
-            Some(42)
+            Some(42),
+            "sibling keys survive verbatim"
         );
     }
 
@@ -823,11 +892,10 @@ mod tests {
     #[test]
     fn load_repairs_a_hand_edited_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let settings = dir.path().join("settings.toml");
+        let projects = dir.path().join("projects.toml");
         std::fs::write(
-            &settings,
-            "ui_language = \"en-US\"\n\
-             [[project]]\n\
+            &projects,
+            "[[project]]\n\
              id = \"p1\"\n\
              name = \"X\"\n\
              name_overridden = true\n\
@@ -846,7 +914,7 @@ mod tests {
              created_at = 0\n",
         )
         .expect("seed");
-        let loaded = load_at(&settings);
+        let loaded = load_at(&projects);
         assert_eq!(loaded.projects.len(), 1, "the rootless entry is dropped");
         let p = &loaded.projects[0];
         assert_eq!(p.id, "p1");
@@ -1101,18 +1169,18 @@ mod tests {
     }
 
     /// The whole stack through the public API against a redirected
-    /// settings file: a create lands on disk, survives a cache drop (the
+    /// projects file: a create lands on disk, survives a cache drop (the
     /// restart shape), and leaves sibling keys intact. The only test
     /// touching the process-wide statics; it restores them before returning.
     #[test]
     fn pub_api_persists_and_reloads_across_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let settings = dir.path().join("settings.toml");
-        std::fs::write(&settings, "ui_language = \"zh-CN\"\n\n[host]\nport = 42\n").expect("seed");
+        let projects = dir.path().join("projects.toml");
+        std::fs::write(&projects, "[host]\nport = 42\n").expect("seed");
         let root = dir.path().join("root");
         std::fs::create_dir(&root).expect("mkdir");
 
-        *TEST_SETTINGS_FILE.lock().expect("lock") = Some(settings.clone());
+        *TEST_PROJECTS_FILE.lock().expect("lock") = Some(projects.clone());
         *REGISTRY.lock().expect("lock") = None;
 
         let project = create_project(Some("Steer".into()), vec![root], None).expect("create");
@@ -1162,46 +1230,127 @@ mod tests {
             Some(project.id.as_str())
         );
         let doc: toml::Value =
-            toml::from_str(&std::fs::read_to_string(&settings).expect("read")).expect("parse");
+            toml::from_str(&std::fs::read_to_string(&projects).expect("read")).expect("parse");
         assert_eq!(
-            doc.get("ui_language").and_then(|v| v.as_str()),
-            Some("zh-CN")
+            doc.get("host")
+                .and_then(|v| v.get("port"))
+                .and_then(|v| v.as_integer()),
+            Some(42)
         );
 
         delete_project(&project.id);
         assert!(membership_of("session-1").is_none(), "cascade");
 
-        *TEST_SETTINGS_FILE.lock().expect("lock") = None;
+        *TEST_PROJECTS_FILE.lock().expect("lock") = None;
         *REGISTRY.lock().expect("lock") = None;
     }
 
     /// A file that does not parse must never be rewritten from an empty doc:
-    /// the runtime tables share settings.toml, and the empty-doc start would
-    /// silently wipe them. persist_at refuses (the dirty-retry channel keeps
-    /// retrying), the corrupt bytes stay untouched; a missing file is the
-    /// first-boot shape and persists fine.
+    /// other keys may share the projects document, and the empty-doc start
+    /// would silently wipe them. persist_at refuses (the dirty-retry channel
+    /// keeps retrying), the corrupt bytes stay untouched; a missing file is
+    /// the first-boot shape and persists fine.
     #[test]
     fn persist_refuses_an_unparseable_file_instead_of_wiping_it() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let settings = dir.path().join("settings.toml");
-        let corrupt = "ui_language = \"zh-CN\"\n[host\nport =";
-        std::fs::write(&settings, corrupt).expect("seed");
+        let projects = dir.path().join("projects.toml");
+        let corrupt = "[host\nport =";
+        std::fs::write(&projects, corrupt).expect("seed");
         let (_dir_a, root_a) = temp_root("a");
         let mut reg = Registry::default();
         create_in(&mut reg, None, vec![root_a], None).expect("create");
 
         assert!(
-            persist_at(&settings, &reg).is_err(),
+            persist_at(&projects, &reg).is_err(),
             "an unparseable file blocks the write"
         );
         assert_eq!(
-            std::fs::read_to_string(&settings).expect("read"),
+            std::fs::read_to_string(&projects).expect("read"),
             corrupt,
             "the corrupt file is never replaced"
         );
 
-        let missing = dir.path().join("absent").join("settings.toml");
+        let missing = dir.path().join("absent").join("projects.toml");
         std::fs::create_dir(missing.parent().expect("parent")).expect("mkdir");
         persist_at(&missing, &reg).expect("a missing file is the first-boot shape");
+    }
+
+    /// The one-time extraction: both registry keys move into the new
+    /// document verbatim and are deleted from the legacy document, whose
+    /// other tenants (the runtime tables) survive untouched.
+    #[test]
+    fn extraction_moves_the_registry_and_deletes_it_from_the_legacy_document() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let new = dir.path().join("steer").join("projects.toml");
+        let old = dir.path().join("manox").join("settings.toml");
+        std::fs::create_dir_all(old.parent().unwrap()).expect("mkdir");
+        std::fs::write(
+            &old,
+            r#"ui_language = "zh-CN"
+[host]
+port = 42
+[[project]]
+id = "p1"
+[[project.roots]]
+path = "/somewhere"
+primary = true
+[project_membership]
+session-1 = "p1"
+"external:x" = "p1"
+"#,
+        )
+        .expect("seed");
+
+        extract_legacy_registry_at(&new, &old);
+        let loaded = load_at(&new);
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].id, "p1");
+        assert_eq!(
+            loaded.membership.get("session-1").map(String::as_str),
+            Some("p1")
+        );
+        let new_raw = std::fs::read_to_string(&new).expect("read");
+        assert!(new_raw.contains("external:x"));
+
+        let old_raw = std::fs::read_to_string(&old).expect("read");
+        assert!(!old_raw.contains("[[project]]"));
+        assert!(!old_raw.contains("project_membership"));
+        assert!(old_raw.contains("[host]"), "sibling keys survive");
+        assert!(
+            old_raw.contains("ui_language"),
+            "other owners' keys survive"
+        );
+    }
+
+    #[test]
+    fn extraction_skips_when_the_legacy_document_lacks_the_registry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let new = dir.path().join("steer").join("projects.toml");
+        let old = dir.path().join("manox").join("settings.toml");
+        std::fs::create_dir_all(old.parent().unwrap()).expect("mkdir");
+        std::fs::write(&old, "[host]\nport = 42\n").expect("seed");
+        extract_legacy_registry_at(&new, &old);
+        assert!(!new.exists(), "no keys, no new document");
+        assert_eq!(
+            std::fs::read_to_string(&old).expect("read"),
+            "[host]\nport = 42\n"
+        );
+    }
+
+    #[test]
+    fn extraction_is_refused_by_an_unparseable_legacy_document() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let new = dir.path().join("steer").join("projects.toml");
+        let old = dir.path().join("manox").join("settings.toml");
+        let corrupt = "[[project]]\nid = \"p1\"\n[host\nport =";
+        std::fs::create_dir_all(old.parent().unwrap()).expect("mkdir");
+        std::fs::write(&old, corrupt).expect("seed");
+        extract_legacy_registry_at(&new, &old);
+        assert!(!new.exists());
+        assert_eq!(
+            std::fs::read_to_string(&old).expect("read"),
+            corrupt,
+            "the legacy document is left exactly as found"
+        );
     }
 }

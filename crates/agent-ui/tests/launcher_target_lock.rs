@@ -24,11 +24,11 @@ fn the_preset_locks_and_the_bare_entry_lands_no_project(cx: &mut TestAppContext)
     let window: gpui::AnyWindowHandle = window.into();
 
     // A project entity for the preset; the hermetic settings file keeps the
-    // registry off the developer's ~/.manox.
+    // registry off the developer's real state root.
     let settings = tempfile::tempdir().expect("settings dir");
-    let settings_file = settings.path().join("settings.toml");
+    let projects_file = settings.path().join("projects.toml");
     cx.update(|_cx| {
-        agent_ui::projects::diagnostic_redirect_settings_file(Some(settings_file.clone()));
+        agent_ui::projects::diagnostic_redirect_projects_file(Some(projects_file.clone()));
     });
     let project = cx.update(|_cx| {
         agent_ui::projects::create_project(Some("P".into()), vec![std::env::temp_dir()], None)
@@ -94,6 +94,6 @@ fn the_preset_locks_and_the_bare_entry_lands_no_project(cx: &mut TestAppContext)
     assert!(!locked, "the lock dies with its entry gesture");
 
     cx.update(|_cx| {
-        agent_ui::projects::diagnostic_redirect_settings_file(None);
+        agent_ui::projects::diagnostic_redirect_projects_file(None);
     });
 }

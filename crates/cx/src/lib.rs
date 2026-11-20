@@ -547,7 +547,7 @@ pub fn prepare_codex_launch_home(
 }
 
 /// 为 Codex Desktop App 准备注入配置。
-/// 使用固定目录 ~/.manox/.codex/，Symlink 真实 ~/.codex/ 内容（config.toml 除外），
+/// 使用固定目录 <manox-home>/.codex/，Symlink 真实 ~/.codex/ 内容（config.toml 除外），
 /// 写入我们注入的 config.toml（动态 provider key / env_key）。Codex Desktop 读 CODEX_HOME 指向此目录。
 ///
 /// 返回 `ChatGptAppPrepared`：codex_home 供调用方在启动子进程时设 `CODEX_HOME` 环境变量，

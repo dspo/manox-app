@@ -1,0 +1,11 @@
+[package]
+name = "steer-paths"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+dirs = "6.0"
+
+[dev-dependencies]
+tempfile = "3"

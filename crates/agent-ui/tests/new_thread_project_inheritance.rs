@@ -31,7 +31,7 @@ const PARK_STEP: std::time::Duration = std::time::Duration::from_millis(50);
 #[gpui::test]
 async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
     // Hermetic HOME: the real host boots against a throwaway state root, not
-    // the developer's ~/.manox.
+    // the developer's real state root.
     cx.update(|_cx| {
         manox_agent::runtime::init_hermetic_for_test();
         manox_agent::provider_glue::init();
@@ -127,9 +127,9 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
     let project_path = project.path().canonicalize().expect("canonicalize");
     let project_string = project_path.to_string_lossy().into_owned();
     let settings = tempfile::tempdir().expect("settings dir");
-    let settings_file = settings.path().join("settings.toml");
+    let projects_file = settings.path().join("projects.toml");
     cx.update(|_cx| {
-        agent_ui::projects::diagnostic_redirect_settings_file(Some(settings_file.clone()));
+        agent_ui::projects::diagnostic_redirect_projects_file(Some(projects_file.clone()));
     });
     let project_entity = cx.update(|_cx| {
         agent_ui::projects::create_project(Some("P".into()), vec![project_path.clone()], None)
@@ -293,7 +293,7 @@ async fn new_thread_inherits_the_project_directory(cx: &mut TestAppContext) {
         "the effort pick lands its level"
     );
     cx.update(|_cx| {
-        agent_ui::projects::diagnostic_redirect_settings_file(None);
+        agent_ui::projects::diagnostic_redirect_projects_file(None);
     });
     manox_agent::thread_store::drop_global_for_test();
     agent_ui::dispatch::clear_globals_for_test();

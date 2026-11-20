@@ -27,7 +27,7 @@ const PARK_STEP: std::time::Duration = std::time::Duration::from_millis(50);
 #[gpui::test]
 async fn a_two_root_project_grants_both_roots_on_the_create(cx: &mut TestAppContext) {
     // Hermetic HOME: the real host boots against a throwaway state root, not
-    // the developer's ~/.manox.
+    // the developer's real state root.
     cx.update(|_cx| {
         manox_agent::runtime::init_hermetic_for_test();
         manox_agent::provider_glue::init();
@@ -98,9 +98,9 @@ async fn a_two_root_project_grants_both_roots_on_the_create(cx: &mut TestAppCont
     let primary = primary_dir.path().canonicalize().expect("canonicalize");
     let secondary = secondary_dir.path().canonicalize().expect("canonicalize");
     let settings = tempfile::tempdir().expect("settings dir");
-    let settings_file = settings.path().join("settings.toml");
+    let projects_file = settings.path().join("projects.toml");
     cx.update(|_cx| {
-        agent_ui::projects::diagnostic_redirect_settings_file(Some(settings_file.clone()));
+        agent_ui::projects::diagnostic_redirect_projects_file(Some(projects_file.clone()));
     });
     let project = cx.update(|_cx| {
         agent_ui::projects::create_project(
@@ -234,7 +234,7 @@ async fn a_two_root_project_grants_both_roots_on_the_create(cx: &mut TestAppCont
     );
 
     cx.update(|_cx| {
-        agent_ui::projects::diagnostic_redirect_settings_file(None);
+        agent_ui::projects::diagnostic_redirect_projects_file(None);
     });
     manox_agent::thread_store::drop_global_for_test();
     agent_ui::dispatch::clear_globals_for_test();

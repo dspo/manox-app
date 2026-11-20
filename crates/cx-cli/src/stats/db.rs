@@ -1,4 +1,4 @@
-//! SQLite 持久化用量缓存（~/.manox/cx.db）。
+//! SQLite 持久化用量缓存（<manox-home>/cx.db）。
 //!
 //! v3 schema：per-message 明细表替代 v1 的 per-day 聚合表，
 //! 单一真相来源，聚合用 SQL GROUP BY 实时计算。

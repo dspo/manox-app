@@ -73,11 +73,11 @@ pub(super) enum SourceKind {
     OmpSession,
     /// Mimo CLI session SQLite（~/.local/share/mimocode/mimocode.db）。
     MimoSession,
-    /// Manox agent SQLite（~/.manox/threads.db）——pi 化之前的历史数据源。
+    /// Manox agent SQLite（<manox-home>/threads.db）——pi 化之前的历史数据源。
     ManoxSession,
     /// pi 家族 coding-agent session jsonl，携带 agent 标识：
     /// pi 原生 session（~/.pi/agent/sessions/）标记为 `pi`；
-    /// manox pi 化后的 session（~/.manox/sessions/）标记为 `manox`。
+    /// manox pi 化后的 session（<manox-home>/sessions/）标记为 `manox`。
     PiSession(&'static str),
     /// deepseek-harness session jsonl（$DSH_HOME/sessions，默认 ~/.dsh），
     /// 默认 zstd 压缩（session.jsonl.zstd，多 frame 拼接）。

@@ -147,6 +147,7 @@ dependencies = [
  "steer-ext-agents",
  "steer-ghostty",
  "steer-i18n",
+ "steer-paths",
  "steer-webview",
  "tempfile",
  "tokio",
@@ -2170,6 +2171,7 @@ dependencies = [
  "serde_yaml",
  "signal-hook",
  "steer-ext-agents",
+ "steer-paths",
  "tempfile",
  "tokio",
  "url",
@@ -9892,6 +9894,7 @@ dependencies = [
  "steer-agent-chat-ui",
  "steer-ghostty",
  "steer-i18n",
+ "steer-paths",
  "steer-webview",
 ]
 
@@ -9916,6 +9919,7 @@ dependencies = [
  "steer-components",
  "steer-ext-agents",
  "steer-i18n",
+ "steer-paths",
  "steer-updater",
  "supervisor",
  "toml 0.8.23",
@@ -9991,9 +9995,19 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "fluent",
+ "steer-paths",
+ "tempfile",
  "toml 0.8.23",
  "tracing",
  "unic-langid",
+]
+
+[[package]]
+name = "steer-paths"
+version = "0.4.0"
+dependencies = [
+ "dirs 6.0.0",
+ "tempfile",
 ]
 
 [[package]]

@@ -43,6 +43,13 @@ mod relay;
 mod stats;
 
 fn main() {
+    // Same state-root contract as the desktop app: `~/.steer` with the manox
+    // layer at `~/.steer/.manox` (injected as MANOX_HOME). The two binaries
+    // shared `<manox-home>` before the split and still share one root — only the
+    // address changed. A preset `MANOX_HOME` is respected and skips migration.
+    if let Err(err) = steer_paths::install() {
+        eprintln!("cx: state-root install failed: {err}");
+    }
     if let Err(err) = run() {
         eprintln!("错误: {err:#}");
         std::process::exit(1);
@@ -176,7 +183,7 @@ struct Cli {
     /// 经 PTY 中继启动（cx 持 master，终端 IO 透传，并暴露外部 IPC 注入入口）；默认直连。
     #[arg(long)]
     pty: bool,
-    /// 自定义 IPC socket 路径（仅与 --pty 同时生效；默认 ~/.manox/sessions/<id>.sock）。
+    /// 自定义 IPC socket 路径（仅与 --pty 同时生效；默认 <manox-home>/sessions/<id>.sock）。
     #[arg(long, short = 'S', value_name = "SOCK PATH", requires = "pty")]
     socket: Option<String>,
     /// Agent 进程的工作目录；默认继承 cx 自身 cwd。绑定外部 CLI session 到项目目录时用。
@@ -4897,7 +4904,7 @@ trust_level = "trusted"
 
     #[test]
     fn materialize_passthrough_dir_is_idempotent_on_rerun() {
-        // 持久目录（如 ~/.manox/.codex/）二次启动时，上次创建的符号链接已存在，
+        // 持久目录（如 <manox-home>/.codex/）二次启动时，上次创建的符号链接已存在，
         // materialize 必须能幂等地重建而非报 EEXIST。
         let root = temp_test_dir("passthrough-idempotent");
         let real = root.join("real");
