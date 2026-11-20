@@ -128,6 +128,35 @@ cp "target/${target_triple}/${target_dir}/steer" "${macos_dir}/steer"
 cp "target/${target_triple}/${target_dir}/cx" "${macos_dir}/cx"
 chmod 755 "${macos_dir}/cx"
 
+# --- pi harness sidecar ---
+# The ACP agent is a bun-compiled executable that reads its two wasm modules
+# and its skill tree from its own directory, so the four files ship together.
+# They cannot all live in Helpers: codesign treats every non-signable entry in
+# a nested-code location (Helpers, MacOS) as a code object and refuses the
+# bundle ("code object is not signed at all"). The payload therefore lives in
+# Resources — sealed as resources — and three symlinks beside the executable
+# keep the sidecar's own `dirname(execPath)/…` lookups working.
+# It is built outside cargo (`cd pi-harness && bun run build`); a missing tree
+# aborts rather than shipping an app whose pi sheet cannot start.
+pi_dist="pi-harness/dist"
+for file in pi-acp photon_rs_bg.wasm quickjs.wasm; do
+    [[ -f "${pi_dist}/${file}" ]] || {
+        echo "Error: ${pi_dist}/${file} missing — run 'cd pi-harness && bun run build' first"
+        exit 1
+    }
+done
+helpers_dir="${app_path}/Contents/Helpers"
+pi_resources_dir="${resources_dir}/pi-harness"
+mkdir -p "${helpers_dir}" "${pi_resources_dir}"
+cp "${pi_dist}/pi-acp" "${helpers_dir}/pi-acp"
+cp "${pi_dist}/photon_rs_bg.wasm" "${pi_resources_dir}/photon_rs_bg.wasm"
+cp "${pi_dist}/quickjs.wasm" "${pi_resources_dir}/quickjs.wasm"
+cp -R "${pi_dist}/skills" "${pi_resources_dir}/skills"
+ln -s "../Resources/pi-harness/photon_rs_bg.wasm" "${helpers_dir}/photon_rs_bg.wasm"
+ln -s "../Resources/pi-harness/quickjs.wasm" "${helpers_dir}/quickjs.wasm"
+ln -s "../Resources/pi-harness/skills" "${helpers_dir}/skills"
+chmod 755 "${helpers_dir}/pi-acp"
+
 # Copy icons (if present)
 if [[ -f "${icon_resources_dir}/app-icon.icns" ]]; then
     cp "${icon_resources_dir}/app-icon.icns" "${resources_dir}/app-icon.icns"
@@ -205,6 +234,7 @@ echo "Info.plist written to ${app_path}/Contents/Info.plist"
 # execute on Apple Silicon.
 entitlements_path="${icon_resources_dir}/steer.entitlements"
 nested_cx="${macos_dir}/cx"
+nested_pi="${helpers_dir}/pi-acp"
 
 if [[ -n "${MACOS_CERTIFICATE:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; then
     echo "Setting up keychain for code signing..."
@@ -228,6 +258,10 @@ if [[ -n "${MACOS_CERTIFICATE:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; th
     /usr/bin/codesign --force --timestamp --options runtime \
         --sign "${MACOS_SIGNING_IDENTITY:-}" "${nested_cx}" -v
 
+    echo "Signing the pi harness sidecar"
+    /usr/bin/codesign --force --timestamp --options runtime \
+        --sign "${MACOS_SIGNING_IDENTITY:-}" "${nested_pi}" -v
+
     echo "Code signing with Apple Developer certificate"
     /usr/bin/codesign --force --timestamp --options runtime \
         --entitlements "${entitlements_path}" \
@@ -240,6 +274,9 @@ else
     echo "Signing the cx CLI (ad-hoc)"
     codesign --force --sign - "${nested_cx}" -v
 
+    echo "Signing the pi harness sidecar (ad-hoc)"
+    codesign --force --sign - "${nested_pi}" -v
+
     echo "Ad-hoc signing with entitlements (no Apple Developer certificate)"
     codesign --force \
         --entitlements "${entitlements_path}" \
@@ -250,6 +287,7 @@ echo ""
 echo "Bundle complete: ${app_path}"
 echo "Binary:  ${macos_dir}/steer"
 echo "cx CLI:  ${macos_dir}/cx"
+echo "pi-acp:  ${helpers_dir}/pi-acp"
 echo ""
 
 if [[ "$install_result" = true ]]; then

@@ -1,6 +1,8 @@
 target/
-# 打包产物（script/bundle-dmg、release.yml 的 dist/ 暂存）
+# 打包产物（script/bundle-dmg、release.yml 的 dist/ 暂存）与 pi-harness 的构建树
 dist/
+# pi-harness（bun 工程）：依赖树与本机产物都不入库
+pi-harness/node_modules/
 .issues/
 .zcode/
 

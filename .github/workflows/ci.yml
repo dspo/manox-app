@@ -1,11 +1,18 @@
 name: ci
 
-# The PR/main pipeline. Both shipping platforms run the same two phases, and
-# the packaging legs run in parallel with them:
+# The PR/main pipeline: the pi-harness gate runs first, then both shipping
+# platforms run the same two phases, and the packaging legs run in parallel
+# with them:
 #
+#   pi-harness (bun):                   typecheck → test → build → ACP smoke
 #   verify (linux amd64, ubuntu-24.04):  clippy → test
 #   verify (macOS arm64, macos-26):      clippy → test
 #   package (deb amd64 | dmg arm64):     release build + installable artifact
+#
+# The pi harness is the app's second (sidecar) binary: its bun project builds
+# `pi-acp` and the two wasm files beside it, and the packaging legs embed the
+# built tree. A harness that fails its gates therefore fails before any Rust
+# compile runs, not at spawn time on a user's machine.
 #
 # There is no separate "build the binaries" step: `cargo test --all-targets`
 # already compiles and links every target (bins included), and the shipping
@@ -150,9 +157,51 @@ jobs:
       - name: Chrome-boundary guard
         run: ./script/check-chrome-boundary.sh
 
+  # The pi harness is a bun/TypeScript project with its own toolchain and its
+  # own gates: type-check, unit tests, the compiled binary, and the ACP smoke
+  # that drives that binary like a client. It sits between guards and verify so
+  # a broken harness fails in a couple of minutes instead of behind the Rust
+  # build — and the verify legs wait for it because a green app that cannot
+  # spawn its sidecar is not the thing being shipped.
+  pi_harness:
+    name: pi-harness (bun)
+    needs: guards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: pi-harness
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bun
+        uses: ./.github/actions/bun
+
+      # --frozen-lockfile: the committed bun.lock is the resolution, so a
+      # dependency change is a reviewed diff, not a floating install.
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type-check
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun test
+
+      # The compile is host-targeted: this leg produces the Linux x64 binary,
+      # exactly what the deb/rpm legs package.
+      - name: Build pi-acp
+        run: bun run build
+
+      # Offline smoke: spawn dist/pi-acp over stdio and drive initialize,
+      # session/new, framing probes and the stdin-close exit. No model call.
+      - name: ACP smoke
+        run: bun run smoke
+
   verify_linux:
     name: verify (linux amd64)
-    needs: guards
+    needs: [guards, pi_harness]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -205,7 +254,7 @@ jobs:
 
   verify_mac:
     name: verify (macOS arm64)
-    needs: guards
+    needs: [guards, pi_harness]
     # Same image as release.yml: verifying on a different macOS than releases
     # are built on hides (or fabricates) SDK-level breaks.
     runs-on: macos-26
@@ -294,6 +343,17 @@ jobs:
       - name: Cache ghostty-vt
         uses: ./.github/actions/ghostty-vt
 
+      - name: Install bun
+        uses: ./.github/actions/bun
+
+      # The package embeds the compiled harness, so it is built here (same
+      # host target as the bundle).
+      - name: Build pi-harness
+        working-directory: pi-harness
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
       # --release inside the script; it also derives Depends from the linked
       # binaries (ldd + dpkg -S), so the package metadata follows the real link
       # set instead of a hand-kept list.
@@ -317,6 +377,10 @@ jobs:
           dpkg-deb -x "${deb_path}" "${stage}"
           test -x "${stage}/usr/bin/steer"
           test -x "${stage}/usr/bin/cx"
+          test -x "${stage}/usr/lib/steer/pi-acp"
+          test -f "${stage}/usr/lib/steer/photon_rs_bg.wasm"
+          test -f "${stage}/usr/lib/steer/quickjs.wasm"
+          test -f "${stage}/usr/lib/steer/skills/todos/SKILL.md"
           desktop=$(ls "${stage}"/usr/share/applications/*.desktop)
           desktop-file-validate "${desktop}"
           if ldd "${stage}/usr/bin/steer" | grep -F 'not found'; then
@@ -370,11 +434,38 @@ jobs:
       - name: Cache ghostty-vt
         uses: ./.github/actions/ghostty-vt
 
+      - name: Install bun
+        uses: ./.github/actions/bun
+
+      # Steer.app carries the harness in Contents/Helpers; build it before the
+      # bundle so the copy step never sees a stale tree.
+      - name: Build pi-harness
+        working-directory: pi-harness
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
       # Builds steer + cx, assembles and ad-hoc signs Steer.app, then creates the
       # compressed image with an /Applications symlink and verifies both the
       # signature it inherited and the image itself.
       - name: Bundle .dmg
         run: ./script/bundle-dmg
+
+      # The sidecar is the one piece cargo never built: assert the bundle
+      # really carries the four-part tree (binary, two wasm modules, skills).
+      - name: Verify the bundle's harness tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="target/aarch64-apple-darwin/release/Steer.app"
+          helpers="${app}/Contents/Helpers"
+          test -x "${helpers}/pi-acp"
+          test -L "${helpers}/photon_rs_bg.wasm"
+          test -L "${helpers}/quickjs.wasm"
+          test -L "${helpers}/skills"
+          test -f "${helpers}/skills/todos/SKILL.md"
+          test -f "${app}/Contents/Resources/pi-harness/skills/todos/SKILL.md"
+          codesign --verify --strict "${helpers}/pi-acp"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -394,6 +485,7 @@ jobs:
     needs:
       - prepare
       - guards
+      - pi_harness
       - verify_linux
       - verify_mac
       - package_deb

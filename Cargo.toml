@@ -21,6 +21,7 @@ members = [
 	"crates/steer-agent-chrome-ui",
 	"crates/steer-ghostty",
 	"crates/steer-term-process",
+	"crates/steer-acp",
 	"crates/steer-updater",
 	"crates/steer-paths",
 	"crates/steer-canvas",
@@ -65,6 +66,9 @@ steer-agent-chat-ui = { path = "crates/steer-agent-chat-ui" }
 steer-agent-chrome-ui = { path = "crates/steer-agent-chrome-ui" }
 steer-ghostty = { path = "crates/steer-ghostty" }
 steer-term-process = { path = "crates/steer-term-process" }
+# The pi harness's ACP client: a child process over newline-framed JSON-RPC,
+# gpui-free so any host (the assembly, the pi sheet store, tests) can drive it.
+steer-acp = { path = "crates/steer-acp" }
 steer-updater = { path = "crates/steer-updater" }
 steer-paths = { path = "crates/steer-paths" }
 # The canvas model (containers → canvas → sheets): ids, layout, state and
