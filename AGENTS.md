@@ -69,7 +69,7 @@ script/local-manox.sh off           # 还原纯 git 依赖（CI 形态）
 # 然后 cargo update -p manox-agent（全部 8 依赖随同一 tag 整体移动）
 ```
 
-runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题在本仓修。两仓共享运行时状态根 `~/.manox/`（路径清单见 dspo/manox 仓 AGENTS.md）。
+runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题在本仓修。状态根分层（PLAN-ABSORB-01）：应用层（Steer 平台）在 `~/.steer/`（`settings.toml` 存 `ui_language`、`projects.toml` 存项目注册表，`steer-paths` crate 是路径权威，`STEER_HOME` 可覆盖）；manox harness 层在 `~/.steer/.manox/`——两个 bin（steer/cx）启动首行调 `steer_paths::install()` 注入 `MANOX_HOME` 并把旧 `~/.manox` 一次性 rename 进来，runtime 代码零改动（路径清单见 dspo/manox 仓 AGENTS.md）。
 
 ### 跨仓配对修复的消费义务
 
@@ -150,7 +150,7 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 
 模型面向字符串（提示词模板、工具 description）一律英文且**不在本仓维护**：多段落提示词散文全部在 dspo/manox 仓，本仓不得内嵌。
 
-语言配置 `ui_language` 由本仓拥有（`steer_i18n::{load_ui_language, persist_ui_language}`，读写 `~/.manox/settings.toml` 中该键且只碰该键）；`agent_language` 键已随 manox 侧语言轴退役而废除，不再有意涵。
+语言配置 `ui_language` 由本仓拥有（`steer_i18n::{load_ui_language, persist_ui_language}`，读写 `~/.steer/settings.toml` 中该键且只碰该键；首次触达时从旧 `<manox_root>/settings.toml` 摘出该键并删旧键）；`agent_language` 键已随 manox 侧语言轴退役而废除，不再有意涵。
 
 ## 工作流约定
 

@@ -31,6 +31,7 @@ steer-updater.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true
+steer-paths.workspace = true
 
 # image — resize the embedded app icon to tray-icon size at startup.
 image.workspace = true

@@ -14,7 +14,7 @@
 //! derived from the cx session socket's `<id>.sock` filename; empty for
 //! plain terminals and when the IPC bind failed). The row id is what the
 //! sidebar shows and routes on; the cx id is the traceable link to
-//! `~/.manox/sessions/`.
+//! `<manox-home>/sessions/`.
 //!
 //! In-memory only — the PTY dies with the process, nothing persists. The
 //! sidebar rows are projected by [`Workspace::external_session_rows`] and
@@ -43,7 +43,7 @@ pub(crate) struct ExternalSessionRecord {
     /// keeps it clear of manox thread UUIDs.
     pub id: String,
     /// The REAL external session id (the cx session naming
-    /// `~/.manox/sessions/<id>.sock`), derived from the session handle's
+    /// `<manox-home>/sessions/<id>.sock`), derived from the session handle's
     /// socket path at spawn. Empty for plain terminals and when the IPC
     /// bind failed — the association the row id resolves to.
     pub cx_session_id: String,

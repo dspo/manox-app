@@ -169,7 +169,7 @@ pub struct ExternalContainerSeed<'a> {
     /// The row-id namespace segment (`external:{agent}:{uuid}`).
     pub agent_id: &'a str,
     /// The REAL external session id (the cx session naming
-    /// `~/.manox/sessions/<id>.sock`); empty for plain terminals and when the
+    /// `<manox-home>/sessions/<id>.sock`); empty for plain terminals and when the
     /// IPC bind failed.
     pub cx_session_id: String,
     /// The launch label (the agent's display name, or the localized terminal

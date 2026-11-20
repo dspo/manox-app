@@ -40,7 +40,7 @@ impl UnsentTurn {
     }
 }
 
-/// The app-owned unsent ledger at `~/.manox/steer/unsent.jsonl`.
+/// The app-owned unsent ledger at `<manox-home>/steer/unsent.jsonl`.
 ///
 /// Failures are logged, never fatal: a send must not be blocked by a disk
 /// problem, and the in-memory path still delivers the turn.

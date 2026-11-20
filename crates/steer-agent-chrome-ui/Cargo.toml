@@ -42,6 +42,7 @@ ai-elements.workspace = true
 manox-agent.workspace = true
 steer-agent-chat-ui.workspace = true
 steer-ghostty.workspace = true
+steer-paths.workspace = true
 rust-embed.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

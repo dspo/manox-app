@@ -18,7 +18,7 @@ use gpui::TestAppContext;
 #[gpui::test]
 async fn new_command_lands_nothing_and_the_send_lands_the_row(cx: &mut TestAppContext) {
     // Hermetic HOME: the real host boots against a throwaway state root, not
-    // the developer's ~/.manox. `manox_agent::init` installs the object store
+    // the developer's real state root. `manox_agent::init` installs the object store
     // under that root, so the row this test reads is the test's own.
     cx.update(|_cx| {
         manox_agent::runtime::init_hermetic_for_test();

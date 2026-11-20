@@ -14,3 +14,7 @@ fluent.workspace = true
 toml.workspace = true
 tracing.workspace = true
 unic-langid.workspace = true
+steer-paths.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
