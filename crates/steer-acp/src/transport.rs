@@ -29,16 +29,42 @@ const STDERR_TAIL_LINES: usize = 64;
 /// How long a graceful close waits for the harness to flush and exit.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 
+/// The frames a `session/load` diverts from the live channel.
+struct ReplayCapture {
+    session_id: String,
+    frames: Vec<SessionUpdate>,
+}
+
+/// The capture's lifetime guard: taking the frames ends the capture on
+/// success, and dropping it unreleased (a cancelled or failed load) does the
+/// same — otherwise the slot would swallow every later update.
+pub(crate) struct ReplayTicket<'a> {
+    connection: &'a Connection,
+}
+
+impl ReplayTicket<'_> {
+    pub(crate) fn take(self) -> Vec<SessionUpdate> {
+        self.connection.take_replay()
+    }
+}
+
+impl Drop for ReplayTicket<'_> {
+    fn drop(&mut self) {
+        let _ = self.connection.take_replay();
+    }
+}
+
 /// One live harness connection and everything the tasks share.
 pub(crate) struct Connection {
     pid: u32,
     writer: Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
     pending: Mutex<HashMap<i64, oneshot::Sender<Result<Value, RpcFailure>>>>,
     next_id: AtomicI64,
-    /// When `Some`, `session/update` frames are captured here instead of the
-    /// update channel — `session/load`'s replay, which must be delivered with
-    /// the response, not raced against it.
-    replay: Mutex<Option<Vec<SessionUpdate>>>,
+    /// When `Some`, `session/update` frames *for this session* are captured
+    /// here instead of the update channel — `session/load`'s replay, which must
+    /// be delivered with the response, not raced against it. Frames for other
+    /// sessions keep flowing live.
+    replay: Mutex<Option<ReplayCapture>>,
     load_lock: tokio::sync::Mutex<()>,
     updates_tx: Mutex<Option<mpsc::UnboundedSender<SessionUpdate>>>,
     updates_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionUpdate>>>,
@@ -222,9 +248,11 @@ impl Connection {
             .ok_or(AcpError::Taken("host-request"))
     }
 
-    /// Captures `session/update` frames until the guard is dropped; the call
-    /// that installs it owns the captured vector.
-    pub(crate) fn begin_replay(&self) -> Result<(), AcpError> {
+    /// Captures this session's `session/update` frames until the ticket is
+    /// dropped; the call that installs it reads them back with
+    /// [`ReplayTicket::take`]. Dropping the ticket without taking (a cancelled
+    /// load) releases the capture, so live traffic resumes.
+    pub(crate) fn begin_replay(&self, session_id: &str) -> Result<ReplayTicket<'_>, AcpError> {
         let mut replay = self
             .replay
             .lock()
@@ -234,15 +262,19 @@ impl Connection {
                 "a session replay is already in flight".to_owned(),
             ));
         }
-        *replay = Some(Vec::new());
-        Ok(())
+        *replay = Some(ReplayCapture {
+            session_id: session_id.to_owned(),
+            frames: Vec::new(),
+        });
+        Ok(ReplayTicket { connection: self })
     }
 
-    pub(crate) fn take_replay(&self) -> Vec<SessionUpdate> {
+    fn take_replay(&self) -> Vec<SessionUpdate> {
         self.replay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
+            .map(|capture| capture.frames)
             .unwrap_or_default()
     }
 
@@ -491,15 +523,18 @@ fn dispatch(connection: &Arc<Connection>, message: Value) {
                 return;
             };
             let update = SessionUpdate { session_id, update };
-            let mut replay = connection
-                .replay
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(captured) = replay.as_mut() {
-                captured.push(update);
-                return;
+            {
+                let mut replay = connection
+                    .replay
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(capture) = replay.as_mut()
+                    && capture.session_id == update.session_id
+                {
+                    capture.frames.push(update);
+                    return;
+                }
             }
-            drop(replay);
             let sender = connection
                 .updates_tx
                 .lock()

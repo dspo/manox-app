@@ -151,7 +151,10 @@ impl AcpProcess {
                 }),
                 Some(INITIALIZE_TIMEOUT),
             )
-            .await?;
+            .await
+            // A start that does not settle is a failed start: the caller
+            // keeps the handle, so the silent child must not outlive it.
+            .inspect_err(|_| self.kill())?;
         let protocol_version = result
             .get("protocolVersion")
             .and_then(Value::as_i64)
@@ -212,7 +215,7 @@ impl AcpProcess {
         cwd: &Path,
     ) -> Result<(SessionProxy, Vec<SessionUpdate>), AcpError> {
         let _guard = self.connection.load_guard().await;
-        self.connection.begin_replay()?;
+        let replay = self.connection.begin_replay(session_id)?;
         let result = self
             .connection
             .request(
@@ -221,10 +224,12 @@ impl AcpProcess {
                 Some(BIND_TIMEOUT),
             )
             .await;
-        let replay = self.connection.take_replay();
+        // Taken on every path: the ticket releases the capture even when this
+        // future is dropped mid-flight.
+        let frames = replay.take();
         let result = result.inspect_err(|_| self.kill())?;
         let info = session_info_for(session_id, result)?;
-        Ok((SessionProxy::new(self.connection.clone(), info), replay))
+        Ok((SessionProxy::new(self.connection.clone(), info), frames))
     }
 
     /// `session/resume`: reattach without a replay. A coded refusal (the

@@ -37,6 +37,10 @@ update() {
   emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$SESSION\",\"update\":$1}}"
 }
 
+update_for() {
+  emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$1\",\"update\":$2}}"
+}
+
 session_payload() {
   printf '{"sessionId":"%s","configOptions":[{"id":"model","name":"Model","type":"select","options":[{"value":"stub-model","name":"Stub"}]}],"modes":{"availableModes":[{"id":"ask","name":"Ask"}]}}' "$SESSION"
 }
@@ -62,7 +66,7 @@ dispatch() {
 
   case "$method" in
     initialize)
-      respond "$id" '{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[],"agentInfo":{"name":"stub-agent","version":"9.9.9"}}'
+      respond "$id" '{"protocolVersion":'"${PI_STUB_PROTOCOL:-1}"',"agentCapabilities":{"loadSession":true},"authMethods":[],"agentInfo":{"name":"stub-agent","version":"9.9.9"}}'
       ;;
     session/new)
       minted=$(json_string "sessionId" "$line")
@@ -78,6 +82,10 @@ dispatch() {
         return
       fi
       SESSION=$asked
+      case "$asked" in
+        slow) sleep 2 ;;
+        cross) update_for "stub-other" '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"other session"}}' ;;
+      esac
       # Replay precedes the response, in order.
       update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"earlier question"}}'
       update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"earlier answer"}}'

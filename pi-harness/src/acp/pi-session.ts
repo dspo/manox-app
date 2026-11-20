@@ -620,6 +620,14 @@ class PiHarnessSession implements HarnessSession {
     } catch {
       // Already disposed.
     }
+    // A closed session must not leave its dispatched runs alive: they are
+    // model calls and workspace writes that belong to this session, so the
+    // manager aborts them before the session is gone.
+    try {
+      this.subagentManager.dispose();
+    } catch {
+      // Already disposed.
+    }
   }
 
   /** The load replay, mapped from pi's own projection of the session file. */

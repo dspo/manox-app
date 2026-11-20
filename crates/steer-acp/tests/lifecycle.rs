@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use steer_acp::{
-    AcpEnv, AcpOptions, AcpProcess, HostRequest, SessionProxy, SessionUpdate, mint_session_id,
+    AcpEnv, AcpError, AcpOptions, AcpProcess, HostRequest, SessionProxy, SessionUpdate,
+    mint_session_id,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -28,12 +29,12 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
-        let process = AcpProcess::spawn(AcpOptions::new(
-            stub(),
-            std::env::temp_dir(),
-            AcpEnv::inherit(),
-        ))
-        .expect("the stub agent starts");
+        Self::start_with(AcpEnv::inherit())
+    }
+
+    fn start_with(env: AcpEnv) -> Self {
+        let process = AcpProcess::spawn(AcpOptions::new(stub(), std::env::temp_dir(), env))
+            .expect("the stub agent starts");
         let updates = process.updates().expect("updates are taken once");
         let requests = process.requests().expect("requests are taken once");
         Self {
@@ -261,6 +262,92 @@ async fn crash_fails_the_pending_turn_and_closes_the_channels() {
     .await
     .expect("the exit is reported");
     assert_eq!(exit.code, Some(7));
+}
+
+#[tokio::test]
+async fn initialize_failure_hangs_up_the_child() {
+    let harness = Harness::start_with(AcpEnv::inherit().with_var("PI_STUB_PROTOCOL", "2"));
+    let error = tokio::time::timeout(
+        TIMEOUT,
+        harness.process.initialize("steer-acp-test", "0.0.0"),
+    )
+    .await
+    .expect("initialize answers")
+    .expect_err("a foreign protocol version is refused");
+    assert!(
+        matches!(error, AcpError::Protocol(_)),
+        "unexpected error: {error}"
+    );
+
+    let exit = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if let Some(exit) = harness.process.exit() {
+                return exit;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the refused child is hung up");
+    assert!(
+        exit.signal.is_some(),
+        "a refused handshake kills the process, got {exit:?}"
+    );
+}
+
+#[tokio::test]
+async fn load_captures_only_the_loaded_session() {
+    let mut harness = Harness::start();
+    harness.handshake().await;
+
+    let (session, replay) = tokio::time::timeout(
+        TIMEOUT,
+        harness.process.load_session("cross", &std::env::temp_dir()),
+    )
+    .await
+    .expect("session/load answers")
+    .expect("session/load succeeds");
+    assert_eq!(session.id(), "cross");
+    assert_eq!(replay.len(), 2);
+    assert!(
+        replay.iter().all(|update| update.session_id == "cross"),
+        "another session's frame leaked into the replay: {replay:?}"
+    );
+
+    // The other session's update belonged to the live channel all along.
+    let live = harness.next_update().await;
+    assert_eq!(live.session_id, "stub-other");
+}
+
+#[tokio::test]
+async fn cancelled_load_releases_the_capture() {
+    let harness = Harness::start();
+    harness.handshake().await;
+
+    // The stub holds this load for two seconds; the caller gives up first.
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(150),
+        harness.process.load_session("slow", &std::env::temp_dir()),
+    )
+    .await;
+    assert!(
+        cancelled.is_err(),
+        "the slow load should not settle in time"
+    );
+
+    // The capture slot must be free again: the next load gets its own replay.
+    let (session, replay) = tokio::time::timeout(
+        TIMEOUT,
+        harness
+            .process
+            .load_session("normal", &std::env::temp_dir()),
+    )
+    .await
+    .expect("the follow-up load answers")
+    .expect("the follow-up load succeeds");
+    assert_eq!(session.id(), "normal");
+    assert_eq!(replay.len(), 2);
+    assert!(replay.iter().all(|update| update.session_id == "normal"));
 }
 
 #[tokio::test]
