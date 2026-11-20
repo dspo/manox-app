@@ -18,6 +18,10 @@ crates/                    # 全部 workspace 成员平铺于此（本仓只有�
                            #   为目视验收面，装配在 agent-ui::chrome_assembly）
   steer-agent-chat-ui/     # 会话列的状态机与消息管线（chat crate 依赖面见
                            #   script/check-chat-crate-deps.sh）
+  steer-canvas/            # 画布模型（Container → canvas → sheet）：sheet id 与布局树、
+                           #   每容器画布状态机（单写者 set_layout + ticket、park LRU）、
+                           #   布局持久化、SheetKindSpec registry；除 registry 的视图工厂外
+                           #   一律 gpui-free（见「画布模型」一节）
   steer-ghostty/           # 终端面（libghostty-vt 仿真核静态链接在 GPUI element 后；
                            #   唯一终端实现，见「Ghostty 终端」一节）
   steer-term-process/      # 终端进程缝（TerminalProcess/ProcessOutput；gpui-free，
@@ -57,6 +61,17 @@ manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（d
 - **客户端 SDK**：crates.io `ahp`/`ahp-types` `=1.0.0` 精确 pin（与上游 workspace 一致）；x-manox 扩展通道的 fold 与声明常量经上游 `manox-ahp::ext`。
 - 已知降级（接 x-manox 通道未建模的部分）：UI 本地注释卡不持久、终端走内核 PTY 直连不走 AHP terminal 通道。
 - unarchive（整树复活，上游 #987 的 parent 边）：数据面就绪且经测（`revive_container`）；UI 入口待归档分区面（挂账——侧栏今日不渲染归档行，分区面落地即销账）。
+
+### 画布模型（crates/steer-canvas，PLAN-ABSORB-03）
+
+容器持有画布、画布是布局树、叶子是 sheet。本 crate 是**状态层**（渲染面在 PLAN-ABSORB-04）。不可从代码推导的约束：
+
+- **sheet 的存在由 registry 决定**，布局只决定放在哪：`SheetKindSpec` 在装配点注册（kind 二次认领 panic 即 fail fast），`body` 是 `AnyView` 工厂——kind 的状态必须住自己的 store（切 tab 会卸载 body），不得驻留在视图里。
+- **布局只有一个写者**：`CanvasState::set_layout(container_id, next, ticket)`。手势先 `take_ticket()` 再提交；过期票（含「该画布已切走」）静默丢弃。`sheet_count == 0` 返回 `AutoArchive(cid)`，归档动作由调用方走 workspace 的 teardown 面——状态层不做跨实体写。
+- **park 有界**：切走的容器布局进 held（LRU 至多 4 份），被显示的容器永不留在 held；scratch 画布（`SCRATCH_CONTAINER`）不 park、不持久化，布局留在内存，铸成正式容器时 `migrate_scratch` 平移。
+- **容器标题是投影**：`container_title` 取创建序中最早存活 sheet 的标题（跳 `home:`；`names_container = false` 的 kind 由调用方返回 None 跳过），无 → None，调用方落 cwd 尾段。
+- **持久化**：`~/.steer/layouts/{percent-encoded cid}.json`（`{containerId, layout, zoom, updatedAt}`，temp 文件 + 换名原子写）；损坏文件 warn + 丢弃 → 默认画布（激进纪律：不修复不兼容读）；400ms 写防抖在调用方（保存泵）。
+- **gpui 边界**：`id`/`layout`/`state`/`persist` 不依赖 gpui，只有 `registry`（默认开、可关的 feature）拉 gpui；`script/check-chat-crate-deps.sh` 同时守「`--no-default-features` 树里无 gpui」与「canvas 不依赖 chat crate」。
 
 ### 与 manox 仓的联动开发
 

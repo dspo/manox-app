@@ -23,6 +23,7 @@ members = [
 	"crates/steer-term-process",
 	"crates/steer-updater",
 	"crates/steer-paths",
+	"crates/steer-canvas",
 ]
 resolver = "2"
 
@@ -66,6 +67,9 @@ steer-ghostty = { path = "crates/steer-ghostty" }
 steer-term-process = { path = "crates/steer-term-process" }
 steer-updater = { path = "crates/steer-updater" }
 steer-paths = { path = "crates/steer-paths" }
+# The canvas model (containers → canvas → sheets): ids, layout, state and
+# persistence are gpui-free; gpui enters only through its `registry` feature.
+steer-canvas = { path = "crates/steer-canvas" }
 
 anyhow = "1"
 # The pure-Rust LaTeX math typesetter behind `$$…$$` blocks: a formula becomes
