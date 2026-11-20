@@ -15,6 +15,7 @@ set -euo pipefail
 # Installed layout:
 #   /usr/bin/<exe>                                   the steer binary
 #   /usr/bin/cx                                      the cx CLI, same build
+#   /usr/lib/steer/pi-acp                            the pi harness sidecar (+ wasm, skills)
 #   /usr/share/applications/<bundle-id>.desktop      desktop entry
 #   /usr/share/icons/hicolor/{128x128,256x256}/apps/<bundle-id>.png
 #
@@ -138,6 +139,27 @@ rpm_version="${app_version//-/$'~'}"
 pkg_name=$(echo "${app_name}" | tr '[:upper:] ' '[:lower:]-')
 exe_name="${pkg_name}"
 
+# --- pi harness sidecar ---
+# The ACP agent is a self-contained bun binary that reads its two wasm modules
+# and its skill tree from its own directory. rpmbuild copies it from the build
+# tree, so validate the tree here (the failure message is the useful part).
+pi_dist="pi-harness/dist"
+for file in pi-acp photon_rs_bg.wasm quickjs.wasm; do
+    [[ -f "${pi_dist}/${file}" ]] || {
+        echo "Error: ${pi_dist}/${file} missing — run 'cd pi-harness && bun run build' first"
+        exit 1
+    }
+done
+# The skill tree ships beside the binary; rpm owns every directory it creates,
+# so the file list is derived from what the build actually produced.
+skill_units=""
+while IFS= read -r dir; do
+    skill_units+="%dir /usr/lib/steer/${dir#${pi_dist}/}"$'\n'
+done < <(find "${pi_dist}/skills" -type d | sort)
+while IFS= read -r file; do
+    skill_units+="/usr/lib/steer/${file#${pi_dist}/}"$'\n'
+done < <(find "${pi_dist}/skills" -type f | sort)
+
 # --- Lay out the rpmbuild tree ---
 topdir="${ROOT}/target/rpm"
 spec_path="${topdir}/SPECS/${pkg_name}.spec"
@@ -214,12 +236,20 @@ under ~/.manox/.
 %install
 install -D -m 0755 "%{_steer_root}/target/${target_dir}/steer" "%{buildroot}/usr/bin/${exe_name}"
 install -D -m 0755 "%{_steer_root}/target/${target_dir}/cx" "%{buildroot}/usr/bin/cx"
+install -D -m 0755 "%{_steer_root}/pi-harness/dist/pi-acp" "%{buildroot}/usr/lib/steer/pi-acp"
+install -D -m 0644 "%{_steer_root}/pi-harness/dist/photon_rs_bg.wasm" "%{buildroot}/usr/lib/steer/photon_rs_bg.wasm"
+install -D -m 0644 "%{_steer_root}/pi-harness/dist/quickjs.wasm" "%{buildroot}/usr/lib/steer/quickjs.wasm"
+cp -R "%{_steer_root}/pi-harness/dist/skills" "%{buildroot}/usr/lib/steer/skills"
 install -D -m 0644 "%{_sourcedir}/${bundle_id}.desktop" "%{buildroot}/usr/share/applications/${bundle_id}.desktop"
 ${icon_install}
 %files
 /usr/bin/${exe_name}
 /usr/bin/cx
-/usr/share/applications/${bundle_id}.desktop
+%dir /usr/lib/steer
+/usr/lib/steer/pi-acp
+/usr/lib/steer/photon_rs_bg.wasm
+/usr/lib/steer/quickjs.wasm
+${skill_units}/usr/share/applications/${bundle_id}.desktop
 ${icon_files}
 # A changelog entry is what rpm derives SOURCE_DATE_EPOCH from; without one
 # rpmbuild warns that no build timestamp is available.
@@ -253,6 +283,7 @@ echo ""
 echo "Bundle complete: ${rpm_path}"
 echo "Binary:   /usr/bin/${exe_name}"
 echo "cx CLI:   /usr/bin/cx"
+echo "pi-acp:   /usr/lib/steer/pi-acp"
 echo "Desktop:  /usr/share/applications/${bundle_id}.desktop"
 echo "Install:  sudo dnf install ./${rpm_path#"${ROOT}/"}"
 echo ""

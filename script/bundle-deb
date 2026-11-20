@@ -15,6 +15,7 @@ set -euo pipefail
 # Installed layout:
 #   /usr/bin/<exe>                                   the steer binary
 #   /usr/bin/cx                                      the cx CLI, same build
+#   /usr/lib/steer/pi-acp                            the pi harness sidecar (+ wasm, skills)
 #   /usr/share/applications/<bundle-id>.desktop      desktop entry
 #   /usr/share/icons/hicolor/{128x128,256x256}/apps/<bundle-id>.png
 #
@@ -159,6 +160,24 @@ chmod 755 "${pkg_root}/usr/bin/${exe_name}"
 cp "${cx_bin_path}" "${pkg_root}/usr/bin/cx"
 chmod 755 "${pkg_root}/usr/bin/cx"
 
+# --- pi harness sidecar ---
+# The ACP agent is a self-contained bun binary that reads its two wasm modules
+# and its skill tree from its own directory, so /usr/lib/steer ships as a unit.
+# It is built outside cargo (`cd pi-harness && bun run build`).
+pi_dist="pi-harness/dist"
+for file in pi-acp photon_rs_bg.wasm quickjs.wasm; do
+    [[ -f "${pi_dist}/${file}" ]] || {
+        echo "Error: ${pi_dist}/${file} missing — run 'cd pi-harness && bun run build' first"
+        exit 1
+    }
+done
+mkdir -p "${pkg_root}/usr/lib/steer"
+cp "${pi_dist}/pi-acp" "${pkg_root}/usr/lib/steer/pi-acp"
+cp "${pi_dist}/photon_rs_bg.wasm" "${pkg_root}/usr/lib/steer/photon_rs_bg.wasm"
+cp "${pi_dist}/quickjs.wasm" "${pkg_root}/usr/lib/steer/quickjs.wasm"
+cp -R "${pi_dist}/skills" "${pkg_root}/usr/lib/steer/skills"
+chmod 755 "${pkg_root}/usr/lib/steer/pi-acp"
+
 icon_resources_dir="crates/steer-app/resources"
 if [[ -f "${icon_resources_dir}/app-icon.png" ]]; then
     cp "${icon_resources_dir}/app-icon.png" "${pkg_root}/usr/share/icons/hicolor/128x128/apps/${bundle_id}.png"
@@ -222,6 +241,7 @@ echo ""
 echo "Bundle complete: ${deb_path}"
 echo "Binary:   /usr/bin/${exe_name}"
 echo "cx CLI:   /usr/bin/cx"
+echo "pi-acp:   /usr/lib/steer/pi-acp"
 echo "Desktop:  /usr/share/applications/${bundle_id}.desktop"
 echo "Install:  sudo apt-get install ./${deb_path}"
 echo ""
