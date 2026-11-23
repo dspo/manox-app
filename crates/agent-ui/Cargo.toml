@@ -26,6 +26,13 @@ harness = false
 name = "visual_settings"
 harness = false
 
+# Visual acceptance for the canvas surface (same offscreen-render
+# constraints as visual_bubble; needs the diagnostic store binding).
+[[test]]
+name = "visual_canvas"
+harness = false
+required-features = ["test-support"]
+
 [features]
 default = []
 # Exposes the `Workspace::diagnostic_*` hooks and the full-workspace overlap
