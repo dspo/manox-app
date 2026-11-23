@@ -3,9 +3,11 @@
 //! What lives here: the AHP store the transparent AHP client folds into
 //! (`ahp_store`), the pure projection from its `ChatState` to transcript
 //! nodes (`transcript`), the conversation column's keyed row state
-//! (`conversation`), the ask-card and composer rendering surface, and the
-//! rail's data sources (`cockpit`, `git_status`) behind the
-//! [`host::ChatHost`] port.
+//! (`conversation`), the ask-card and composer rendering surface, the rail's
+//! data sources (`cockpit`, `git_status`) behind the [`host::ChatHost`] port,
+//! and the pi harness's data plane (`pi`: the ACP transcript reducer,
+//! per-session protocol state, and the child-process runtime the pi sheet's
+//! views will read).
 //!
 //! Dependency invariant (the executable definition of the chrome/chat
 //! decoupling): this crate never touches terminals, webviews, or
@@ -24,6 +26,7 @@ pub mod host;
 pub mod i18n;
 pub mod model_tag;
 pub mod overlap_diag;
+pub mod pi;
 pub mod preview;
 pub mod text;
 pub mod transcript;

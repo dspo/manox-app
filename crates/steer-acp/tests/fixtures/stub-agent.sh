@@ -55,7 +55,7 @@ dispatch() {
     if [ "$id" = "100" ]; then
       PERMISSION_ANSWER=$(json_string "optionId" "$line")
       if [ -n "$PENDING_PROMPT" ]; then
-        update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"permission handled"},"_meta":{"stub":{"answer":"'"$PERMISSION_ANSWER"'"}}}'
+        update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"permission handled"},"messageId":"m1","_meta":{"stub":{"answer":"'"$PERMISSION_ANSWER"'"}}}'
         respond "$PENDING_PROMPT" '{"stopReason":"end_turn"}'
         PENDING_PROMPT=""
         PENDING_KIND=""
@@ -86,9 +86,10 @@ dispatch() {
         slow) sleep 2 ;;
         cross) update_for "stub-other" '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"other session"}}' ;;
       esac
-      # Replay precedes the response, in order.
-      update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"earlier question"}}'
-      update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"earlier answer"}}'
+      # Replay precedes the response, in order. A replay carries the entries'
+      # settle facts on the chunks themselves (no separate settle marker).
+      update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"earlier question"},"messageId":"e0","_meta":{"pi":{"at":1,"entryId":"e0"}}}'
+      update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"earlier answer"},"messageId":"e1","_meta":{"pi":{"at":2,"entryId":"e1","stopReason":"end_turn"}}}'
       respond "$id" "$(session_payload)"
       ;;
     session/resume)
@@ -108,7 +109,7 @@ dispatch() {
           exit 7
           ;;
         wait)
-          update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
+          update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"},"messageId":"m1"}'
           PENDING_PROMPT=$id
           PENDING_KIND="wait"
           ;;
@@ -118,8 +119,9 @@ dispatch() {
           PENDING_KIND="permission"
           ;;
         *)
-          update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"'"$text"'"}}'
-          update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"reply to '"$text"'"}}'
+          update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"'"$text"'"},"messageId":"e0","_meta":{"pi":{"entryId":"e0"}}}'
+          update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"reply to '"$text"'"},"messageId":"m1"}'
+          update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""},"messageId":"e1","_meta":{"pi":{"settled":true,"entryId":"e1","stopReason":"end_turn"}}}'
           respond "$id" '{"stopReason":"end_turn"}'
           ;;
       esac
