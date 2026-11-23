@@ -362,10 +362,11 @@ chrome 的 `CHROME_CANVAS=1` 场景）。
 五个 sheet kind（`agent_ui::canvas_kinds`，每个 body 经 registry 工厂 mint-or-reuse，按
 sheet id 记账于 `CanvasPaneStore`；容器布局文件是唯一持久化）：
 
-- **webview**（`webview:{cid}:{n}`）：真 `BrowserView`，走生产
-  `restore_browser_tab`/`close_browser_tab` 与进程级 `WorkspaceBrowserHost`（IPC 全通）；
-  页面 `<title>` 镜像到页签（2s ticker，通知画布重绘）；**OS 子窗只在 shown 页挂载**
-  （wry 不吃 CSS 裁剪，隐藏即卸、回来按 store 的 URL 重挂）；
+- **webview**（`webview:{cid}:{n}`，浏览器平台专属——Linux/FreeBSD 上 kind 不注册）：
+  真 `BrowserView`，走生产 `restore_browser_tab`/`close_browser_tab` 与进程级
+  `WorkspaceBrowserHost`（IPC 全通）；页面 `<title>` 镜像到页签（2s ticker，通知画布
+  重绘）；**OS 子窗只在 shown 页挂载**（wry 不吃 CSS 裁剪，隐藏即卸、回来按 store 的
+  URL 重挂）；支撑件（槽结构 / ticker / 显隐）与 kind 同 gate；
 - **editor**（`editor:{cid}:{encodedPath}`）：markdown 编辑器按 sheet id 记账（草稿不被
   tab 切换重置）；restore 判据 = 文件存在；
 - **diff**（`diff:{cid}:{old}~{new}`）：上游 `Diff`；内容 = 编辑卡 open 时交给 store 的
