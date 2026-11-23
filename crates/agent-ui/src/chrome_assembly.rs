@@ -364,21 +364,18 @@ fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
     // container teardown clears them together when its container dies).
     let fg = ws.read(cx).foreground_container_id(cx);
     // Session-scoped state: a program title is transient per session id — it
-    // leaves with the session (a catalogue removal, a journal walk that drops
-    // the row), never with a closed tab. The live set is the book's own memory
-    // (catalogue rows plus folded channels: a just-created session can carry a
-    // title before its summary lands) plus the foreground id. This is the title
-    // bridge's only write into chrome state, and the projection pump is its
-    // single writer (boundary invariant ①).
-    {
-        let store = mux.read(cx).store();
-        let view = store.read(cx);
-        let book = &view.book;
-        crate::title_store::TitleStore::global().retain_live(|id| {
-            book.summaries.contains_key(id)
-                || book.sessions.contains_key(id)
-                || fg.as_deref() == Some(id)
-        });
+    // leaves only when the session is DELETED, never with a closed tab and
+    // never by catalogue-membership inference: the catalogue legitimately
+    // lags (the first `listSessions` walk's landing window) and a peer's
+    // archive moves rows out of it while their sessions live on (same id,
+    // revivable). The fold queues deletions — a `sessionRemoved` carrying no
+    // archive mark — and this pump is their single drain into the title
+    // store (boundary invariant ①: one writer).
+    let bound_store = ws.read(cx).chat_store(cx).map(|(store, _)| store);
+    if let Some(store) = bound_store {
+        for session_id in store.update(cx, |store, _| store.take_deleted_sessions()) {
+            crate::title_store::TitleStore::global().prune(&session_id);
+        }
     }
     let old_id = ws.read(cx).dock_owner();
     if fg != old_id && fg.is_some() {

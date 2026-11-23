@@ -20,7 +20,7 @@
 //! State is session-scoped: an entry lives as long as the session id does.
 //! Closing a tab prunes nothing (background work that keeps running while the
 //! tab is closed still titles the session), and only a deleted session drops
-//! its entry (`retain_live`).
+//! its entry (`prune`, driven by the store fold's deletion events).
 //!
 //! Sanitizing lives HERE, not in the kernel: trim, whitespace-only =
 //! no title (the caller falls back to the session name), reuse of the
@@ -147,18 +147,15 @@ impl TitleStore {
         lock(&session).program_title.clone()
     }
 
-    /// Drop one session's interpreter and title (a deleted session).
+    /// Drop one session's interpreter and title (a deleted session). The
+    /// deletion is an EVENT, not an inference: the store fold reports the
+    /// removals that carry no archive mark (an archived session is revivable
+    /// and keeps its entry), and the projection pump drives this — never a
+    /// per-frame sweep over catalogue membership, which would drop titles
+    /// during the catalogue's landing window and on archive exits.
     pub fn prune(&self, session_id: &str) {
         lock(&self.sessions).remove(session_id);
         lock(&self.dirty).remove(session_id);
-    }
-
-    /// Session-deletion prune: drop every entry the live set no longer names.
-    /// The caller composes that set from the catalogue plus the folded
-    /// channels, so a closed tab never lands here.
-    pub fn retain_live(&self, live: impl Fn(&str) -> bool) {
-        lock(&self.sessions).retain(|id, _| live(id));
-        lock(&self.dirty).retain(|id| live(id));
     }
 
     /// The session ids whose title moved since the last call.
@@ -280,16 +277,10 @@ mod tests {
         assert!(store.program_title("s-1").is_none());
         assert_eq!(store.program_title("s-2").as_deref(), Some("beta"));
         assert!(!store.take_dirty().iter().any(|id| id == "s-1"));
-    }
-
-    #[test]
-    fn retain_live_keeps_the_named_sessions() {
-        let store = TitleStore::default();
-        store.feed("s-1", b"\x1b]2;alpha\x07");
-        store.feed("s-2", b"\x1b]2;beta\x07");
-        store.retain_live(|id| id == "s-2");
-        assert!(store.program_title("s-1").is_none());
-        assert_eq!(store.program_title("s-2").as_deref(), Some("beta"));
+        // Pruning is an event, not a sweep: an entry no catalogue names
+        // survives until its own deletion lands.
+        store.feed("s-2", b"\x1b]2;gamma\x07");
+        assert_eq!(store.program_title("s-2").as_deref(), Some("gamma"));
     }
 
     #[test]
