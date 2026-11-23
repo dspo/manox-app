@@ -107,7 +107,10 @@ impl Workspace {
 }
 
 impl Workspace {
-    /// The running sub-agent rows of the foreground session's fold.
+    /// The running sub-agent rows of the foreground session's fold. Only the
+    /// diagnostic read faces call it (the live surfaces read the fold through
+    /// the column), so it ships with them.
+    #[cfg(feature = "test-support")]
     pub(crate) fn running_subagents(
         &self,
         cx: &App,
