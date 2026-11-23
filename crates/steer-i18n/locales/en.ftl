@@ -1076,3 +1076,4 @@ canvas-sheet-unavailable = No content for this sheet kind yet
 ### pi (canvas + launcher entry)
 canvas-tab-pi = pi
 launcher-action-pi = pi session
+pi-selector-mode = mode
