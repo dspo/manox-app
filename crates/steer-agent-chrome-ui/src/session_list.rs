@@ -1285,10 +1285,9 @@ fn session_row(
                 })),
         );
 
-    // The selected row's brand edge (plan 04 §3.5): a 3px accent bar hugging
-    // the card's left edge. It is an absolutely-positioned overlay with a
-    // transparent twin in every other state, so selection never shifts the
-    // row's content.
+    // The selected row's brand edge: a 3px accent bar hugging the card's
+    // left edge. It is an absolutely-positioned overlay with a transparent
+    // twin in every other state, so selection never shifts the row's content.
     let row = row.relative().child(
         gpui::div()
             .absolute()

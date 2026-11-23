@@ -114,7 +114,8 @@ impl crate::Workspace {
             cx,
         );
         // A container minted from the scratch canvas carries that canvas's
-        // sheets over (plan β: the scratch surface is never stranded).
+        // sheets over — nothing laid out on the scratch surface is stranded
+        // by the mint.
         self.mint_canvas_from_scratch(&created, cx);
         // The grouping fact lands at the attach tail (the seed carries it
         // there — a refused create must not leave a dead key); the launcher
