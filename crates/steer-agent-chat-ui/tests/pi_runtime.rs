@@ -237,3 +237,126 @@ async fn a_permission_request_reaches_the_host_and_the_answer_returns() {
         .await
         .expect("close settles");
 }
+
+#[tokio::test]
+async fn an_ask_card_reaches_the_host_and_the_answer_returns() {
+    let root = state_root();
+    let (events, receiver) = async_channel::unbounded();
+    let runtime = PiRuntime::new(stub(), &root, &root);
+    let connection = tokio::time::timeout(
+        TIMEOUT,
+        runtime.open(Some(SESSION), &root, OpenMode::New, &events),
+    )
+    .await
+    .expect("the bind answers")
+    .expect("the session opens");
+    let mut book = open_book(&root, SESSION);
+    book.apply(&next_event(&receiver).await);
+
+    book.prompt_started(SESSION, "ask");
+    let prompt = tokio::spawn({
+        let connection = connection.clone();
+        async move { connection.prompt("ask").await }
+    });
+    let event = loop {
+        let event = next_event(&receiver).await;
+        if let StoreEvent::Request { request, .. } = &event {
+            assert_eq!(request.method, "_zu/ask/create");
+            break event;
+        }
+        book.apply(&event);
+    };
+    let StoreEvent::Request { request, .. } = &event else {
+        unreachable!("the loop breaks only on a request");
+    };
+    let request = request.clone();
+    book.apply(&event);
+    assert_eq!(
+        book.view(SESSION).unwrap().state,
+        PiSessionState::WaitingUser
+    );
+    assert_eq!(book.pending_asks().count(), 1);
+
+    let pending = book
+        .take_request(SESSION, &request.id)
+        .expect("the request is pending");
+    connection
+        .respond(
+            &pending.id,
+            json!({"action": "accept", "answers": [{"kind": "option", "labels": ["A"]}]}),
+        )
+        .expect("the answer is written");
+
+    let stop = tokio::time::timeout(TIMEOUT, prompt)
+        .await
+        .expect("the turn settles")
+        .expect("the task does not panic")
+        .expect("the prompt succeeds");
+    assert_eq!(stop, "end_turn");
+    book.turn_finished(SESSION);
+    assert_eq!(book.view(SESSION).unwrap().state, PiSessionState::Ready);
+
+    tokio::time::timeout(TIMEOUT, connection.close())
+        .await
+        .expect("close settles");
+}
+
+#[tokio::test]
+async fn the_panel_requests_answer_and_fold_into_the_view() {
+    use steer_agent_chat_ui::pi::session::{
+        parse_plan, parse_subagent_runs, parse_subagent_transcript,
+    };
+
+    let root = state_root();
+    let (events, _receiver) = async_channel::unbounded();
+    let runtime = PiRuntime::new(stub(), &root, &root);
+    let connection = tokio::time::timeout(
+        TIMEOUT,
+        runtime.open(Some(SESSION), &root, OpenMode::New, &events),
+    )
+    .await
+    .expect("the bind answers")
+    .expect("the session opens");
+
+    let plan = parse_plan(
+        &connection
+            .request("_zu/todos/list", json!({}))
+            .await
+            .expect("the plan answers"),
+    );
+    assert!(plan.enabled);
+    assert_eq!(plan.progress(), (0, 1));
+
+    let written = parse_plan(
+        &connection
+            .request(
+                "_zu/todos/write",
+                json!({"op": {"kind": "update", "id": "t-1", "status": "done"}}),
+            )
+            .await
+            .expect("the write answers"),
+    );
+    assert_eq!(written.progress(), (1, 1));
+
+    let runs = parse_subagent_runs(
+        &connection
+            .request("_zu/subagents/list", json!({}))
+            .await
+            .expect("the run list answers"),
+    );
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].status.is_live());
+
+    let messages = parse_subagent_transcript(
+        &connection
+            .request("_zu/subagents/transcript", json!({"runId": "r-1"}))
+            .await
+            .expect("the transcript answers"),
+    );
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "looking");
+
+    tokio::time::timeout(TIMEOUT, connection.close())
+        .await
+        .expect("close settles");
+}

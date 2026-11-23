@@ -356,9 +356,11 @@ async fn custom_requests_carry_the_session_id() {
     let session = harness.open_session(&mint_session_id()).await;
 
     let error = session
-        .request_scoped("_zu/todos/list", json!({}))
+        .request_scoped("_zu/not_served", json!({}))
         .await
-        .expect_err("the stub does not serve extension methods");
-    // The stub answers method-not-found, which proves the request reached it.
+        .expect_err("the stub does not serve an unknown extension method");
+    // The stub answers method-not-found, which proves the request reached it
+    // (the panel methods `_zu/todos/list` and `_zu/subagents/list` are served,
+    // so this probe stays on a name the stub deliberately lacks).
     assert_eq!(error.data_code(), Some("method_not_found"));
 }
