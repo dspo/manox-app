@@ -503,7 +503,25 @@ impl Render for PiSessionView {
                             })),
                     )
                     .when(state == PiSessionState::Dead, |column| {
-                        column.child(muted_text(t("pi-session-dead"), &theme))
+                        let store = store.clone();
+                        let session_id = session_id.clone();
+                        column.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(muted_text(t("pi-session-dead"), &theme))
+                                .child(button(
+                                    SharedString::from(format!("pi-reconnect:{session_id}")),
+                                    t("pi-reconnect"),
+                                    theme.primary,
+                                    move |_, _, cx| {
+                                        store.update(cx, |store, cx| {
+                                            store.reconnect(&session_id, cx);
+                                        });
+                                    },
+                                )),
+                        )
                     }),
             )
     }

@@ -1058,3 +1058,4 @@ pi-subagents-title = 子代理
 pi-banner-skills = 技能
 pi-banner-extensions = 扩展
 pi-subagent-transcript-empty = 还没有消息
+pi-reconnect = 重连
