@@ -1,7 +1,8 @@
-// The compiled binary cannot read its own package.json, so the version is a
-// source constant; this keeps it equal to the pin. A packaged app shows the
-// same number in its About page, so the app-side mirror must move with these
-// two (PLAN-ABSORB-06-PI-SHEET-UI adds that leg when the surface lands).
+// package.json is the single source of truth for the pi distro version: the
+// compiled binary cannot read its own package.json, so src/version.ts mirrors
+// the pin (checked here), and the desktop app reads package.json itself at
+// compile time (crates/steer-app/build.rs, STEER_PI_DISTRO_VERSION) — there is
+// no app-side mirror constant to keep in step.
 import { readFileSync } from "node:fs";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
