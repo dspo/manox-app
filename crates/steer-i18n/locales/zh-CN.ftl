@@ -1050,3 +1050,4 @@ canvas-sheet-unavailable = 这种 sheet 还没有可用的内容
 ### pi（画布与启动器入口）
 canvas-tab-pi = pi
 launcher-action-pi = pi 会话
+pi-selector-mode = 模式
