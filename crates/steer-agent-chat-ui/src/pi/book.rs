@@ -11,7 +11,9 @@ use std::path::Path;
 use steer_acp::RequestId;
 
 use super::runtime::StoreEvent;
-use super::session::{PendingRequest, PiPlan, PiSessionView, PiSubagentMessage, PiSubagentRun};
+use super::session::{
+    PendingRequest, PiPlan, PiRestoredAsk, PiSessionView, PiSubagentMessage, PiSubagentRun,
+};
 
 /// Every session the host has opened, keyed by pi session id.
 #[derive(Debug, Default)]
@@ -53,6 +55,13 @@ impl PiBook {
         self.sessions
             .get_mut(id)
             .is_some_and(|view| view.set_plan(plan))
+    }
+
+    /// Folds a `_zu/ask/pending` answer.
+    pub fn set_restored_asks(&mut self, id: &str, asks: Vec<PiRestoredAsk>) -> bool {
+        self.sessions
+            .get_mut(id)
+            .is_some_and(|view| view.set_restored_asks(asks))
     }
 
     /// Folds a `_zu/subagents/list` answer.

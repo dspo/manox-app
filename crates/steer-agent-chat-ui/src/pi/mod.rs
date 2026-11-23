@@ -30,8 +30,8 @@ pub use book::PiBook;
 pub use runtime::{OpenMode, PiConnection, PiRuntime, StoreEvent};
 pub use session::{
     PendingRequest, PiBanner, PiBannerEntry, PiBannerWarning, PiCommand, PiConfigChoice,
-    PiConfigOption, PiMode, PiPlan, PiSessionState, PiSessionView, PiSubagentMessage,
-    PiSubagentRun, PiSubagentStatus, PiTodo, PiTodoGroup, PiTodoStatus, PiUsage,
+    PiConfigOption, PiMode, PiPlan, PiRestoredAsk, PiSessionState, PiSessionView,
+    PiSubagentMessage, PiSubagentRun, PiSubagentStatus, PiTodo, PiTodoGroup, PiTodoStatus, PiUsage,
 };
 /// The host mints pi's session id (a UUID pi's pairing extension requires).
 pub use steer_acp::mint_session_id;
