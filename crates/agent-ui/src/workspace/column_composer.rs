@@ -6,6 +6,8 @@
 //! bare-private methods lift `pub(super)` for the parent's render face and
 //! the `tests` child.
 
+use super::chips::{GoalChipTrigger, parse_effort};
+use super::column_view::ChatColumnView;
 use super::*;
 use crate::DismissContextBubble;
 use crate::cockpit::{context_budget_pct, format_tokens_pi};
@@ -17,6 +19,7 @@ use gpui::{
 use gpui_component::ThemeStyled as _;
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
+use gpui_component::popover::PopoverState;
 
 /// The context pill as a [`Popover`] trigger. `Selectable` is the library's
 /// hook for pushing open-state styling into its own components; the pill has
@@ -95,12 +98,12 @@ enum SendChipTone {
 /// platform-honest shortcut hint pinned to the row's right edge in
 /// `secondary_foreground`.
 fn send_menu_row(
-    ws: &gpui::WeakEntity<Workspace>,
+    ws: &gpui::WeakEntity<ChatColumnView>,
     theme: &Theme,
     icon: gpui_kit_assets::IconName,
     name_key: &'static str,
     keys: String,
-    act: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+    act: fn(&mut ChatColumnView, &mut Window, &mut Context<ChatColumnView>),
 ) -> PopupMenuItem {
     let muted = theme.muted_foreground;
     let secondary = theme.secondary_foreground;
@@ -196,7 +199,7 @@ fn queue_row_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-impl Workspace {
+impl ChatColumnView {
     /// Rendered bare — no card border, fill, or rounding — so it shares the
     /// page background with the message list and reads as the same layer.
     /// The `Input` has no appearance of its own; the only visual separator
@@ -337,7 +340,8 @@ impl Workspace {
                                         let _ = ws.update(cx, |this, cx| {
                                             for entry in entries {
                                                 if let gpui::ClipboardEntry::Image(image) = entry {
-                                                    this.handle_pasted_image(image.clone(), cx);
+                                                    this.env()
+                                                        .handle_pasted_image(image.clone(), cx);
                                                 }
                                             }
                                             cx.notify();
@@ -563,31 +567,33 @@ impl Workspace {
         let danger = matches!(state, SubmissionState::Failed);
         let line = line.clone();
 
-        let icon_btn =
-            |id: String,
-             icon: gpui_kit_assets::IconName,
-             tip: &'static str,
-             danger_tint: bool,
-             cx: &mut Context<Self>,
-             on_click: fn(&mut Workspace, usize, &mut Window, &mut Context<Workspace>)|
-             -> AnyElement {
-                let mut btn = Button::new(SharedString::from(id))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::from(icon))
-                    .tooltip(i18n::t(tip));
-                if danger_tint {
-                    btn = btn.custom(
-                        ButtonCustomVariant::new(cx)
-                            .color(theme.danger)
-                            .foreground(theme.danger),
-                    );
-                }
-                btn.on_click(
-                    cx.listener(move |this, _, window, cx| on_click(this, idx, window, cx)),
-                )
+        let icon_btn = |id: String,
+                        icon: gpui_kit_assets::IconName,
+                        tip: &'static str,
+                        danger_tint: bool,
+                        cx: &mut Context<Self>,
+                        on_click: fn(
+            &mut ChatColumnView,
+            usize,
+            &mut Window,
+            &mut Context<ChatColumnView>,
+        )|
+         -> AnyElement {
+            let mut btn = Button::new(SharedString::from(id))
+                .ghost()
+                .xsmall()
+                .icon(Icon::from(icon))
+                .tooltip(i18n::t(tip));
+            if danger_tint {
+                btn = btn.custom(
+                    ButtonCustomVariant::new(cx)
+                        .color(theme.danger)
+                        .foreground(theme.danger),
+                );
+            }
+            btn.on_click(cx.listener(move |this, _, window, cx| on_click(this, idx, window, cx)))
                 .into_any_element()
-            };
+        };
 
         // Lane-move + 编辑/删除 share one cluster shape across the states.
         let lane_btn = match state {
@@ -597,7 +603,7 @@ impl Workspace {
                 "queue-requeue-action",
                 false,
                 cx,
-                |this, idx, _window, cx| this.requeue_follow_up(idx, cx),
+                |this, idx, _window, cx| this.env().requeue_follow_up(idx, cx),
             ),
             SubmissionState::Queued | SubmissionState::Interrupting => icon_btn(
                 format!("queue-steer-{idx}"),
@@ -605,7 +611,7 @@ impl Workspace {
                 "queued-steer-now-action",
                 false,
                 cx,
-                |this, idx, _window, cx| this.steer_follow_up(idx, cx),
+                |this, idx, _window, cx| this.env().steer_follow_up(idx, cx),
             ),
             // A failed row renders exactly like a queued one — same four
             // actions, the summary text in red as the only distinction. The
@@ -617,7 +623,7 @@ impl Workspace {
                 "queued-steer-now-action",
                 false,
                 cx,
-                |this, idx, _window, cx| this.steer_follow_up(idx, cx),
+                |this, idx, _window, cx| this.env().steer_follow_up(idx, cx),
             ),
         };
         let interrupt_btn = icon_btn(
@@ -626,7 +632,7 @@ impl Workspace {
             "queue-row-interrupt-action",
             true,
             cx,
-            |this, idx, _window, cx| this.interrupt_from_card(idx, cx),
+            |this, idx, _window, cx| this.env().interrupt_from_card(idx, cx),
         );
         let edit_btn = icon_btn(
             format!("queue-edit-{idx}"),
@@ -634,7 +640,7 @@ impl Workspace {
             "queued-edit-action",
             false,
             cx,
-            |this, idx, window, cx| this.edit_follow_up(idx, window, cx),
+            |this, idx, window, cx| this.env().edit_follow_up(idx, window, cx),
         );
         let delete_btn = icon_btn(
             format!("queue-delete-{idx}"),
@@ -642,7 +648,7 @@ impl Workspace {
             "queued-delete-action",
             false,
             cx,
-            |this, idx, _window, cx| this.delete_follow_up(idx, cx),
+            |this, idx, _window, cx| this.env().delete_follow_up(idx, cx),
         );
 
         let badge = match state {
@@ -721,7 +727,7 @@ impl Workspace {
                 ))
                 .on_drop::<DraggedQueueRow>(cx.listener(
                     move |this, _row: &DraggedQueueRow, _, cx| {
-                        this.commit_queue_drag(cx);
+                        this.env().commit_queue_drag(cx);
                     },
                 ));
         }
@@ -781,7 +787,7 @@ impl Workspace {
                 if this.foreground_access_mode(cx) == mode {
                     return;
                 }
-                this.apply_access_mode(mode, cx);
+                this.env().apply_access_mode(mode, cx);
             });
         })
         .into_any_element()
@@ -816,7 +822,7 @@ impl Workspace {
         spec: SendChipSpec,
         theme: &Theme,
         cx: &mut Context<Self>,
-        act: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+        act: fn(&mut ChatColumnView, &mut Window, &mut Context<ChatColumnView>),
     ) -> AnyElement {
         let SendChipSpec {
             icon,
@@ -868,10 +874,11 @@ impl Workspace {
     /// Info.plist usage keys — so the row reserves no space and never shows
     /// a dead button on an unsupported platform.
     fn render_dictation_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        self.speech
+        let speech = self.speech.clone();
+        speech
             .read(cx)
             .has_recognizer()
-            .then(|| SpeechButton::new(&self.speech).small().into_any_element())
+            .then(|| SpeechButton::new(&speech).small().into_any_element())
     }
 
     /// The composer's action cluster (footer right), dressed exactly like
@@ -899,7 +906,7 @@ impl Workspace {
                 },
                 theme,
                 cx,
-                |this, window, cx| this.submit_input(window, cx),
+                |this, window, cx| this.env().submit_input(window, cx),
             );
         }
         let stop = Self::send_cluster_chip(
@@ -919,7 +926,7 @@ impl Workspace {
             // "background runs survive turn abort" runtime default. The
             // turn-level interrupts (排队 message's 打断) keep the plain
             // cancel.
-            |this, _window, cx| this.stop_container(cx),
+            |this, _window, cx| this.env().stop_container(cx),
         );
         // The default face carries the draft gate; the stop chip above never
         // does (the deadlock class: stop became an empty-input-disabled send
@@ -936,7 +943,7 @@ impl Workspace {
             },
             theme,
             cx,
-            |this, window, cx| this.submit_input(window, cx),
+            |this, window, cx| this.env().submit_input(window, cx),
         );
         // The menu is the project chip's menu, whole-cloth: `PopupMenu`
         // built open-time, mounted in the cluster's deferred slot, dismissed
@@ -1015,7 +1022,7 @@ impl Workspace {
                 gpui_kit_assets::IconName::ListPlus,
                 "send-menu-queue",
                 "↩".to_string(),
-                |this, window, cx| this.submit_input(window, cx),
+                |this, window, cx| this.env().submit_input(window, cx),
             ))
             .item(send_menu_row(
                 &ws,
@@ -1023,7 +1030,7 @@ impl Workspace {
                 gpui_kit_assets::IconName::CornerDownRight,
                 "send-menu-steer",
                 steer_keys,
-                |this, window, cx| this.submit_steer(window, cx),
+                |this, window, cx| this.env().submit_steer(window, cx),
             ))
             .item(send_menu_row(
                 &ws,
@@ -1031,7 +1038,7 @@ impl Workspace {
                 gpui_kit_assets::IconName::Zap,
                 "send-menu-interrupt",
                 interrupt_keys,
-                |this, window, cx| this.submit_interrupt(window, cx),
+                |this, window, cx| this.env().submit_interrupt(window, cx),
             ))
         });
         let sub = cx.subscribe(&menu, |this, _menu, _: &DismissEvent, cx| {
@@ -1208,7 +1215,7 @@ impl Workspace {
     /// composer had no signal at all. Retryable faces carry a redial
     /// button; the strip reads the store's [`DeliveryFailure`] so the
     /// reason is always the pipeline's own.
-    pub(super) fn render_delivery_error_strip(
+    pub(crate) fn render_delivery_error_strip(
         &self,
         state: &steer_agent_chat_ui::ahp_store::LinkState,
         cx: &mut Context<Self>,
@@ -1468,6 +1475,1024 @@ impl Workspace {
                     .text_sm()
                     .text_color(theme.foreground)
                     .child(label),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn render_goal_chip(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let g = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .and_then(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::goal_of(&view.book, sid).cloned()
+            })
+            .and_then(|v| serde_json::from_value::<manox_agent::goal::ThreadGoal>(v).ok())?;
+        let accent = theme.accent;
+        let muted = theme.muted_foreground;
+        let fg = theme.foreground;
+        let status_key = match g.status {
+            manox_agent::goal::GoalStatus::Active => "goal-status-active",
+            manox_agent::goal::GoalStatus::Paused => "goal-status-paused",
+            manox_agent::goal::GoalStatus::Blocked => "goal-status-blocked",
+            manox_agent::goal::GoalStatus::BudgetLimited => "goal-status-budget-limited",
+            manox_agent::goal::GoalStatus::Complete => "goal-status-complete",
+        };
+        let elapsed = format_elapsed(std::time::Duration::from_secs(
+            self.chat
+                .read(cx)
+                .thread
+                .read(|t| t.goal_elapsed_seconds())
+                .unwrap_or_default(),
+        ));
+        let label: SharedString = format!("◎ {} · {}", i18n::t(status_key), elapsed).into();
+        let open = self.chat.read(cx).goal_popover_open;
+
+        // The chip is the popover's trigger: the component owns the click
+        // toggle (synced back through `on_open_change`) and the overlay
+        // (outside-click dismiss). Focus is pinned to the composer input so
+        // opening the panel never steals the typing focus.
+        let trigger = h_flex()
+            .id("goal-chip")
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .bg(theme.secondary)
+            .border_1()
+            .border_color(accent)
+            .cursor_pointer()
+            .child(
+                gpui::div()
+                    .text_sm()
+                    .text_color(theme.accent_foreground)
+                    .child(label),
+            )
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronUp
+                } else {
+                    IconName::ChevronDown
+                })
+                .small()
+                .text_color(muted),
+            );
+
+        let ws = cx.entity();
+        let chat = self.chat.clone();
+        let input_focus = gpui::Focusable::focus_handle(self.chat_input(cx).read(cx), cx).clone();
+        let accent_fg = theme.accent_foreground;
+
+        let objective = g.objective.clone();
+        let status = i18n::t(status_key);
+        let reason = g
+            .blocked_reason
+            .as_ref()
+            .map(|reason| reason.message.clone())
+            .unwrap_or_else(|| "—".into());
+        let tokens = g.tokens_used.to_string();
+        let budget = g
+            .token_budget
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "∞".into());
+        let remaining = g
+            .remaining_tokens()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "∞".into());
+        let rounds = format!(
+            "{}/{}",
+            g.rounds_started,
+            g.max_rounds
+                .map(|max| max.to_string())
+                .unwrap_or_else(|| "∞".into())
+        );
+        let goal_status = g.status;
+        let objective_label = i18n::t("goal-popover-objective");
+        let status_label = i18n::t("goal-popover-status");
+        let elapsed_label = i18n::t("goal-popover-elapsed");
+        let reason_label = i18n::t("goal-popover-reason");
+        let tokens_label = i18n::t("goal-popover-tokens");
+        let budget_label = i18n::t("goal-popover-budget");
+        let remaining_label = i18n::t("goal-popover-remaining");
+        let rounds_label = i18n::t("goal-popover-rounds");
+        let clear_label = i18n::t("goal-popover-clear");
+        let pause_label = i18n::t("goal-popover-pause");
+        let resume_label = i18n::t("goal-popover-resume");
+        let edit_label = i18n::t("goal-popover-edit");
+        let edit_budget_label = i18n::t("goal-popover-edit-budget");
+        let edit_rounds_label = i18n::t("goal-popover-edit-rounds");
+        let replace_label = i18n::t("goal-popover-replace");
+        let new_label = i18n::t("goal-popover-new");
+        let title_label = i18n::t("goal-popover-title");
+        let content = move |_: &mut PopoverState,
+                            _: &mut Window,
+                            _: &mut gpui::Context<PopoverState>| {
+            v_flex()
+                .w(gpui::px(360.))
+                .gap_1()
+                .child(
+                    gpui::div()
+                        .text_xs()
+                        .text_color(accent_fg)
+                        .child(format!("◎ {title_label}")),
+                )
+                .child(goal_popover_row(&objective_label, &objective, fg, muted))
+                .child(goal_popover_row(&status_label, &status, fg, muted))
+                .child(goal_popover_row(&elapsed_label, &elapsed, fg, muted))
+                .child(goal_popover_row(&reason_label, &reason, fg, muted))
+                .child(goal_popover_row(&tokens_label, &tokens, fg, muted))
+                .child(goal_popover_row(&budget_label, &budget, fg, muted))
+                .child(goal_popover_row(&remaining_label, &remaining, fg, muted))
+                .child(goal_popover_row(&rounds_label, &rounds, fg, muted))
+                .child(
+                    h_flex()
+                        .justify_end()
+                        .gap_1()
+                        .when(
+                            goal_status == manox_agent::goal::GoalStatus::Active,
+                            |row| {
+                                row.child(
+                                    Button::new("goal-pause")
+                                        .small()
+                                        .label(pause_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, _window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.with_foreground_store(cx, |store, sid| {
+                                                        let reply = store.send_goal(
+                                                            &sid, "pause", None, None, None,
+                                                        );
+                                                        crate::ahp_store::await_reply(reply);
+                                                    });
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            matches!(
+                                goal_status,
+                                manox_agent::goal::GoalStatus::Paused
+                                    | manox_agent::goal::GoalStatus::Blocked
+                            ),
+                            |row| {
+                                row.child(
+                                    Button::new("goal-resume")
+                                        .small()
+                                        .label(resume_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, _window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.with_foreground_store(cx, |store, sid| {
+                                                        let reply = store.send_goal(
+                                                            &sid, "resume", None, None, None,
+                                                        );
+                                                        crate::ahp_store::await_reply(reply);
+                                                    });
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            matches!(
+                                goal_status,
+                                manox_agent::goal::GoalStatus::Active
+                                    | manox_agent::goal::GoalStatus::Paused
+                                    | manox_agent::goal::GoalStatus::Blocked
+                            ),
+                            |row| {
+                                row.child(
+                                    Button::new("goal-edit")
+                                        .small()
+                                        .label(edit_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.env().begin_goal_edit(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            matches!(
+                                goal_status,
+                                manox_agent::goal::GoalStatus::Active
+                                    | manox_agent::goal::GoalStatus::Paused
+                                    | manox_agent::goal::GoalStatus::Blocked
+                            ),
+                            |row| {
+                                row.child(
+                                    Button::new("goal-edit-rounds")
+                                        .small()
+                                        .label(edit_rounds_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.env().begin_goal_rounds_edit(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            goal_status == manox_agent::goal::GoalStatus::BudgetLimited,
+                            |row| {
+                                row.child(
+                                    Button::new("goal-edit-budget")
+                                        .small()
+                                        .label(edit_budget_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.env().begin_goal_budget_edit(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            matches!(
+                                goal_status,
+                                manox_agent::goal::GoalStatus::Paused
+                                    | manox_agent::goal::GoalStatus::Blocked
+                                    | manox_agent::goal::GoalStatus::BudgetLimited
+                            ),
+                            |row| {
+                                row.child(
+                                    Button::new("goal-replace")
+                                        .small()
+                                        .label(replace_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.env().begin_goal_replace(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .when(
+                            goal_status == manox_agent::goal::GoalStatus::Complete,
+                            |row| {
+                                row.child(
+                                    Button::new("goal-new")
+                                        .small()
+                                        .label(new_label.clone())
+                                        .on_click({
+                                            let ws = ws.clone();
+                                            move |_: &ClickEvent, window, cx| {
+                                                ws.update(cx, |this, cx| {
+                                                    this.chat.update(cx, |chat, cx| {
+                                                        chat.goal_popover_open = false;
+                                                        cx.notify();
+                                                    });
+                                                    this.env().begin_goal_new(window, cx);
+                                                });
+                                            }
+                                        }),
+                                )
+                            },
+                        )
+                        .child(
+                            Button::new("goal-clear")
+                                .small()
+                                .label(clear_label.clone())
+                                .on_click({
+                                    let ws = ws.clone();
+                                    move |_: &ClickEvent, _window, cx| {
+                                        ws.update(cx, |this, cx| {
+                                            this.chat.update(cx, |chat, cx| {
+                                                chat.goal_popover_open = false;
+                                                cx.notify();
+                                            });
+                                            this.with_foreground_store(cx, |store, sid| {
+                                                let reply = store
+                                                    .send_goal(&sid, "clear", None, None, None);
+                                                crate::ahp_store::await_reply(reply);
+                                            });
+                                        });
+                                    }
+                                }),
+                        ),
+                )
+        };
+
+        Some(
+            Popover::new("goal-popover")
+                .trigger(GoalChipTrigger(trigger.into_any_element()))
+                .anchor(Anchor::BottomLeft)
+                .open(open)
+                .track_focus(&input_focus)
+                .on_open_change(move |open, _, cx| {
+                    chat.update(cx, |chat, cx| {
+                        chat.goal_popover_open = *open;
+                        cx.notify();
+                    });
+                })
+                .content(content)
+                .into_any_element(),
+        )
+    }
+
+    /// The pi-harness model selector. Reads the gateway's model-registry
+    /// snapshot (U2 — the server projects the pi registry the streaming side
+    /// resolves against): closed, a ghost button showing
+    /// `provider · model · effort` with the model name tinted by wire api;
+    /// open, a PopupMenu of provider submenus.
+    pub(super) fn render_model_selector_pi(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.chat.read(cx).model_open;
+        let model_identity = self.foreground_model_identity(cx);
+        let model = model_identity
+            .as_ref()
+            .and_then(|(provider, id)| self.resolve_model_display(provider, id, cx));
+        let effort = self
+            .chat
+            .read(cx)
+            .store
+            .as_ref()
+            .map(|(store, sid)| {
+                let view = store.read(cx);
+                crate::ahp_store::leaf(&view.book, sid)
+                    .reasoning_effort()
+                    .and_then(parse_effort)
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+
+        let trigger = h_flex()
+            .id("model-trigger")
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            // The model face is the footer's only variable-width label: the
+            // chip yields (and ellipsizes) before the row overflows at narrow
+            // windows, while the send cluster stays pinned.
+            .min_w_0()
+            .rounded(theme.radius)
+            .hover(|s| s.bg(theme.accent.opacity(0.08)))
+            .cursor_pointer()
+            .children(if let Some((ref prov_display, ref m)) = model {
+                let (_, _, color_name) = crate::model_catalog::wire_visual(&m.api);
+                let model_color = color_name.scale(500);
+                let dot = || {
+                    gpui::div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("·")
+                };
+                vec![
+                    gpui::div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(prov_display.clone())
+                        .into_any_element(),
+                    dot().into_any_element(),
+                    gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(model_color)
+                        .child(m.name.clone())
+                        .into_any_element(),
+                    dot().into_any_element(),
+                    gpui::div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(effort.wire_value().to_string())
+                        .into_any_element(),
+                ]
+            } else if let Some((ref provider, ref id)) = model_identity {
+                // The journal identity no longer resolves against the
+                // gateway's model snapshot (provider/model deregistered) —
+                // render it raw so the chip still tells the truth instead
+                // of "no model".
+                vec![
+                    gpui::div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(provider.clone())
+                        .into_any_element(),
+                    gpui::div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("·")
+                        .into_any_element(),
+                    gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(id.clone())
+                        .into_any_element(),
+                    gpui::div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("·")
+                        .into_any_element(),
+                    gpui::div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(effort.wire_value().to_string())
+                        .into_any_element(),
+                ]
+            } else {
+                vec![
+                    gpui::div()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(i18n::t("workspace-no-model").to_string())
+                        .into_any_element(),
+                ]
+            })
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronUp
+                } else {
+                    IconName::ChevronDown
+                })
+                .small()
+                .text_color(theme.muted_foreground),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.chat.read(cx).model_open {
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_open = false;
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_menu = None;
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_menu_sub = None;
+                        cx.notify();
+                    });
+                } else {
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_open = true;
+                        cx.notify();
+                    });
+                    let current_effort = this
+                        .chat
+                        .read(cx)
+                        .store
+                        .as_ref()
+                        .and_then(|(store, sid)| {
+                            let view = store.read(cx);
+                            crate::ahp_store::leaf(&view.book, sid)
+                                .reasoning_effort()
+                                .map(str::to_string)
+                        })
+                        .and_then(|e| parse_effort(&e))
+                        .unwrap_or_else(|| {
+                            tracing::debug!(
+                                "foreground store not bound yet (ahp handshake in flight)"
+                            );
+                            Default::default()
+                        });
+                    let workspace = cx.entity().downgrade();
+                    // U2: the menu lists the gateway's model-registry
+                    // snapshot (the server projects the same pi registry the
+                    // streaming side resolves against). The open also
+                    // re-pulls, so a settings-side provider reload (no
+                    // server push yet — §D.5 cross-domain ask) converges by
+                    // the next open at the latest.
+                    let models = crate::model_catalog::rows();
+                    let menu = PopupMenu::build(window, cx, |menu, window, cx| {
+                        Self::build_model_popup_menu_pi(
+                            menu,
+                            workspace,
+                            models,
+                            current_effort,
+                            window,
+                            cx,
+                        )
+                    });
+                    let sub = cx.subscribe(
+                        &menu,
+                        |this: &mut ChatColumnView,
+                         _menu: Entity<PopupMenu>,
+                         _: &DismissEvent,
+                         cx: &mut Context<ChatColumnView>| {
+                            this.chat.update(cx, |chat, cx| {
+                                chat.model_open = false;
+                                cx.notify();
+                            });
+                            this.chat.update(cx, |chat, cx| {
+                                chat.model_menu = None;
+                                cx.notify();
+                            });
+                            this.chat.update(cx, |chat, cx| {
+                                chat.model_menu_sub = None;
+                                cx.notify();
+                            });
+                            cx.notify();
+                        },
+                    );
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_menu = Some(menu);
+                        cx.notify();
+                    });
+                    this.chat.update(cx, |chat, cx| {
+                        chat.model_menu_sub = Some(sub);
+                        cx.notify();
+                    });
+                }
+                cx.notify();
+            }));
+
+        if !open {
+            return trigger.into_any_element();
+        }
+
+        let menu = self
+            .chat
+            .read(cx)
+            .model_menu
+            .clone()
+            .expect("model_menu exists when open");
+
+        gpui::div()
+            .relative()
+            .child(trigger)
+            .child(
+                deferred(
+                    gpui::div()
+                        .id("model-dropdown")
+                        .absolute()
+                        .bottom_full()
+                        .right_0()
+                        .occlude()
+                        .child(menu),
+                )
+                .with_priority(1),
+            )
+            .into_any_element()
+    }
+
+    /// Model menu for the pi harness: grouped by provider display name;
+    /// each row shows a wire-api Tag and selects through the gateway. U2:
+    /// the rows are the server's wire `ModelInfo` snapshot (already deduped
+    /// per registration at the source); a config model registered through
+    /// several wire apis appears once per wire endpoint (registration names
+    /// differ), so the responses and completions variants stay selectable
+    /// alongside the anthropic one. The rows render through the SHARED
+    /// cascade builder (`model_cascade::build_model_menu` — the project
+    /// menu's agent submenus serve the same face); the wire visual mapping
+    /// lives with the catalogue (`model_catalog::wire_visual`).
+    pub(super) fn build_model_popup_menu_pi(
+        menu: PopupMenu,
+        workspace: WeakEntity<ChatColumnView>,
+        models: Vec<crate::model_catalog::ModelRow>,
+        current_effort: manox_agent::language_model::ReasoningEffort,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
+    ) -> PopupMenu {
+        // The provider→model rows come from the SHARED cascade builder (the
+        // project menu's agent submenus render the same shape). The pick
+        // pins the registration-qualified `{provider}/{model}` identity
+        // (L8): the exact endpoint, since wire variants of one model share
+        // the bare id.
+        let ws = workspace.clone();
+        let mut menu = crate::views::model_cascade::build_model_menu(
+            menu,
+            models,
+            move |row, _window, cx| {
+                let _ = ws.update(cx, |this, cx| {
+                    this.with_foreground_store(cx, |store, sid| {
+                        let mut config = serde_json::Map::new();
+                        config.insert(
+                            "model".into(),
+                            serde_json::json!(format!("{}/{}", row.provider, row.id)),
+                        );
+                        store.optimistic_config(&sid, &config);
+                        store.set_config(&sid, config);
+                        // The durable pick lands in the object row at once —
+                        // the engine's next-request handshake reads it there.
+                        if let Some(objects) = manox_agent::object_store::ObjectStore::try_global()
+                        {
+                            objects.set_model(&sid, Some(&row.provider), Some(&row.id));
+                        }
+                    });
+                });
+            },
+            window,
+            cx,
+        );
+        // The reasoning-effort knob lives in the model dropdown, next to the
+        // model switch it tunes. The current effort is checked; a click
+        // applies to the next request (same mid-run semantics as a model
+        // switch; the menu dismisses like a model row).
+        let themed = cx.theme().clone();
+        menu = menu.separator();
+        menu = menu.label(i18n::t("workspace-reasoning-effort"));
+        for effort in manox_agent::language_model::ReasoningEffort::ALL {
+            let ws = workspace.clone();
+            let themed = themed.clone();
+            let label = match effort {
+                manox_agent::language_model::ReasoningEffort::High => {
+                    i18n::t("workspace-reasoning-high")
+                }
+                manox_agent::language_model::ReasoningEffort::Max => {
+                    i18n::t("workspace-reasoning-max")
+                }
+            };
+            let selected = effort == current_effort;
+            menu = menu.item(
+                PopupMenuItem::element(move |_window, _cx| {
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            gpui::div()
+                                .text_sm()
+                                .text_color(themed.foreground)
+                                .child(label.clone()),
+                        )
+                        .when(selected, |el| {
+                            el.child(Icon::new(IconName::Check).small().text_color(themed.accent))
+                        })
+                })
+                .on_click(move |_, _, cx: &mut gpui::App| {
+                    let _ = ws.update(cx, |this, cx| {
+                        let effort_str = match effort {
+                            manox_agent::language_model::ReasoningEffort::High => "high",
+                            manox_agent::language_model::ReasoningEffort::Max => "max",
+                        };
+                        this.with_foreground_store(cx, |store, sid| {
+                            let mut config = serde_json::Map::new();
+                            config.insert("reasoningEffort".into(), serde_json::json!(effort_str));
+                            store.set_config(&sid, config);
+                            if let Some(objects) =
+                                manox_agent::object_store::ObjectStore::try_global()
+                            {
+                                objects.set_reasoning_effort(&sid, Some(effort_str));
+                            }
+                        });
+                    });
+                }),
+            );
+        }
+        menu
+    }
+
+    /// The Captain status block above the composer — the Captain's own row
+    /// (`Captain 正在驾驶{provider}/{model}·{elapsed}·{activity}`, `{elapsed}` as
+    /// localized h/m/s) while a turn runs, followed by one row per RUNNING
+    /// sub-agent, each led by a PixelSpinner flush at the left edge. Every
+    /// segment is tight (no spacer between the verb, the model, the clock and
+    /// the activity). The model segment carries the app's wire-color
+    /// convention (the registration's `-wire` suffix never shows as text), and
+    /// the block retires once neither a turn nor a run is live — the message
+    /// column carries no per-entry status glyphs, this is the one live
+    /// surface.
+    ///
+    /// The sub-agent rows are the parent chat's AHP background work (the host
+    /// opens a run's entry on its first running tick and removes it when the
+    /// run settles), so they stay listed while their run does — including a
+    /// run that outlived the turn that spawned it (AHP: "an entry may have been
+    /// started by an earlier turn"). A sub-agent row reads
+    /// `Explore(task)正在驾驶{model}·{elapsed}`. A row's click opens that
+    /// child's own transcript in the main column; the round trip back is the
+    /// page's own back control (the block is not on screen while the page owns
+    /// the column, so it carries no click of its own).
+    fn render_captain_strip(
+        &self,
+        running: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        use ai_elements::{PixelSpinner, PixelSpinnerVariant};
+        use steer_agent_chat_ui::conversation::LiveActivity;
+        use steer_agent_chat_ui::model_tag::ModelTag;
+        use steer_agent_chat_ui::text::one_line;
+        use steer_agent_chat_ui::views::subagents::{
+            CAPTAIN_LABEL, agent_color, task_display_title,
+        };
+
+        let subagents = super::chat_access::running_subagents(&self.chat, cx);
+        if !running && subagents.is_empty() {
+            return None;
+        }
+        let tag = ModelTag::resolve(&super::chat_access::model_label(&self.chat, cx));
+
+        let muted = theme.muted_foreground;
+        let spinner = || {
+            // The 16px frame is fixed: shrink 0 keeps a tight row from
+            // squeezing the glyph (the status line's own flex base is large).
+            gpui::div()
+                .flex_shrink_0()
+                .child(
+                    PixelSpinner::new()
+                        .variant(PixelSpinnerVariant::Grid)
+                        .color(muted),
+                )
+                .into_any_element()
+        };
+        // The lead-in's chrome (prefix, separators, clock) is fixed: shrink 0
+        // keeps taffy from spreading a long activity summary's overflow across
+        // it. The model name and the activity are runtime text — an unresolved
+        // id is the raw wire string, a tool summary an arbitrary title — so
+        // both ellipsize rather than pushing the clock (or each other) out of
+        // the row. A sub-agent row's `{type}({task})` prefix is variable-length
+        // for the same reason and stays the row's shrinkable text.
+        let model_spans = |theme: &Theme| {
+            tag.spans(theme)
+                .into_iter()
+                .map(|(text, color)| {
+                    gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(color)
+                        .child(text)
+                })
+                .collect::<Vec<_>>()
+        };
+        let separator = || gpui::div().flex_shrink_0().child("·");
+        let clock = |secs: i64| {
+            gpui::div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .child(crate::i18n::t_duration(secs))
+        };
+        // One tight segment line: name + verb, then the model, the clock and
+        // the activity sit flush against each other (no flex gap). Only the
+        // spinner keeps its own gutter.
+        let status_line = |name: gpui::Div, theme: &Theme| {
+            gpui::div()
+                .flex()
+                .items_center()
+                .min_w_0()
+                .truncate()
+                .child(name)
+                .children(model_spans(theme))
+        };
+
+        let mut rows = v_flex().w_full().min_w_0().gap_1();
+        // The Captain's own row names a model; a session with none registered
+        // still lists its sub-agent rows rather than dropping the block.
+        if running && !tag.is_empty() {
+            let (activity, elapsed) = {
+                let conversation = self.chat.read(cx).conversation.read(cx);
+                (conversation.live_activity(cx), conversation.running_secs())
+            };
+            // "Captain" is product vocabulary, never translated; the verb
+            // after it is chrome copy.
+            let prefix = format!("{CAPTAIN_LABEL} {}", crate::i18n::t("steering-verb"));
+            let mut status = status_line(
+                gpui::div()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .child(prefix),
+                theme,
+            );
+            if elapsed > 0 {
+                status = status.child(separator()).child(
+                    clock(elapsed as i64).debug_selector(|| "workspace-captain-clock".into()),
+                );
+            }
+            if let Some(activity) = activity {
+                // Every arm yields the same way: a bare div's automatic
+                // min-width would clamp it to its one-line text, so overflow
+                // would clip it instead of ellipsizing at its own end.
+                let summary = match &activity {
+                    LiveActivity::Thinking => gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .child(crate::i18n::t("captain-activity-thinking")),
+                    LiveActivity::Replying => gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .child(crate::i18n::t("captain-activity-replying")),
+                    LiveActivity::Tool(title) => gpui::div()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(theme.mono_font_family.clone())
+                        .child(one_line(title)),
+                };
+                status = status
+                    .child(separator())
+                    .child(summary.debug_selector(|| "workspace-captain-activity".into()));
+            }
+            let row = gpui::div()
+                .id("captain-strip")
+                .debug_selector(|| "workspace-captain-strip".into())
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .text_sm()
+                .text_color(muted)
+                .child(spinner())
+                .child(status);
+            rows = rows.child(row);
+        }
+
+        for (ix, work) in subagents.into_iter().enumerate() {
+            // The run's identity: `Explore(task)`. The background-work entry
+            // carries the topic; the agent type is resolved from the spawning
+            // call. Until that resolves, the entry's own label keeps its old
+            // `label · topic` reading rather than inventing a type.
+            let topic = work
+                .activity
+                .as_deref()
+                .filter(|topic| !topic.is_empty())
+                .unwrap_or(&work.label);
+            let title = match work.kind.as_deref().filter(|kind| !kind.is_empty()) {
+                Some(kind) => task_display_title(kind, topic),
+                None => {
+                    task_display_title(&work.label, work.activity.as_deref().unwrap_or_default())
+                }
+            }
+            .unwrap_or_else(|| work.id.clone());
+            let title = one_line(&title);
+            let mut status = status_line(
+                gpui::div()
+                    .min_w_0()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .child(crate::i18n::t_str(
+                        "subagent-steering-prefix",
+                        &[("name", title.as_str())],
+                    )),
+                theme,
+            );
+            if let Some(secs) = super::chat_access::elapsed_secs(&work.started_at) {
+                status = status.child(separator()).child(clock(secs));
+            }
+            // The model segment names the session's model: a sub-agent run on
+            // this harness inherits the parent's model unless its own
+            // definition pins one, and the run's own model has no AHP seat on
+            // the parent's channel.
+            let row = gpui::div()
+                .id(("captain-subagent-row", ix))
+                .debug_selector(move || format!("workspace-subagent-strip-{ix}"))
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .text_sm()
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.secondary.opacity(0.4)))
+                .child(spinner())
+                // The definition's declared display color, when it named one:
+                // the identity dot that lets sibling runs be told apart at a
+                // glance. An unknown name renders uncolored, like no color.
+                .children(work.color.as_deref().and_then(agent_color).map(|color| {
+                    gpui::div()
+                        .flex_shrink_0()
+                        .size_2()
+                        .rounded_full()
+                        .bg(color)
+                }))
+                .child(status)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.env().open_subagent_stream(work.clone(), cx);
+                }));
+            rows = rows.child(row);
+        }
+        Some(rows.into_any_element())
+    }
+
+    /// The whole column page: hero (first screen), the history gate, the
+    /// transcript and the footer. The frame around it (navigator overlay, card
+    /// width, action glue) still belongs to the workspace until the canvas
+    /// mounts this view directly.
+    pub(crate) fn render_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use gpui_component::v_flex;
+
+        let theme = cx.theme().clone();
+        let body = self.body_state(cx);
+        let running = body.running;
+        let placement = super::composer_placement(body.first_screen);
+
+        let footer =
+            (placement == super::ComposerPlacement::Footer && !body.history_loading).then(|| {
+                v_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .bg(theme.background)
+                    .py_2()
+                    .gap_2()
+                    .child(crate::views::centered(
+                        gpui::div().w_full().h(gpui::px(1.)).bg(theme.border),
+                    ))
+                    .when_some(
+                        self.render_captain_strip(running, &theme, cx),
+                        |this, strip| this.child(crate::views::centered(strip)),
+                    )
+                    .children(self.render_attachments(&theme, cx))
+                    .child(crate::views::centered(
+                        self.render_composer(running, window, &theme, cx),
+                    ))
+            });
+        let hero = if placement != super::ComposerPlacement::Hero || body.history_loading {
+            None
+        } else {
+            Some(
+                v_flex()
+                    .flex_1()
+                    .w_full()
+                    .justify_center()
+                    .items_center()
+                    .child(crate::views::centered(
+                        v_flex()
+                            .w_full()
+                            .gap_5()
+                            .items_center()
+                            .child(
+                                gpui::div()
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight::BLACK)
+                                    .child(crate::i18n::t("workspace-hero-heading")),
+                            )
+                            .children(self.render_attachments(&theme, cx))
+                            .child(crate::views::centered(
+                                self.render_composer(running, window, &theme, cx),
+                            )),
+                    )),
+            )
+        };
+
+        v_flex()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .relative()
+            .overflow_hidden()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .pb_2()
+                    .children(hero)
+                    .when(body.history_loading, |this| {
+                        this.child(crate::views::history_loading::render_history_loading(
+                            &theme,
+                            &body.thread_id,
+                        ))
+                    })
+                    .child(self.transcript(window, cx))
+                    .children(footer),
             )
             .into_any_element()
     }

@@ -32,6 +32,8 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::ActiveTheme;
+use gpui_component::input::TextareaState;
+use gpui_component::speech::SpeechState;
 use gpui_component::{ElementExt as _, h_flex, v_flex};
 use steer_agent_chat_ui::column::ChatColumn;
 
@@ -46,15 +48,57 @@ pub trait ChatEnv: Send + Sync + 'static {
     /// Scroll a transcript row into view (the turn rail's jump and the
     /// navigator's landing).
     fn reveal_message(&self, item_ix: usize, cx: &mut App);
+
+    /// Send the composer's current input as a user turn.
+    fn submit_input(&self, window: &mut Window, cx: &mut App);
+    /// Stop the running turn (⇧⌘↩).
+    fn submit_interrupt(&self, window: &mut Window, cx: &mut App);
+    /// Send the composer's text as a steering message into the running turn.
+    fn submit_steer(&self, window: &mut Window, cx: &mut App);
+    /// Stop the container.
+    fn stop_container(&self, cx: &mut App);
+    /// Attach a pasted image to the composer's drafts.
+    fn handle_pasted_image(&self, image: gpui::Image, cx: &mut App);
+    /// Interrupt one queued follow-up's running turn from its card control.
+    fn interrupt_from_card(&self, idx: usize, cx: &mut App);
+    /// Commit a queue-row drag (the reorder write).
+    fn commit_queue_drag(&self, cx: &mut App);
+    /// Queue operations from a follow-up row's controls.
+    fn delete_follow_up(&self, idx: usize, cx: &mut App);
+    fn edit_follow_up(&self, idx: usize, window: &mut Window, cx: &mut App);
+    fn requeue_follow_up(&self, idx: usize, cx: &mut App);
+    fn steer_follow_up(&self, idx: usize, cx: &mut App);
+    /// Open a running sub-agent's transcript in the main column.
+    fn open_subagent_stream(
+        &self,
+        row: steer_agent_chat_ui::ahp_store::SubagentWorkRow,
+        cx: &mut App,
+    );
+    /// The access-mode write (the composer's segmented switch).
+    fn apply_access_mode(&self, mode: manox_agent::thread::AccessMode, cx: &mut App);
+    /// Goal editing sessions (the goal chip's popover and its row editors).
+    fn begin_goal_edit(&self, window: &mut Window, cx: &mut App);
+    fn begin_goal_new(&self, window: &mut Window, cx: &mut App);
+    fn begin_goal_replace(&self, window: &mut Window, cx: &mut App);
+    fn begin_goal_budget_edit(&self, window: &mut Window, cx: &mut App);
+    fn begin_goal_rounds_edit(&self, window: &mut Window, cx: &mut App);
 }
 
-/// The production [`ChatEnv`]: a weak handle onto the workspace, which owns
-/// the scroll/index machinery today.
+/// The production [`ChatEnv`]: a weak handle onto the workspace, which owns the
+/// app-side effects and environment the column asks for.
 pub struct WorkspaceChatEnv(WeakEntity<Workspace>);
 
 impl WorkspaceChatEnv {
     pub fn new(workspace: WeakEntity<Workspace>) -> Self {
         Self(workspace)
+    }
+
+    /// Runs an app-side effect on the workspace, or drops it when the shell is
+    /// gone (the dead-handle semantics every weak handle in this crate keeps).
+    fn forward(&self, cx: &mut App, effect: impl FnOnce(&mut Workspace, &mut Context<Workspace>)) {
+        if let Some(workspace) = self.0.upgrade() {
+            workspace.update(cx, effect);
+        }
     }
 }
 
@@ -63,6 +107,88 @@ impl ChatEnv for WorkspaceChatEnv {
         if let Some(workspace) = self.0.upgrade() {
             workspace.update(cx, |workspace, cx| workspace.reveal_message(item_ix, cx));
         }
+    }
+
+    fn submit_input(&self, window: &mut Window, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.submit_input(window, cx));
+    }
+
+    fn submit_interrupt(&self, window: &mut Window, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.submit_interrupt(window, cx));
+    }
+
+    fn submit_steer(&self, window: &mut Window, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.submit_steer(window, cx));
+    }
+
+    fn stop_container(&self, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.stop_container(cx));
+    }
+
+    fn handle_pasted_image(&self, image: gpui::Image, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.handle_pasted_image(image, cx));
+    }
+
+    fn interrupt_from_card(&self, idx: usize, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.interrupt_from_card(idx, cx));
+    }
+
+    fn commit_queue_drag(&self, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.commit_queue_drag(cx));
+    }
+
+    fn delete_follow_up(&self, idx: usize, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.delete_follow_up(idx, cx));
+    }
+
+    fn edit_follow_up(&self, idx: usize, window: &mut Window, cx: &mut App) {
+        self.forward(cx, |workspace, cx| {
+            workspace.edit_follow_up(idx, window, cx)
+        });
+    }
+
+    fn requeue_follow_up(&self, idx: usize, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.requeue_follow_up(idx, cx));
+    }
+
+    fn steer_follow_up(&self, idx: usize, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.steer_follow_up(idx, cx));
+    }
+
+    fn apply_access_mode(&self, mode: manox_agent::thread::AccessMode, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.apply_access_mode(mode, cx));
+    }
+
+    fn open_subagent_stream(
+        &self,
+        row: steer_agent_chat_ui::ahp_store::SubagentWorkRow,
+        cx: &mut App,
+    ) {
+        self.forward(cx, |workspace, cx| workspace.open_subagent_stream(&row, cx));
+    }
+
+    fn begin_goal_edit(&self, window: &mut Window, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.begin_goal_edit(window, cx));
+    }
+
+    fn begin_goal_new(&self, window: &mut Window, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.begin_goal_new(window, cx));
+    }
+
+    fn begin_goal_replace(&self, window: &mut Window, cx: &mut App) {
+        self.forward(cx, |workspace, cx| workspace.begin_goal_replace(window, cx));
+    }
+
+    fn begin_goal_budget_edit(&self, window: &mut Window, cx: &mut App) {
+        self.forward(cx, |workspace, cx| {
+            workspace.begin_goal_budget_edit(window, cx)
+        });
+    }
+
+    fn begin_goal_rounds_edit(&self, window: &mut Window, cx: &mut App) {
+        self.forward(cx, |workspace, cx| {
+            workspace.begin_goal_rounds_edit(window, cx)
+        });
     }
 }
 
@@ -83,12 +209,19 @@ pub(crate) struct ColumnBodyState {
 /// One conversation column.
 pub struct ChatColumnView {
     pub(crate) chat: Entity<ChatColumn>,
+    /// The app's dictation engine. An entity handle is data, not an effect, so
+    /// it is injected at construction instead of asking the port.
+    pub(crate) speech: Entity<SpeechState>,
     env: Arc<dyn ChatEnv>,
 }
 
 impl ChatColumnView {
-    pub fn new(chat: Entity<ChatColumn>, env: Arc<dyn ChatEnv>) -> Self {
-        Self { chat, env }
+    pub fn new(
+        chat: Entity<ChatColumn>,
+        speech: Entity<SpeechState>,
+        env: Arc<dyn ChatEnv>,
+    ) -> Self {
+        Self { chat, speech, env }
     }
 
     /// The column's body facts, derived once: the history gate, the running
@@ -143,7 +276,11 @@ impl ChatColumnView {
     ///
     /// The band owns nothing — every piece of state it reads or writes lives on
     /// the chat entity, so a switch of tabs or containers never rebuilds it.
-    fn transcript(&self, window: &mut Window, cx: &mut gpui::Context<Self>) -> AnyElement {
+    pub(super) fn transcript(
+        &self,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         self.prune_history_gate(cx);
         let state = self.body_state(cx);
@@ -329,7 +466,7 @@ impl Render for ChatColumnView {
         // Stage 1: the transcript. The composer, the captain strip and the
         // column frame join it next; the frame around it is still the
         // workspace's, and reads its facts through `body_state`.
-        self.transcript(window, cx)
+        self.render_page(window, cx)
     }
 }
 
@@ -344,5 +481,58 @@ pub(crate) fn prune_history_gate(chat: &Entity<ChatColumn>, cx: &mut App) {
             chat.awaiting_history = None;
             cx.notify();
         });
+    }
+}
+
+impl ChatColumnView {
+    /// The app-side port (the column's environment and effects).
+    pub(crate) fn env(&self) -> &Arc<dyn ChatEnv> {
+        &self.env
+    }
+
+    pub(crate) fn chat_input(&self, cx: &App) -> Entity<TextareaState> {
+        super::chat_access::input(&self.chat, cx)
+    }
+
+    pub(crate) fn chat_rail(&self, cx: &App) -> Entity<crate::views::context_rail::ContextRail> {
+        super::chat_access::rail(&self.chat, cx)
+    }
+
+    pub(crate) fn composer_can_submit(&self, running: bool, cx: &App) -> bool {
+        super::chat_access::composer_can_submit(&self.chat, running, cx)
+    }
+
+    pub(crate) fn foreground_access_mode(&self, cx: &App) -> manox_agent::thread::AccessMode {
+        super::chat_access::access_mode(&self.chat, cx)
+    }
+
+    pub(crate) fn foreground_model_identity(&self, cx: &App) -> Option<(String, String)> {
+        super::chat_access::model_identity(&self.chat, cx)
+    }
+
+    pub(crate) fn resolve_model_display(
+        &self,
+        provider: &str,
+        id: &str,
+        _cx: &App,
+    ) -> Option<(String, crate::model_catalog::ModelRow)> {
+        super::chat_access::model_display(provider, id)
+    }
+
+    pub(crate) fn completion_confirm(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        super::chat_access::completion_confirm(&self.chat, ix, window, cx);
+    }
+
+    pub(crate) fn with_foreground_store<R>(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut steer_agent_chat_ui::ahp_store::AhpStore, String) -> R,
+    ) -> Option<R> {
+        super::chat_access::with_foreground_store(&self.chat, cx, f)
     }
 }

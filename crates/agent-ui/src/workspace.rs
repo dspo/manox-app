@@ -71,7 +71,7 @@ use chat_column::ChatColumn;
 use steer_agent_chat_ui::ask_card::AskCardSnapshot;
 mod chat_access;
 mod chips;
-mod composer_render;
+mod column_composer;
 mod exit;
 mod render;
 
@@ -176,10 +176,6 @@ fn build_access_switch(
 }
 
 impl Workspace {
-    fn foreground_access_mode(&self, cx: &gpui::App) -> AccessMode {
-        chat_access::access_mode(&self.chat, cx)
-    }
-
     /// The FOREGROUND CONTAINER id (the container model's routing face): the
     /// active external container's row id while one owns the main column, the
     /// foreground session id (a native container's id, D2) otherwise. The key
@@ -898,9 +894,7 @@ impl Workspace {
         cx: &mut gpui::Context<Self>,
         f: impl FnOnce(&mut steer_agent_chat_ui::ahp_store::AhpStore, String) -> R,
     ) -> Option<R> {
-        let pair = self.chat.read(cx).store.clone()?;
-        let (store, sid) = pair;
-        Some(store.update(cx, |store, _| f(store, sid)))
+        chat_access::with_foreground_store(&self.chat, cx, f)
     }
 
     /// Register a bound project on the active variant's thread store — the
@@ -948,8 +942,10 @@ impl Workspace {
         let env = std::sync::Arc::new(crate::workspace::column_view::WorkspaceChatEnv::new(
             cx.weak_entity(),
         ));
-        let view =
-            cx.new(|_| crate::workspace::column_view::ChatColumnView::new(self.chat.clone(), env));
+        let speech = self.speech.clone();
+        let view = cx.new(|_| {
+            crate::workspace::column_view::ChatColumnView::new(self.chat.clone(), speech, env)
+        });
         self.column_view = Some(view.clone());
         view
     }
@@ -2147,8 +2143,10 @@ impl Workspace {
             .store
             .as_ref()
             .map(|(store, _)| store.read(cx).link_state())?;
-        matches!(state, steer_agent_chat_ui::ahp_store::LinkState::Lost(_))
-            .then(|| self.render_delivery_error_strip(&state, cx))
+        matches!(state, steer_agent_chat_ui::ahp_store::LinkState::Lost(_)).then(|| {
+            let view = self.ensure_column_view(cx);
+            view.update(cx, |view, cx| view.render_delivery_error_strip(&state, cx))
+        })
     }
 
     /// The pending ask's interactive card state (diagnostic-only): the page
@@ -2975,54 +2973,6 @@ impl Workspace {
         )
     }
 
-    pub(crate) fn model_label(&self, cx: &App) -> String {
-        {
-            // Selector read face (§J11): the composer model chip derives from
-            // the store's projection-materialized model, falling back to the
-            // bound thread mirror only while no projection has landed yet.
-            // T10c: the v1 `model_name` human label (CurrentModel/ThreadInfo
-            // notes) is gone — the `model` projection carries the canonical
-            // wire identity only; display names resolve via the provider glue.
-            self.chat
-                .read(cx)
-                .store
-                .as_ref()
-                .and_then(|(store, sid)| {
-                    let view = store.read(cx);
-                    crate::ahp_store::leaf(&view.book, sid)
-                        .model_id()
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| {
-                    self.chat
-                        .read(cx)
-                        .thread
-                        .read(|t| t.model().cloned())
-                        .map(|model| Self::model_wire_id(&model))
-                        // Same rule as the chip's identity read: a fresh
-                        // session's engine already runs the registry default,
-                        // so show it — "no model" only when nothing is
-                        // registered at all.
-                        .or_else(|| {
-                            manox_agent::provider_glue::default_model()
-                                .map(|m| Self::model_wire_id(&m))
-                        })
-                        .unwrap_or_else(|| i18n::t("workspace-no-model").to_string())
-                })
-        }
-    }
-
-    /// The canonical `{registration}/{model-id}` wire identity of a
-    /// registered model — the form every display surface resolves through
-    /// [`steer_agent_chat_ui::model_tag::ModelTag`]; an unresolvable id has no
-    /// provider segment and no wire tint, so the label never hands it a
-    /// display name. `provider_glue::display_name` belongs to the surfaces
-    /// that RENDER a name (the model catalog, the context rail); the label's
-    /// own last resort is the localized "no model" string.
-    fn model_wire_id(model: &manox_harness::types::Model) -> String {
-        format!("{}/{}", model.provider, model.id)
-    }
-
     /// Report a system outcome into the conversation (no thread message, no
     /// model turn). Used by slash commands and mode toggles — e.g. the
     /// mode-change acknowledgement. The card's single live display is the
@@ -3346,3 +3296,9 @@ fn wire_commands_has(commands: &serde_json::Value, name: &str, kind: &str) -> bo
 
 #[cfg(test)]
 mod tests;
+
+impl Workspace {
+    pub(crate) fn model_label(&self, cx: &App) -> String {
+        chat_access::model_label(&self.chat, cx)
+    }
+}

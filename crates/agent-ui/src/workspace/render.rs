@@ -279,116 +279,46 @@ impl Workspace {
         )
     }
 
-    /// The conversation column — the chrome card's main surface, bare of the
-    /// shell furniture (gutter/sidebar/card/title bar all belong to the
-    /// chrome shell around it). Hero-or-list, footer composer, the floating
-    /// context rail, and the turn-navigator overlay.
     fn render_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui_component::v_flex;
         let theme = cx.theme().clone();
-
-        // History-loading gate: a reopened thread whose chat snapshot has not
-        // landed yet (the fold still holds no chat channel) suppresses the
-        // hero / list / footer in favor of the meerkat loading page. The
-        // column entity derives it (and prunes an expired gate) — this frame
-        // only reads the answer, so the gate has one derivation.
+        // The column entity derives the gate and prunes it; this frame only
+        // mounts it.
         super::column_view::prune_history_gate(&self.chat, cx);
         let column_view = self.ensure_column_view(cx);
-        let body = column_view.read(cx).body_state(cx);
-        let thread_id = body.thread_id;
-        let running = body.running;
-        let composer_placement = composer_placement(body.first_screen);
-        // The card's interior width — what this view was actually laid out
-        // in. The window width is NOT a stand-in for it: the shell's sidebar
-        // and right pane are siblings of the card, so it overstates the card
-        // by however much they claim (an 1100px window with both open leaves
-        // ~360px of card). The measurement lands at prepaint, so the first
+        // The page is built in the column's own entity (its state has one
+        // owner). Nested entity elements measure their contents, so a
+        // percentage-sized page would collapse — the frame takes the element
+        // itself and lays it out as a flex item.
+        let page: gpui::AnyElement =
+            column_view.update(cx, |view, cx| view.render_page(window, cx));
+        let main_body_w = self
+            .chat
+            .read(cx)
+            .card_width
+            .get()
+            .unwrap_or_else(|| window.bounds().size.width);
+        let turn_navigator_overlay = self.render_turn_navigator_overlay(&theme, main_body_w, cx);
+        // The card's interior width — what this view was actually laid out in
+        // (the shell's sidebar and right pane are siblings, so the window
+        // width overstates it). The measurement lands at prepaint; the first
         // frame of a fresh window falls back to the window width and the
         // prepaint below schedules the frame that corrects it.
         let card_width = self.chat.read(cx).card_width.clone();
-        let main_body_w = card_width
-            .get()
-            .unwrap_or_else(|| window.bounds().size.width);
-        // The turn rail lives in the column entity, next to the transcript it
-        // anchors to; only the ⌘M navigator overlay and the card width
-        // registration stay here.
-        let turn_navigator_overlay = self.render_turn_navigator_overlay(&theme, main_body_w, cx);
-
-        let footer = (composer_placement == ComposerPlacement::Footer && !body.history_loading)
-            .then(|| {
-                v_flex()
-                    .w_full()
-                    .flex_shrink_0()
-                    .bg(theme.background)
-                    .py_2()
-                    .gap_2()
-                    .child(centered(gpui::div().w_full().h(px(1.)).bg(theme.border)))
-                    .when_some(
-                        self.render_captain_strip(running, &theme, cx),
-                        |this, strip| this.child(centered(strip)),
-                    )
-                    .children(self.render_attachments(&theme, cx))
-                    .child(centered(self.render_composer(running, window, &theme, cx)))
-            });
-        let hero = if composer_placement != ComposerPlacement::Hero || body.history_loading {
-            None
-        } else {
-            Some(
-                v_flex()
-                    .flex_1()
-                    .w_full()
-                    .justify_center()
-                    .items_center()
-                    .child(centered(
-                        v_flex()
-                            .w_full()
-                            .gap_5()
-                            .items_center()
-                            .child(
-                                gpui::div()
-                                    .text_base()
-                                    .font_weight(gpui::FontWeight::BLACK)
-                                    .child(i18n::t("workspace-hero-heading")),
-                            )
-                            .children(self.render_attachments(&theme, cx))
-                            .child(centered(self.render_composer(running, window, &theme, cx))),
-                    )),
-            )
-        };
-
-        let conversation_column = v_flex()
-            .flex_1()
-            .h_full()
-            .min_w_0()
-            .relative()
-            .overflow_hidden()
-            .child(
-                // The chrome card starts the content at its top edge, so
-                // the body carries no title-bar inset.
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .pb_2()
-                    .children(hero)
-                    .when(body.history_loading, |this| {
-                        this.child(crate::views::history_loading::render_history_loading(
-                            &theme, &thread_id,
-                        ))
-                    })
-                    // The transcript is the column entity's: it owns its list,
-                    // its rubber-band, its turn rail and the history gate, and
-                    // keeps them mounted across tab and container switches.
-                    .child(column_view.clone())
-                    .children(footer),
-            );
         let root = gpui::div()
             .id("embedded-column")
             .size_full()
             .flex()
-            .child(conversation_column)
+            // The column is its own entity; a cached view element is laid out
+            // at the card's size (an uncached child measures its contents, and
+            // the page's percentage sizing resolves to zero that way).
+            .child(
+                gpui::div()
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(page),
+            )
             .children(turn_navigator_overlay)
             // A zero-size canvas is the paint-phase hook this registration
             // needs (window listeners may only be installed while painting).
@@ -415,234 +345,4 @@ impl Workspace {
             });
         self.apply_chat_actions(root, window, cx)
     }
-
-    /// The Captain status block above the composer — the Captain's own row
-    /// (`Captain 正在驾驶{provider}/{model}·{elapsed}·{activity}`, `{elapsed}` as
-    /// localized h/m/s) while a turn runs, followed by one row per RUNNING
-    /// sub-agent, each led by a PixelSpinner flush at the left edge. Every
-    /// segment is tight (no spacer between the verb, the model, the clock and
-    /// the activity). The model segment carries the app's wire-color
-    /// convention (the registration's `-wire` suffix never shows as text), and
-    /// the block retires once neither a turn nor a run is live — the message
-    /// column carries no per-entry status glyphs, this is the one live
-    /// surface.
-    ///
-    /// The sub-agent rows are the parent chat's AHP background work (the host
-    /// opens a run's entry on its first running tick and removes it when the
-    /// run settles), so they stay listed while their run does — including a
-    /// run that outlived the turn that spawned it (AHP: "an entry may have been
-    /// started by an earlier turn"). A sub-agent row reads
-    /// `Explore(task)正在驾驶{model}·{elapsed}`. A row's click opens that
-    /// child's own transcript in the main column; the round trip back is the
-    /// page's own back control (the block is not on screen while the page owns
-    /// the column, so it carries no click of its own).
-    fn render_captain_strip(
-        &self,
-        running: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        use ai_elements::{PixelSpinner, PixelSpinnerVariant};
-        use steer_agent_chat_ui::conversation::LiveActivity;
-        use steer_agent_chat_ui::model_tag::ModelTag;
-        use steer_agent_chat_ui::text::one_line;
-        use steer_agent_chat_ui::views::subagents::{
-            CAPTAIN_LABEL, agent_color, task_display_title,
-        };
-
-        let subagents = self.running_subagents(cx);
-        if !running && subagents.is_empty() {
-            return None;
-        }
-        let tag = ModelTag::resolve(&self.model_label(cx));
-
-        let muted = theme.muted_foreground;
-        let spinner = || {
-            // The 16px frame is fixed: shrink 0 keeps a tight row from
-            // squeezing the glyph (the status line's own flex base is large).
-            gpui::div()
-                .flex_shrink_0()
-                .child(
-                    PixelSpinner::new()
-                        .variant(PixelSpinnerVariant::Grid)
-                        .color(muted),
-                )
-                .into_any_element()
-        };
-        // The lead-in's chrome (prefix, separators, clock) is fixed: shrink 0
-        // keeps taffy from spreading a long activity summary's overflow across
-        // it. The model name and the activity are runtime text — an unresolved
-        // id is the raw wire string, a tool summary an arbitrary title — so
-        // both ellipsize rather than pushing the clock (or each other) out of
-        // the row. A sub-agent row's `{type}({task})` prefix is variable-length
-        // for the same reason and stays the row's shrinkable text.
-        let model_spans = |theme: &Theme| {
-            tag.spans(theme)
-                .into_iter()
-                .map(|(text, color)| {
-                    gpui::div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(color)
-                        .child(text)
-                })
-                .collect::<Vec<_>>()
-        };
-        let separator = || gpui::div().flex_shrink_0().child("·");
-        let clock = |secs: i64| {
-            gpui::div()
-                .flex_shrink_0()
-                .whitespace_nowrap()
-                .child(crate::i18n::t_duration(secs))
-        };
-        // One tight segment line: name + verb, then the model, the clock and
-        // the activity sit flush against each other (no flex gap). Only the
-        // spinner keeps its own gutter.
-        let status_line = |name: gpui::Div, theme: &Theme| {
-            gpui::div()
-                .flex()
-                .items_center()
-                .min_w_0()
-                .truncate()
-                .child(name)
-                .children(model_spans(theme))
-        };
-
-        let mut rows = v_flex().w_full().min_w_0().gap_1();
-        // The Captain's own row names a model; a session with none registered
-        // still lists its sub-agent rows rather than dropping the block.
-        if running && !tag.is_empty() {
-            let (activity, elapsed) = {
-                let conversation = self.chat.read(cx).conversation.read(cx);
-                (conversation.live_activity(cx), conversation.running_secs())
-            };
-            // "Captain" is product vocabulary, never translated; the verb
-            // after it is chrome copy.
-            let prefix = format!("{CAPTAIN_LABEL} {}", crate::i18n::t("steering-verb"));
-            let mut status = status_line(
-                gpui::div()
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .child(prefix),
-                theme,
-            );
-            if elapsed > 0 {
-                status = status.child(separator()).child(
-                    clock(elapsed as i64).debug_selector(|| "workspace-captain-clock".into()),
-                );
-            }
-            if let Some(activity) = activity {
-                // Every arm yields the same way: a bare div's automatic
-                // min-width would clamp it to its one-line text, so overflow
-                // would clip it instead of ellipsizing at its own end.
-                let summary = match &activity {
-                    LiveActivity::Thinking => gpui::div()
-                        .min_w_0()
-                        .truncate()
-                        .child(crate::i18n::t("captain-activity-thinking")),
-                    LiveActivity::Replying => gpui::div()
-                        .min_w_0()
-                        .truncate()
-                        .child(crate::i18n::t("captain-activity-replying")),
-                    LiveActivity::Tool(title) => gpui::div()
-                        .min_w_0()
-                        .truncate()
-                        .font_family(theme.mono_font_family.clone())
-                        .child(one_line(title)),
-                };
-                status = status
-                    .child(separator())
-                    .child(summary.debug_selector(|| "workspace-captain-activity".into()));
-            }
-            let row = gpui::div()
-                .id("captain-strip")
-                .debug_selector(|| "workspace-captain-strip".into())
-                .flex()
-                .items_center()
-                .gap_2()
-                .w_full()
-                .min_w_0()
-                .text_sm()
-                .text_color(muted)
-                .child(spinner())
-                .child(status);
-            rows = rows.child(row);
-        }
-
-        for (ix, work) in subagents.into_iter().enumerate() {
-            // The run's identity: `Explore(task)`. The background-work entry
-            // carries the topic; the agent type is resolved from the spawning
-            // call. Until that resolves, the entry's own label keeps its old
-            // `label · topic` reading rather than inventing a type.
-            let topic = work
-                .activity
-                .as_deref()
-                .filter(|topic| !topic.is_empty())
-                .unwrap_or(&work.label);
-            let title = match work.kind.as_deref().filter(|kind| !kind.is_empty()) {
-                Some(kind) => task_display_title(kind, topic),
-                None => {
-                    task_display_title(&work.label, work.activity.as_deref().unwrap_or_default())
-                }
-            }
-            .unwrap_or_else(|| work.id.clone());
-            let title = one_line(&title);
-            let mut status = status_line(
-                gpui::div()
-                    .min_w_0()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .child(crate::i18n::t_str(
-                        "subagent-steering-prefix",
-                        &[("name", title.as_str())],
-                    )),
-                theme,
-            );
-            if let Some(secs) = elapsed_secs(&work.started_at) {
-                status = status.child(separator()).child(clock(secs));
-            }
-            // The model segment names the session's model: a sub-agent run on
-            // this harness inherits the parent's model unless its own
-            // definition pins one, and the run's own model has no AHP seat on
-            // the parent's channel.
-            let row = gpui::div()
-                .id(("captain-subagent-row", ix))
-                .debug_selector(move || format!("workspace-subagent-strip-{ix}"))
-                .flex()
-                .items_center()
-                .gap_2()
-                .w_full()
-                .min_w_0()
-                .text_sm()
-                .text_color(muted)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.secondary.opacity(0.4)))
-                .child(spinner())
-                // The definition's declared display color, when it named one:
-                // the identity dot that lets sibling runs be told apart at a
-                // glance. An unknown name renders uncolored, like no color.
-                .children(work.color.as_deref().and_then(agent_color).map(|color| {
-                    gpui::div()
-                        .flex_shrink_0()
-                        .size_2()
-                        .rounded_full()
-                        .bg(color)
-                }))
-                .child(status)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_subagent_stream(&work, cx);
-                }));
-            rows = rows.child(row);
-        }
-        Some(rows.into_any_element())
-    }
-}
-
-/// Whole seconds since an ISO 8601 start stamp; `None` when the stamp is
-/// absent/unparseable or the clock is in the future. The status strip's
-/// elapses are wall-clock (the wire carries the start, not a local instant).
-fn elapsed_secs(started_at: &str) -> Option<i64> {
-    let started = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
-    let secs = (chrono::Utc::now() - started.with_timezone(&chrono::Utc)).num_seconds();
-    (secs > 0).then_some(secs)
 }
