@@ -299,6 +299,9 @@ impl Workspace {
         // overstates it). The measurement lands at prepaint; the first frame of
         // a fresh window falls back to the window width.
         let card_width = self.chat.read(cx).card_width.clone();
+        // The canvas produces its page inside its own update: a nested entity
+        // element would measure its contents instead of the card, collapsing
+        // every percentage-sized page to zero.
         let page: gpui::AnyElement = canvas.update(cx, |view, cx| view.render_canvas(window, cx));
         let root = gpui::div()
             .id("embedded-column")
@@ -313,10 +316,17 @@ impl Workspace {
                     .child(page),
             )
             .children(turn_navigator_overlay)
+            // A zero-size canvas is the paint-phase hook this registration
+            // needs (window listeners may only be installed while painting).
             .child(
                 gpui::canvas(
                     |_, _, _| (),
                     |_, _, window, _| {
+                        // A popup menu's click stops propagation, so the
+                        // selection engine never sees the mouse-up that would
+                        // end the drag its mouse-down armed; without the guard
+                        // the pointer's next button-less travel across the
+                        // transcript selects whatever it crosses.
                         steer_components::markdown::install_selection_drag_guard(window);
                     },
                 )
