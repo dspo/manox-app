@@ -62,10 +62,24 @@ fn sequences_reassemble_across_arbitrary_byte_splits() {
 }
 
 #[test]
-fn utf8_payload_survives_character_boundaries() {
+fn utf8_payload_survives_cuts_inside_a_character() {
     let (term, _events) = headless();
     let stream = "\u{1b}]2;终端标题 fix\x07".as_bytes();
-    // Cut inside a multi-byte character, not on its boundary.
+    // `ESC ] 2 ;` is 4 bytes; the first cut lands MID-`终` (after 2 of its 3
+    // UTF-8 bytes) and the second MID-`标` — no chunk ends on a codepoint
+    // boundary, and the parser must still assemble the whole payload.
+    term.write(&stream[..6]);
+    term.write(&stream[6..12]);
+    term.write(&stream[12..]);
+    assert_eq!(title(&term).as_deref(), Some("终端标题 fix"));
+}
+
+#[test]
+fn utf8_payload_survives_a_cut_on_a_character_boundary() {
+    let (term, _events) = headless();
+    let stream = "\u{1b}]2;终端标题 fix\x07".as_bytes();
+    // The sibling cut: `stream[..7]` ends exactly at `终`'s last byte —
+    // chunks that DO split on codepoint boundaries reassemble the same way.
     term.write(&stream[..7]);
     term.write(&stream[7..]);
     assert_eq!(title(&term).as_deref(), Some("终端标题 fix"));
