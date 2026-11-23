@@ -7,6 +7,7 @@
 //! out. Nothing here spawns, awaits, or renders — which is what makes the
 //! whole projection testable without a window.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -129,6 +130,125 @@ impl PendingRequest {
     }
 }
 
+/// One plan item's state (`_zu/todos/*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiTodoStatus {
+    Pending,
+    InProgress,
+    Done,
+}
+
+impl PiTodoStatus {
+    /// The wire word, as `_zu/todos/write` takes it.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// One plan item. `note` is the agent's working detail; `summary`,
+/// `verification` and the commit subject are completion facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiTodo {
+    pub id: String,
+    pub title: String,
+    pub status: PiTodoStatus,
+    pub note: Option<String>,
+    pub summary: Option<String>,
+    pub verification: Option<String>,
+}
+
+/// One group of plan items (one user request's outcome).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiTodoGroup {
+    pub id: String,
+    pub title: String,
+    pub todos: Vec<PiTodo>,
+}
+
+/// The session plan: the loose lane plus the groups.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PiPlan {
+    pub enabled: bool,
+    pub todos: Vec<PiTodo>,
+    pub groups: Vec<PiTodoGroup>,
+}
+
+impl PiPlan {
+    /// Nothing to draw (also the shape a session without the surface reads as).
+    pub fn is_empty(&self) -> bool {
+        self.todos.is_empty() && self.groups.iter().all(|group| group.todos.is_empty())
+    }
+
+    /// `(done, total)` across the loose lane and every group.
+    pub fn progress(&self) -> (usize, usize) {
+        let items = self
+            .todos
+            .iter()
+            .chain(self.groups.iter().flat_map(|group| &group.todos));
+        let mut done = 0;
+        let mut total = 0;
+        for item in items {
+            total += 1;
+            if item.status == PiTodoStatus::Done {
+                done += 1;
+            }
+        }
+        (done, total)
+    }
+}
+
+/// A subagent run's state (`_zu/subagents/list`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiSubagentStatus {
+    Queued,
+    Running,
+    Settled,
+    Failed,
+    Aborted,
+    Interrupted,
+}
+
+impl PiSubagentStatus {
+    /// The wire word, rendered verbatim (pi's vocabulary, not chrome).
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Settled => "settled",
+            Self::Failed => "failed",
+            Self::Aborted => "aborted",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    /// The run is still going (the panel's live marker).
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+/// One `_zu/subagents/list` row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiSubagentRun {
+    pub run_id: String,
+    pub agent: String,
+    pub task: String,
+    pub status: PiSubagentStatus,
+    pub verdict: Option<String>,
+    pub output: Option<String>,
+}
+
+/// One transcript line of a subagent run (`role` + verbatim text).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiSubagentMessage {
+    pub role: String,
+    pub text: String,
+}
+
 /// One pi session, as the host sees it.
 #[derive(Clone, Debug)]
 pub struct PiSessionView {
@@ -164,6 +284,14 @@ pub struct PiSessionView {
     /// Requests outside the three known surfaces; kept so nothing is dropped
     /// silently (the store answers them method-not-found).
     pub pending_other: Vec<PendingRequest>,
+    /// The session plan (`_zu/todos/list`), `None` until the first read.
+    pub plan: Option<PiPlan>,
+    /// The captain's subagent runs (`_zu/subagents/list`).
+    pub subagents: Vec<PiSubagentRun>,
+    /// The run whose transcript is expanded in the panel.
+    pub expanded_subagent: Option<String>,
+    /// Fetched subagent transcripts, keyed by run id.
+    pub subagent_transcripts: HashMap<String, Vec<PiSubagentMessage>>,
 }
 
 impl PiSessionView {
@@ -190,6 +318,10 @@ impl PiSessionView {
             pending_elicitations: Vec::new(),
             pending_asks: Vec::new(),
             pending_other: Vec::new(),
+            plan: None,
+            subagents: Vec::new(),
+            expanded_subagent: None,
+            subagent_transcripts: HashMap::new(),
         }
     }
 
@@ -365,6 +497,54 @@ impl PiSessionView {
         taken
     }
 
+    /// Folds one `_zu/todos/list` answer. Returns whether the panel changed.
+    pub fn set_plan(&mut self, plan: PiPlan) -> bool {
+        if self.plan.as_ref() == Some(&plan) {
+            return false;
+        }
+        self.plan = Some(plan);
+        true
+    }
+
+    /// Folds one `_zu/subagents/list` answer; a run that disappeared collapses
+    /// its transcript panel.
+    pub fn set_subagents(&mut self, runs: Vec<PiSubagentRun>) -> bool {
+        let mut changed = false;
+        if let Some(expanded) = &self.expanded_subagent
+            && !runs.iter().any(|run| &run.run_id == expanded)
+        {
+            self.expanded_subagent = None;
+            changed = true;
+        }
+        if self.subagents != runs {
+            self.subagents = runs;
+            changed = true;
+        }
+        changed
+    }
+
+    /// Expands the run's transcript panel (returning the run id the store must
+    /// fetch) or collapses it when it was already open.
+    pub fn toggle_subagent(&mut self, run_id: &str) -> Option<String> {
+        if self.expanded_subagent.as_deref() == Some(run_id) {
+            self.expanded_subagent = None;
+            return None;
+        }
+        self.expanded_subagent = Some(run_id.to_owned());
+        Some(run_id.to_owned())
+    }
+
+    /// Folds one `_zu/subagents/transcript` answer.
+    pub fn set_subagent_transcript(
+        &mut self,
+        run_id: &str,
+        messages: Vec<PiSubagentMessage>,
+    ) -> bool {
+        self.subagent_transcripts
+            .insert(run_id.to_owned(), messages);
+        true
+    }
+
     /// How many requests wait for the user.
     pub fn pending_count(&self) -> usize {
         self.pending_permissions.len()
@@ -530,6 +710,128 @@ fn model_of(options: &[PiConfigOption]) -> Option<PiModel> {
         id: id.to_owned(),
         name,
     })
+}
+
+/// Parses a `_zu/todos/list` answer (`{enabled, plan}`).
+pub fn parse_plan(value: &Value) -> PiPlan {
+    let plan = value.get("plan").unwrap_or(&Value::Null);
+    PiPlan {
+        enabled: value
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        todos: plan
+            .get("todos")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(parse_todo).collect())
+            .unwrap_or_default(),
+        groups: plan
+            .get("groups")
+            .and_then(Value::as_array)
+            .map(|groups| groups.iter().filter_map(parse_todo_group).collect())
+            .unwrap_or_default(),
+    }
+}
+
+fn parse_todo(value: &Value) -> Option<PiTodo> {
+    Some(PiTodo {
+        id: value.get("id").and_then(Value::as_str)?.to_owned(),
+        title: value
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        status: match value.get("status").and_then(Value::as_str) {
+            Some("done") => PiTodoStatus::Done,
+            Some("in_progress") => PiTodoStatus::InProgress,
+            _ => PiTodoStatus::Pending,
+        },
+        note: text_field(value, "note"),
+        summary: text_field(value, "summary"),
+        verification: text_field(value, "verification"),
+    })
+}
+
+fn parse_todo_group(value: &Value) -> Option<PiTodoGroup> {
+    Some(PiTodoGroup {
+        id: value.get("id").and_then(Value::as_str)?.to_owned(),
+        title: value
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        todos: value
+            .get("todos")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(parse_todo).collect())
+            .unwrap_or_default(),
+    })
+}
+
+fn text_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+/// Parses a `_zu/subagents/list` answer (`{runs}`).
+pub fn parse_subagent_runs(value: &Value) -> Vec<PiSubagentRun> {
+    value
+        .get("runs")
+        .and_then(Value::as_array)
+        .map(|runs| runs.iter().filter_map(parse_subagent_run).collect())
+        .unwrap_or_default()
+}
+
+fn parse_subagent_run(value: &Value) -> Option<PiSubagentRun> {
+    Some(PiSubagentRun {
+        run_id: value.get("runId").and_then(Value::as_str)?.to_owned(),
+        agent: value
+            .get("agent")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        task: value
+            .get("task")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        status: match value.get("status").and_then(Value::as_str) {
+            Some("queued") => PiSubagentStatus::Queued,
+            Some("running") => PiSubagentStatus::Running,
+            Some("settled") => PiSubagentStatus::Settled,
+            Some("failed") => PiSubagentStatus::Failed,
+            Some("aborted") => PiSubagentStatus::Aborted,
+            _ => PiSubagentStatus::Interrupted,
+        },
+        verdict: text_field(value, "verdict"),
+        output: text_field(value, "output"),
+    })
+}
+
+/// Parses a `_zu/subagents/transcript` answer (`{messages: [{role, text}]}`).
+pub fn parse_subagent_transcript(value: &Value) -> Vec<PiSubagentMessage> {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .filter_map(|message| {
+                    Some(PiSubagentMessage {
+                        role: message.get("role").and_then(Value::as_str)?.to_owned(),
+                        text: message
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parses the `_zu/session_banner` payload.
@@ -765,5 +1067,100 @@ mod tests {
         assert!(!view.streaming);
         assert_eq!(view.error.as_deref(), Some("the harness exited (exit 7)"));
         assert_eq!(view.transcript.settled().len(), 1);
+    }
+
+    #[test]
+    fn a_plan_answer_folds_its_lanes_and_progress() {
+        let plan = parse_plan(&json!({
+            "enabled": true,
+            "plan": {
+                "v": 1,
+                "todos": [
+                    {"id": "t-1", "title": "loose draft", "status": "pending", "origin": "user"}
+                ],
+                "groups": [{
+                    "id": "g-1",
+                    "title": "ship it",
+                    "todos": [
+                        {"id": "t-2", "title": "write", "status": "done", "origin": "agent",
+                         "verification": "cargo test"},
+                        {"id": "t-3", "title": "review", "status": "in_progress", "origin": "agent",
+                         "note": "waiting on CI"}
+                    ]
+                }]
+            }
+        }));
+        assert!(plan.enabled);
+        assert_eq!(plan.todos.len(), 1);
+        assert_eq!(plan.groups[0].title, "ship it");
+        assert_eq!(
+            plan.groups[0].todos[0].verification.as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(plan.groups[0].todos[1].status, PiTodoStatus::InProgress);
+        assert_eq!(plan.progress(), (1, 3));
+
+        // A disabled or empty answer draws nothing.
+        assert!(
+            !parse_plan(&json!({"enabled": false, "plan": {"todos": [], "groups": []}})).enabled
+        );
+        assert!(PiPlan::default().is_empty());
+    }
+
+    #[test]
+    fn subagent_runs_and_transcripts_parse_from_the_wire() {
+        let runs = parse_subagent_runs(&json!({
+            "runs": [
+                {"runId": "r-1", "agent": "Explore", "task": "look around",
+                 "status": "running", "startedAt": 1},
+                {"runId": "r-2", "agent": "worker", "task": "build",
+                 "status": "settled", "verdict": "ok", "output": "done"}
+            ]
+        }));
+        assert_eq!(runs.len(), 2);
+        assert!(runs[0].status.is_live());
+        assert!(!runs[1].status.is_live());
+        assert_eq!(runs[1].verdict.as_deref(), Some("ok"));
+
+        let messages = parse_subagent_transcript(&json!({
+            "messages": [
+                {"role": "assistant", "text": "first"},
+                {"role": "tool", "text": "second"}
+            ]
+        }));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, "tool");
+    }
+
+    #[test]
+    fn the_transcript_panel_toggles_and_collapses_with_its_run() {
+        let mut view = PiSessionView::new("s1", "/tmp");
+        assert_eq!(view.toggle_subagent("r-1").as_deref(), Some("r-1"));
+        assert_eq!(view.expanded_subagent.as_deref(), Some("r-1"));
+        assert_eq!(view.toggle_subagent("r-1"), None);
+        assert_eq!(view.expanded_subagent, None);
+
+        // Re-expanding keeps the cached transcript; a list without the run
+        // collapses the panel.
+        view.toggle_subagent("r-1");
+        assert!(view.set_subagent_transcript(
+            "r-1",
+            vec![PiSubagentMessage {
+                role: "assistant".to_owned(),
+                text: "hi".to_owned()
+            }]
+        ));
+        assert!(view.subagent_transcripts.contains_key("r-1"));
+        assert!(view.set_subagents(Vec::new()));
+        assert_eq!(view.expanded_subagent, None);
+    }
+
+    #[test]
+    fn the_plan_fold_is_idempotent() {
+        let plan = parse_plan(&json!({"enabled": true, "plan": {"todos": [], "groups": []}}));
+        let mut view = PiSessionView::new("s1", "/tmp");
+        assert!(view.set_plan(plan.clone()));
+        assert!(!view.set_plan(plan));
+        assert!(view.plan.as_ref().unwrap().enabled);
     }
 }
