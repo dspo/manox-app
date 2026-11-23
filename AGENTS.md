@@ -16,7 +16,8 @@ crates/                    # 全部 workspace 成员平铺于此（cargo 交付�
   steer-agent-chrome-ui/   # 唯一壳 crate（2026-Light 令牌/SessionList/右栏 ToolTab/
                            #   底部 dock/工具栏/MainSurface 槽；无数据源，example shell
                            #   为目视验收面，装配在 agent-ui::chrome_assembly）
-  steer-agent-chat-ui/     # 会话列的状态机与消息管线（chat crate 依赖面见
+  steer-agent-chat-ui/     # 会话列的状态机与消息管线 + pi 数据面（pi/：转录 reducer、
+                           #   会话状态、进程运行时与事件折叠；chat crate 依赖面见
                            #   script/check-chat-crate-deps.sh）
   steer-canvas/            # 画布模型（Container → canvas → sheet）：sheet id 与布局树、
                            #   每容器画布状态机（单写者 set_layout + ticket、park LRU）、

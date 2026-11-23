@@ -209,6 +209,8 @@ impl AcpProcess {
     /// `session/load`: reattach with the transcript replay. The replay frames
     /// precede the response on the wire, so they are captured while the call
     /// is in flight and returned with it — never raced against the response.
+    /// A coded refusal (the harness answered, it did not die) keeps the
+    /// process usable, like [`AcpProcess::resume_session`].
     pub async fn load_session(
         &self,
         session_id: &str,
@@ -227,7 +229,17 @@ impl AcpProcess {
         // Taken on every path: the ticket releases the capture even when this
         // future is dropped mid-flight.
         let frames = replay.take();
-        let result = result.inspect_err(|_| self.kill())?;
+        let result = match result {
+            Ok(result) => result,
+            // A coded refusal is the harness answering, not dying: the
+            // connection stays usable, so the host can rebuild the session
+            // under the same id on this same process.
+            Err(error @ AcpError::Rpc { .. }) => return Err(error),
+            Err(error) => {
+                self.kill();
+                return Err(error);
+            }
+        };
         let info = session_info_for(session_id, result)?;
         Ok((SessionProxy::new(self.connection.clone(), info), frames))
     }

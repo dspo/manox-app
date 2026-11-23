@@ -9878,6 +9878,7 @@ dependencies = [
  "open",
  "serde",
  "serde_json",
+ "steer-acp",
  "steer-components",
  "steer-i18n",
  "tokio",
