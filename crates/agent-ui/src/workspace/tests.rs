@@ -238,7 +238,7 @@ mod suite {
 
     #[test]
     fn queue_move_index_reorders_only_the_queued_tail() {
-        use crate::workspace::composer_render::{QueueDragEdge as E, QueueRowDrag as D};
+        use crate::workspace::column_composer::{QueueDragEdge as E, QueueRowDrag as D};
         let turn = |text: &str| crate::workspace::DeferredUserTurn {
             unsent_id: uuid::Uuid::new_v4().to_string(),
             text: text.to_string(),

@@ -69,8 +69,9 @@ mod chat_column;
 pub mod gallery;
 use chat_column::ChatColumn;
 use steer_agent_chat_ui::ask_card::AskCardSnapshot;
+mod chat_access;
 mod chips;
-mod composer_render;
+mod column_composer;
 mod exit;
 mod render;
 
@@ -140,7 +141,10 @@ fn thread_cwd(
 /// re-apply the same mode and announce it twice. The bar hugs its intrinsic
 /// width and refuses to shrink (`flex_shrink_0`), so the footer's left chip
 /// group can never squash it.
-fn build_access_switch(workspace: WeakEntity<Workspace>, current: AccessMode) -> gpui::Div {
+fn build_access_switch(
+    current: AccessMode,
+    apply: impl Fn(AccessMode, &mut App) + 'static,
+) -> gpui::Div {
     let selected_ix = usize::from(current == AccessMode::FullAccess);
     h_flex()
         .flex_shrink_0()
@@ -156,12 +160,7 @@ fn build_access_switch(workspace: WeakEntity<Workspace>, current: AccessMode) ->
                     } else {
                         AccessMode::Sandbox
                     };
-                    let _ = workspace.update(cx, |this, cx| {
-                        if this.foreground_access_mode(cx) == mode {
-                            return;
-                        }
-                        this.apply_access_mode(mode, cx);
-                    });
+                    apply(mode, cx);
                 })
                 .child(
                     Tab::new()
@@ -177,20 +176,6 @@ fn build_access_switch(workspace: WeakEntity<Workspace>, current: AccessMode) ->
 }
 
 impl Workspace {
-    /// The foreground session's effective [`AccessMode`] read from the fold
-    /// (§J11): the seated value, the host-declared schema default, or the enum
-    /// default — never a local guess. `Sandbox` when no store is bound.
-    fn foreground_access_mode(&self, cx: &gpui::App) -> AccessMode {
-        self.chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(store, sid)| {
-                crate::ahp_store::leaf(&store.read(cx).book, sid).access_mode_or_default()
-            })
-            .unwrap_or_default()
-    }
-
     /// The FOREGROUND CONTAINER id (the container model's routing face): the
     /// active external container's row id while one owns the main column, the
     /// foreground session id (a native container's id, D2) otherwise. The key
@@ -219,6 +204,7 @@ impl Workspace {
             .flatten()
     }
 }
+mod column_view;
 mod composer;
 pub mod container;
 mod external;
@@ -395,6 +381,10 @@ pub struct Workspace {
     /// drawer, rail — see `chat_column.rs`). Phase 1: a plain embedded
     /// struct, not yet an entity.
     pub(crate) chat: Entity<ChatColumn>,
+    /// The conversation column as its own entity (see `workspace::column_view`):
+    /// the session-scoped surface a canvas mounts as a sheet body. Created on
+    /// the first frame — it is a view over `chat`, not a state owner.
+    pub(crate) column_view: Option<Entity<crate::workspace::column_view::ChatColumnView>>,
     /// User turns that have not reached the journal yet (durable across a
     /// restart; see [`crate::unsent`]).
     pub(crate) unsent: crate::unsent::UnsentOutbox,
@@ -904,9 +894,17 @@ impl Workspace {
         cx: &mut gpui::Context<Self>,
         f: impl FnOnce(&mut steer_agent_chat_ui::ahp_store::AhpStore, String) -> R,
     ) -> Option<R> {
-        let pair = self.chat.read(cx).store.clone()?;
-        let (store, sid) = pair;
-        Some(store.update(cx, |store, _| f(store, sid)))
+        chat_access::with_foreground_store(&self.chat, cx, f)
+    }
+
+    /// Register a bound project on the active variant's thread store — the
+    /// runtime WORKSPACES catalogue's consistency leg (persisted; survives
+    /// restarts and archives). Sidebar grouping does NOT read this: the
+    /// project registry's membership is the only grouping fact, so this is
+    /// bookkeeping for the host's own project faces, nothing more.
+    pub(super) fn register_project_in_store(path: &std::path::Path, _cx: &mut Context<Self>) {
+        let path = path.to_string_lossy().into_owned();
+        manox_agent::thread_store_global().with_mut(|s| s.register_project(path));
     }
 
     // Entity-handle accessors for ChatColumn fields: each returns a cloned
@@ -919,16 +917,37 @@ impl Workspace {
         self.chat.read(cx).store.clone()
     }
     pub(crate) fn chat_conversation(&self, cx: &App) -> Entity<ConversationState> {
-        self.chat.read(cx).conversation.clone()
+        chat_access::conversation(&self.chat, cx)
     }
     pub(crate) fn chat_input(&self, cx: &App) -> Entity<TextareaState> {
-        self.chat.read(cx).input_state.clone()
+        chat_access::input(&self.chat, cx)
     }
     pub(crate) fn chat_list_state(&self, cx: &App) -> ListState {
         self.chat.read(cx).list_state.clone()
     }
     pub(crate) fn chat_rail(&self, cx: &App) -> Entity<crate::views::context_rail::ContextRail> {
-        self.chat.read(cx).context_rail.clone()
+        chat_access::rail(&self.chat, cx)
+    }
+
+    /// The conversation column view, created on first use. It is a projection
+    /// over `chat` (which owns every piece of state), so creating it late costs
+    /// nothing and keeps `new()` free of a second entity dependency.
+    pub(crate) fn ensure_column_view(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::workspace::column_view::ChatColumnView> {
+        if let Some(view) = &self.column_view {
+            return view.clone();
+        }
+        let env = std::sync::Arc::new(crate::workspace::column_view::WorkspaceChatEnv::new(
+            cx.weak_entity(),
+        ));
+        let speech = self.speech.clone();
+        let view = cx.new(|_| {
+            crate::workspace::column_view::ChatColumnView::new(self.chat.clone(), speech, env)
+        });
+        self.column_view = Some(view.clone());
+        view
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -1098,6 +1117,7 @@ impl Workspace {
             settings_nav: 0,
             settings_nav_view: None,
             dialog: None,
+            column_view: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
                 thread,
@@ -1632,29 +1652,11 @@ impl Workspace {
         });
     }
 
-    /// Diagnostic entry to the gate's timeout prune ([`Self::prune_history_gate`]).
+    /// Diagnostic entry to the gate's timeout prune
+    /// ([`crate::workspace::column_view::prune_history_gate`]).
     #[cfg(feature = "test-support")]
     pub fn diagnostic_prune_history_gate(&mut self, cx: &mut Context<Self>) {
-        self.prune_history_gate(cx);
-    }
-
-    /// Drop the history-loading gate once it has outlived
-    /// [`crate::views::history_loading::HISTORY_TIMEOUT`]: the chat snapshot
-    /// never landed (host error, missing session), and a permanent
-    /// full-column loading page with no composer and no transcript is worse
-    /// than the hero screen. Render calls this every frame; tests call it
-    /// directly.
-    fn prune_history_gate(&mut self, cx: &mut Context<Self>) {
-        let expired =
-            self.chat.read(cx).awaiting_history.is_some_and(|since| {
-                since.elapsed() > crate::views::history_loading::HISTORY_TIMEOUT
-            });
-        if expired {
-            self.chat.update(cx, |chat, cx| {
-                chat.awaiting_history = None;
-                cx.notify();
-            });
-        }
+        crate::workspace::column_view::prune_history_gate(&self.chat, cx);
     }
 
     /// Bind a caller-built store as the foreground store, bypassing the
@@ -2141,8 +2143,10 @@ impl Workspace {
             .store
             .as_ref()
             .map(|(store, _)| store.read(cx).link_state())?;
-        matches!(state, steer_agent_chat_ui::ahp_store::LinkState::Lost(_))
-            .then(|| self.render_delivery_error_strip(&state, cx))
+        matches!(state, steer_agent_chat_ui::ahp_store::LinkState::Lost(_)).then(|| {
+            let view = self.ensure_column_view(cx);
+            view.update(cx, |view, cx| view.render_delivery_error_strip(&state, cx))
+        })
     }
 
     /// The pending ask's interactive card state (diagnostic-only): the page
@@ -2596,50 +2600,8 @@ impl Workspace {
         });
     }
 
-    /// Confirm the selected (or clicked) completion item: replace the trigger
-    /// token with `trigger + name + " "` and place the caret after the space.
     fn completion_confirm(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(state) = self.chat.update(cx, |chat, cc| {
-            let v = chat.completion.take();
-            cc.notify();
-            v
-        }) else {
-            return;
-        };
-        let Some(item) = state.items.get(ix) else {
-            self.chat.update(cx, |chat, cx| {
-                chat.completion = Some(state);
-                cx.notify();
-            });
-            return;
-        };
-        let name = item.name.to_string();
-        let trigger = state.trigger;
-        let token_start = state.token_start;
-        let (value, cursor) = {
-            let s = self.chat_input(cx).read(cx);
-            (s.value().to_string(), s.selected_range().end)
-        };
-        if cursor > value.len() || token_start > cursor {
-            return;
-        }
-        // The inserted name rides as an atomic inline token (chip render, whole
-        // unit delete); a rejected token op degrades to the plain-text insert.
-        let (new_value, caret): (InputContent, usize) =
-            match build_replacement_content(trigger, &name, &name, &value, token_start, cursor) {
-                Ok((content, caret)) => (content, caret),
-                Err(_) => {
-                    let (text, caret) =
-                        build_replacement(trigger, &name, &value, token_start, cursor);
-                    (InputContent::from(text), caret)
-                }
-            };
-        self.chat_input(cx).update(cx, |s, cx| {
-            s.set_value(new_value, window, cx);
-            let pos = RopeExt::offset_to_position(s.text(), caret.min(s.text().len()));
-            s.set_cursor_position(pos, window, cx);
-        });
-        cx.notify();
+        chat_access::completion_confirm(&self.chat, ix, window, cx);
     }
 
     fn completion_up(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3011,54 +2973,6 @@ impl Workspace {
         )
     }
 
-    pub(crate) fn model_label(&self, cx: &App) -> String {
-        {
-            // Selector read face (§J11): the composer model chip derives from
-            // the store's projection-materialized model, falling back to the
-            // bound thread mirror only while no projection has landed yet.
-            // T10c: the v1 `model_name` human label (CurrentModel/ThreadInfo
-            // notes) is gone — the `model` projection carries the canonical
-            // wire identity only; display names resolve via the provider glue.
-            self.chat
-                .read(cx)
-                .store
-                .as_ref()
-                .and_then(|(store, sid)| {
-                    let view = store.read(cx);
-                    crate::ahp_store::leaf(&view.book, sid)
-                        .model_id()
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| {
-                    self.chat
-                        .read(cx)
-                        .thread
-                        .read(|t| t.model().cloned())
-                        .map(|model| Self::model_wire_id(&model))
-                        // Same rule as the chip's identity read: a fresh
-                        // session's engine already runs the registry default,
-                        // so show it — "no model" only when nothing is
-                        // registered at all.
-                        .or_else(|| {
-                            manox_agent::provider_glue::default_model()
-                                .map(|m| Self::model_wire_id(&m))
-                        })
-                        .unwrap_or_else(|| i18n::t("workspace-no-model").to_string())
-                })
-        }
-    }
-
-    /// The canonical `{registration}/{model-id}` wire identity of a
-    /// registered model — the form every display surface resolves through
-    /// [`steer_agent_chat_ui::model_tag::ModelTag`]; an unresolvable id has no
-    /// provider segment and no wire tint, so the label never hands it a
-    /// display name. `provider_glue::display_name` belongs to the surfaces
-    /// that RENDER a name (the model catalog, the context rail); the label's
-    /// own last resort is the localized "no model" string.
-    fn model_wire_id(model: &manox_harness::types::Model) -> String {
-        format!("{}/{}", model.provider, model.id)
-    }
-
     /// Report a system outcome into the conversation (no thread message, no
     /// model turn). Used by slash commands and mode toggles — e.g. the
     /// mode-change acknowledgement. The card's single live display is the
@@ -3382,3 +3296,9 @@ fn wire_commands_has(commands: &serde_json::Value, name: &str, kind: &str) -> bo
 
 #[cfg(test)]
 mod tests;
+
+impl Workspace {
+    pub(crate) fn model_label(&self, cx: &App) -> String {
+        chat_access::model_label(&self.chat, cx)
+    }
+}

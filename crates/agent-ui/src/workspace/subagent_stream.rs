@@ -20,18 +20,6 @@ use super::*;
 use steer_agent_chat_ui::ahp_store::SubagentWorkRow;
 
 impl Workspace {
-    /// The foreground chat's running sub-agents, in host order.
-    pub(crate) fn running_subagents(&self, cx: &App) -> Vec<SubagentWorkRow> {
-        self.chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(store, sid)| {
-                crate::ahp_store::leaf(&store.read(cx).book, sid).running_subagents()
-            })
-            .unwrap_or_default()
-    }
-
     /// Open (or re-open) one running sub-agent's transcript in the main
     /// column: the child chat's channel is the run's live feed, so one
     /// subscribe arms the page — its own store observer follows the child's
@@ -115,5 +103,18 @@ impl Workspace {
         if self.subagent_stream.take().is_some() {
             cx.notify();
         }
+    }
+}
+
+impl Workspace {
+    /// The running sub-agent rows of the foreground session's fold. Only the
+    /// diagnostic read faces call it (the live surfaces read the fold through
+    /// the column), so it ships with them.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn running_subagents(
+        &self,
+        cx: &App,
+    ) -> Vec<steer_agent_chat_ui::ahp_store::SubagentWorkRow> {
+        super::chat_access::running_subagents(&self.chat, cx)
     }
 }
