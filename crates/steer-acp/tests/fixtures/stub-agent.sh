@@ -4,8 +4,10 @@
 # Speaks the same newline-delimited JSON-RPC 2.0 surface as `pi-acp` but
 # decides from the prompt text, so every lifecycle branch is reachable without
 # a model: `wait` settles on session/cancel, `permission` asks the host first,
-# `crash` exits mid-turn, `missing` is the unknown-session id. stdout carries
-# protocol only; everything the script itself has to say goes to stderr.
+# `ask` sends a `_zu/ask/create` card, `crash` exits mid-turn, `missing` is the
+# unknown-session id. The panel methods (`_zu/todos/*`, `_zu/subagents/*`) answer
+# with fixed fixture data. stdout carries protocol only; everything the script
+# itself has to say goes to stderr.
 #
 # Bash 3.2 safe (macOS): integer read timeouts, no associative arrays.
 
@@ -51,11 +53,19 @@ dispatch() {
   id=$(json_id "$line")
 
   if [ -z "$method" ]; then
-    # A response to this agent's own request (the permission handshake).
+    # A response to this agent's own request (the permission / ask handshake).
     if [ "$id" = "100" ]; then
       PERMISSION_ANSWER=$(json_string "optionId" "$line")
       if [ -n "$PENDING_PROMPT" ]; then
         update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"permission handled"},"messageId":"m1","_meta":{"stub":{"answer":"'"$PERMISSION_ANSWER"'"}}}'
+        respond "$PENDING_PROMPT" '{"stopReason":"end_turn"}'
+        PENDING_PROMPT=""
+        PENDING_KIND=""
+      fi
+    elif [ "$id" = "101" ]; then
+      ASK_ANSWER=$(json_string "action" "$line")
+      if [ -n "$PENDING_PROMPT" ]; then
+        update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ask handled"},"messageId":"m1","_meta":{"stub":{"action":"'"$ASK_ANSWER"'"}}}'
         respond "$PENDING_PROMPT" '{"stopReason":"end_turn"}'
         PENDING_PROMPT=""
         PENDING_KIND=""
@@ -118,6 +128,11 @@ dispatch() {
           PENDING_PROMPT=$id
           PENDING_KIND="permission"
           ;;
+        ask)
+          emit '{"jsonrpc":"2.0","id":101,"method":"_zu/ask/create","params":{"sessionId":"'"$SESSION"'","toolCallId":"ask-1","questions":[{"id":"q1","question":"Pick one","options":[{"label":"A"},{"label":"B"}]}]}}'
+          PENDING_PROMPT=$id
+          PENDING_KIND="ask"
+          ;;
         *)
           update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"'"$text"'"},"messageId":"e0","_meta":{"pi":{"entryId":"e0"}}}'
           update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"reply to '"$text"'"},"messageId":"m1"}'
@@ -136,6 +151,18 @@ dispatch() {
     session/close)
       SESSION=""
       respond "$id" '{}'
+      ;;
+    _zu/todos/list)
+      respond "$id" '{"enabled":true,"plan":{"v":1,"todos":[{"id":"t-1","title":"write the test","status":"pending","origin":"agent","note":"stub plan"}],"groups":[]}}'
+      ;;
+    _zu/todos/write)
+      respond "$id" '{"plan":{"v":1,"todos":[{"id":"t-1","title":"write the test","status":"done","origin":"agent","verification":"stub"}],"groups":[]}}'
+      ;;
+    _zu/subagents/list)
+      respond "$id" '{"runs":[{"runId":"r-1","captainId":"'"$SESSION"'","containerId":"stub","agent":"Explore","task":"look around","status":"running","startedAt":1}]}'
+      ;;
+    _zu/subagents/transcript)
+      respond "$id" '{"run":{"runId":"r-1","agent":"Explore","task":"look around","status":"running","startedAt":1},"messages":[{"role":"assistant","text":"looking"}]}'
       ;;
     *)
       respond_error "$id" -32601 "unknown method" method_not_found
