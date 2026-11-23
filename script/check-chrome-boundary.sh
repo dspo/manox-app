@@ -55,7 +55,22 @@ if [ -n "$hits" ]; then
     status=1
 fi
 
+# 4. A view must not reach itself through its own entity handle. Inside
+#    render, a cx.listener callback, or a cx.defer_in closure the view is
+#    already the one outstanding lease ("one entity lease at a time"), so
+#    cx.entity().read(cx) / cx.entity().update(cx) re-borrow the leased
+#    entity and panic on the spot; mutate through &mut self instead.
+#    Capturing the handle for later use (cx.entity(), .clone(),
+#    .downgrade()) is fine — the lease is only violated by read/update.
+hits=$(grep -rnF -e 'cx.entity().read(cx' -e 'cx.entity().update(cx' \
+    crates/*/src --include='*.rs' || true)
+if [ -n "$hits" ]; then
+    echo "violation: view re-enters its own entity handle while leased (use &mut self):"
+    echo "$hits"
+    status=1
+fi
+
 if [ "$status" -eq 0 ]; then
-    echo "chrome boundary clean (projection pump + deferred commands)"
+    echo "chrome boundary clean (projection pump + deferred commands + single entity lease)"
 fi
 exit "$status"

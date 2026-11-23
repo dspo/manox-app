@@ -245,6 +245,9 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
   **先发命令、后 `cx.notify()`**——命令与驱动投影泵的 notify 共用 effect 队列、按入队序执行，先 notify 会让泵
   先完成 pane 的 stash/restore，随后的陈旧命令可能关掉刚恢复的 incoming tab；
   ④ hook / subscription 载荷自足，宿主不得在回调内触碰发起它的实体（launcher 的 ⏎ 另走延迟，构造上安全）。
+  同一条租约律辖视图自身（第④条的特例，脚本第 4 条检查同守）：render / `cx.listener` 回调 /
+  `cx.defer_in` 闭包内视图正处于租借中，不得经 `cx.entity().read(cx)` / `.update(cx)` 回访自己——
+  直接用 `&mut self`；捕获句柄供 paint 期闭包使用（`clone` / `downgrade`）不受此限。
   新增 chrome 写入先在 `chrome_assembly` 里找通道，**绝不**在调用点直接 `shell.update`；手势回归矩阵在
   `crates/agent-ui/tests/chrome_boundary.rs`（真实装配 + 真实租约）。
 - 提交信息不得携带 Co-Authored-By 尾注（CI 强制拒绝）。
