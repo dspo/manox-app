@@ -1052,7 +1052,7 @@ composer-delivery-handshake = The host handshake failed; messages may not be del
 composer-delivery-dispatch = Sending failed: the transport to the host is gone.
 composer-delivery-stalled = Messages are still queued past the delivery budget; check the host.
 
-### pi session (PLAN-ABSORB-06)
+### pi session
 pi-composer-placeholder = Message pi…
 pi-send = Send
 pi-stop = Stop
@@ -1061,6 +1061,7 @@ pi-empty = No messages yet
 pi-streaming = Writing…
 pi-queued = { $count } queued
 pi-session-dead = The session ended
+pi-session-closed = This session was closed
 pi-permission-title = A tool needs your approval
 pi-accept = Accept
 pi-decline = Decline
@@ -1068,6 +1069,19 @@ pi-ask-title = Question
 pi-ask-note-placeholder = Add a note (optional)
 pi-context-used = Context { $pct }%
 pi-banner-version = pi { $version }
+pi-harness-unavailable = The pi harness is not available
+pi-harness-not-connected = The pi harness is not connected
+pi-harness-no-answerable-ask = The pi harness has no answerable ask
+pi-harness-not-found = The pi harness binary was not found (build pi-harness or set STEER_PI_ACP)
+pi-tokio-runtime-gone = The tokio runtime is gone
+pi-harness-exited = The pi harness exited
+pi-harness-exited-code = The pi harness exited (exit { $code })
+pi-harness-exited-signal = The pi harness exited ({ $signal })
+pi-harness-exited-tail = { $reason } — stderr tail: { $tail }
+pi-tool-unnamed = tool
+pi-tool-exit-code = exit { $code }
+pi-tool-truncated = truncated ({ $lines } lines)
+pi-todo-verified = verified: { $verified }
 canvas-empty = This canvas has no sheet yet
 canvas-tab-home = Start
 canvas-tab-new-chat = New session

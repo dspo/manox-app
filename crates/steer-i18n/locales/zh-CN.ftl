@@ -1026,7 +1026,7 @@ composer-delivery-handshake = 宿主连接失败（握手未完成），消息�
 composer-delivery-dispatch = 消息发送失败：与宿主的传输已断开。
 composer-delivery-stalled = 消息仍在排队（超过投递预算），请检查宿主。
 
-### pi 会话（PLAN-ABSORB-06）
+### pi 会话
 pi-composer-placeholder = 给 pi 发消息…
 pi-send = 发送
 pi-stop = 停止
@@ -1035,6 +1035,7 @@ pi-empty = 还没有消息
 pi-streaming = 正在生成…
 pi-queued = { $count } 条排队
 pi-session-dead = 会话已结束
+pi-session-closed = 会话已关闭
 pi-permission-title = 工具需要授权
 pi-accept = 接受
 pi-decline = 拒绝
@@ -1042,6 +1043,19 @@ pi-ask-title = 问题
 pi-ask-note-placeholder = 补充说明（可选）
 pi-context-used = 上下文 { $pct }%
 pi-banner-version = pi { $version }
+pi-harness-unavailable = pi harness 不可用
+pi-harness-not-connected = pi harness 未连接
+pi-harness-no-answerable-ask = pi harness 没有待回答的问题
+pi-harness-not-found = 未找到 pi harness 可执行文件（请构建 pi-harness 或设置 STEER_PI_ACP）
+pi-tokio-runtime-gone = tokio 运行时已不可用
+pi-harness-exited = pi 进程已退出
+pi-harness-exited-code = pi 进程已退出（退出码 { $code }）
+pi-harness-exited-signal = pi 进程已退出（{ $signal }）
+pi-harness-exited-tail = { $reason }——stderr 尾部：{ $tail }
+pi-tool-unnamed = 工具
+pi-tool-exit-code = 退出码 { $code }
+pi-tool-truncated = 已截断（{ $lines } 行）
+pi-todo-verified = 已验证：{ $verified }
 canvas-empty = 这张画布还没有 sheet
 canvas-tab-home = 起始页
 canvas-tab-new-chat = 新会话
