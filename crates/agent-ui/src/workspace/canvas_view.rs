@@ -28,6 +28,8 @@ use crate::views::centered;
 use crate::workspace::canvas_host::{CanvasAction, CanvasHost};
 use crate::workspace::chat_column::ChatColumn;
 use crate::workspace::column_view::ChatColumnView;
+use steer_agent_chat_ui::pi::AcpStore;
+use steer_agent_chat_ui::views::pi::PiSessionView;
 use steer_canvas::persist;
 
 /// The tab strip's height (the sheet frames start below it).
@@ -43,6 +45,11 @@ pub struct CanvasView {
     /// the resource: dropping it ends the shell, so the map is pruned against
     /// the sheets any canvas still holds.
     terminals: HashMap<String, Entity<steer_ghostty::GhosttyView>>,
+    /// The pi sheet bodies, keyed by sheet id. One entity per sheet; the
+    /// store behind it owns the process (a closed sheet closes its session).
+    pi_views: HashMap<String, Entity<PiSessionView>>,
+    /// The pi harness's session store (owned by the workspace, shown here).
+    pi_store: Entity<AcpStore>,
     /// The shown container's working directory: a terminal sheet spawns there.
     /// Injected by the workspace when the canvas opens a container (the canvas
     /// never reads the workspace itself — that would take a second lease while
@@ -102,7 +109,7 @@ fn static_title(key: &'static str) -> steer_canvas::registry::TitleFn {
 /// already holds, so a kind owns existence/title/closability and the last mile
 /// of painting is the host's. A kind whose own store builds the view (the pi
 /// sheet) registers a factory instead.
-fn v1_registry(titles: SheetTitles) -> steer_canvas::SheetRegistry {
+fn v1_registry(titles: SheetTitles, pi_store: Entity<AcpStore>) -> steer_canvas::SheetRegistry {
     use std::sync::Arc;
     use steer_canvas::{ParsedSheet, SheetKindSpec};
 
@@ -128,6 +135,7 @@ fn v1_registry(titles: SheetTitles) -> steer_canvas::SheetRegistry {
         }
     };
     steer_canvas::SheetRegistry::new()
+        .with(pi_kind(pi_store))
         .with(kind(
             "home",
             "home",
@@ -177,16 +185,23 @@ fn glyph_icon(glyph: &str) -> gpui_kit_assets::IconName {
         "home" => IconName::House,
         "terminal" => IconName::SquareTerminal,
         "chat" => IconName::MessageCircle,
+        "pi" => IconName::Sparkles,
         _ => IconName::File,
     }
 }
 
 impl CanvasView {
-    pub(crate) fn new(host: CanvasHost, workspace: WeakEntity<Workspace>) -> Self {
+    pub(crate) fn new(
+        host: CanvasHost,
+        workspace: WeakEntity<Workspace>,
+        pi_store: Entity<AcpStore>,
+    ) -> Self {
         Self {
             host,
             column: None,
             terminals: HashMap::new(),
+            pi_views: HashMap::new(),
+            pi_store,
             cwd: std::env::current_dir().unwrap_or_default(),
             workspace,
             size: Rc::new(std::cell::Cell::new(None)),
@@ -227,6 +242,19 @@ impl CanvasView {
         };
         let sheet = terminal_sheet_id(&container, self.next_terminal_index(&container));
         self.ensure_terminal(&sheet, cx);
+        if self.host.open_sheet(&sheet, None) == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
+    /// Opens a fresh pi conversation as a sheet of the shown container. The
+    /// process starts immediately; the body appears on the sheet's first show.
+    pub(crate) fn open_pi_session(&mut self, cwd: std::path::PathBuf, cx: &mut Context<Self>) {
+        let session_id = steer_agent_chat_ui::pi::mint_session_id();
+        let sheet = format!("pi-session:{session_id}");
+        self.pi_store
+            .update(cx, |store, cx| store.open_new(&session_id, cwd, cx));
         if self.host.open_sheet(&sheet, None) == CanvasAction::Applied {
             self.after_edit(cx);
             cx.notify();
@@ -516,6 +544,22 @@ impl CanvasView {
                     .on_click(cx.listener(|this, _, _, cx| this.open_terminal(cx)))
                     .child(Icon::from(gpui_kit_assets::IconName::SquareTerminal).xsmall()),
             );
+            strip = strip.child(
+                gpui::div()
+                    .id(ElementId::Name(
+                        format!("canvas-open-pi-{}", group.key).into(),
+                    ))
+                    .debug_selector(|| "canvas-open-pi".to_string())
+                    .px_1()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .hover(|this| this.bg(theme.muted))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let cwd = this.cwd.clone();
+                        this.open_pi_session(cwd, cx);
+                    }))
+                    .child(Icon::from(gpui_kit_assets::IconName::Sparkles).xsmall()),
+            );
         }
 
         // The group's own "+": the container's start page.
@@ -577,6 +621,7 @@ impl CanvasView {
                 .get(sheet)
                 .map(|view| view.clone().into_any_element())
                 .unwrap_or_else(|| gpui::div().into_any_element()),
+            "pi-session" => self.pi_view(sheet, window, cx),
             _ => {
                 // The start page (and any kind the shell has no live body for
                 // yet) renders the container's own hint, never another
@@ -609,7 +654,26 @@ impl CanvasView {
         }
     }
 
+    /// The pi sheet's body entity, created on first show and kept for the
+    /// sheet's life (a tab switch must not rebuild a running conversation).
+    fn pi_view(&mut self, sheet: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(view) = self.pi_views.get(sheet) {
+            return view.clone().into_any_element();
+        }
+        let session_id = pi_session_of_sheet(sheet).to_owned();
+        let store = self.pi_store.clone();
+        let view = cx.new(|cx| PiSessionView::new(store, session_id, window, cx));
+        self.pi_views.insert(sheet.to_owned(), view.clone());
+        view.into_any_element()
+    }
+
     fn close_sheet(&mut self, sheet: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if sheet_kind(sheet) == "pi-session" {
+            self.pi_views.remove(sheet);
+            let session_id = pi_session_of_sheet(sheet).to_owned();
+            self.pi_store
+                .update(cx, |store, cx| store.close_session(&session_id, cx));
+        }
         match self.host.close_sheet(sheet) {
             CanvasAction::Applied => {
                 self.prune_terminals();
@@ -637,6 +701,41 @@ impl Render for CanvasView {
 }
 
 /// The v1 sheet registry, wired with the host's title source.
-pub(crate) fn registry(titles: SheetTitles) -> steer_canvas::SheetRegistry {
-    v1_registry(titles)
+pub(crate) fn registry(
+    titles: SheetTitles,
+    pi_store: Entity<AcpStore>,
+) -> steer_canvas::SheetRegistry {
+    v1_registry(titles, pi_store)
+}
+
+/// The pi session kind: existence, title and closability; the body is painted
+/// by the canvas from the store's view (`body: None`, like the conversation
+/// column).
+fn pi_kind(pi_store: Entity<AcpStore>) -> steer_canvas::SheetKindSpec {
+    use std::sync::Arc;
+
+    steer_canvas::SheetKindSpec {
+        kind: "pi-session",
+        title: Arc::new(move |sheet: &str, cx: &App| {
+            let session = pi_session_of_sheet(sheet);
+            let store = pi_store.read(cx);
+            store
+                .title(session)
+                .unwrap_or_else(|| crate::i18n::t("canvas-tab-pi"))
+        }),
+        tab_title: None,
+        glyph: "pi",
+        closable: true,
+        // A pi session is a sheet like any conversation; it does not name the
+        // container.
+        names_container: false,
+        restore: None,
+        parse: None,
+        body: None,
+    }
+}
+
+/// The session a `pi-session:` sheet id names.
+fn pi_session_of_sheet(sheet: &str) -> &str {
+    sheet.strip_prefix("pi-session:").unwrap_or(sheet)
 }

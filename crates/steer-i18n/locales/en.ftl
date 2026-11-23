@@ -1074,3 +1074,7 @@ canvas-tab-new-chat = New session
 canvas-tab-terminal = Terminal
 canvas-home-hint = Start page — open a conversation or terminal here
 canvas-sheet-unavailable = No content for this sheet kind yet
+
+### pi (canvas + launcher entry)
+canvas-tab-pi = pi
+launcher-action-pi = pi session

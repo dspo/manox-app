@@ -38,6 +38,8 @@ gpui-kit-assets.workspace = true
 ai-elements.workspace = true
 steer-components.workspace = true
 steer-i18n.workspace = true
+# The pi store's state root and sheet ids follow the platform root (~/.steer).
+steer-paths.workspace = true
 # The pi harness's ACP client seam: the chat crate owns the pi transcript's
 # data plane, so it consumes the transport directly (gpui-free, like this
 # crate's other non-view modules).

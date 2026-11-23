@@ -271,6 +271,26 @@ impl crate::Workspace {
         }
     }
 
+    /// The launcher's pi action: open a pi conversation as a sheet of the
+    /// foreground container. A pi conversation needs no manox session, so it
+    /// must not ride the native container-creation path (that path mints one);
+    /// the sheet is container-neutral like any other canvas sheet.
+    pub(crate) fn launch_pi_session_from_launcher(
+        &mut self,
+        target: crate::launcher::LauncherTarget,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = target
+            .folder()
+            .unwrap_or_else(|| crate::tool_tabs::thread_cwd_or_home(cx));
+        self.view_mode = super::ViewMode::Workspace;
+        self.sync_canvas(cx);
+        let canvas = self.ensure_canvas_view(cx);
+        canvas.update(cx, |canvas, cx| canvas.open_pi_session(cwd, cx));
+        cx.notify();
+    }
+
     /// The terminal pill: no intermediate step — the existing standalone-PTY
     /// path (the retired group menu's 新建终端), rooted at the target. The
     /// composer text is left alone — the terminal takes no initial prompt,

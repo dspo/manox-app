@@ -44,6 +44,17 @@ impl AcpStore {
         }
     }
 
+    /// The production constructor: resolve the shipped harness and the
+    /// platform state root. A missing binary is not fatal — the start page
+    /// reports it and every open fails with that reason.
+    pub fn from_environment(cx: &mut Context<Self>) -> Self {
+        let runtime = steer_acp::resolve_pi_acp().and_then(|bin| {
+            let home = steer_paths::steer_home()?;
+            Some(PiRuntime::new(bin, home.clone(), home))
+        });
+        Self::new(runtime, cx)
+    }
+
     /// The folded state; every render reads this.
     pub fn book(&self) -> &PiBook {
         &self.book

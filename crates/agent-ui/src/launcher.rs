@@ -854,6 +854,29 @@ impl LauncherState {
                 })
             },
         }];
+        // The pi harness: its conversation is a canvas sheet, not an
+        // external CLI container — the action hands the target's folder to
+        // the workspace, which opens the sheet on the canvas.
+        row.push(LauncherAction {
+            id: "pi",
+            icon: icons::ROBOT,
+            label: steer_i18n::t("launcher-action-pi").into(),
+            enabled: true,
+            unavailable: None,
+            cascade: None,
+            on_click: {
+                let ws = ws.clone();
+                let this = this.clone();
+                Rc::new(move |_, window, cx| {
+                    let Ok(target) = this.update(cx, |state, _| state.snapshot().0) else {
+                        return;
+                    };
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.launch_pi_session_from_launcher(target, window, cx)
+                    });
+                })
+            },
+        });
         for ((agent_id, display, svg), available) in
             EXTERNAL_AGENTS.iter().zip(&self.binary_available)
         {

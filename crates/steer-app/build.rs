@@ -99,6 +99,19 @@ fn main() {
             .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
     });
     inject("STEER_RUSTC_VERSION", rustc_version.as_deref());
+    // The pi harness distro pin (the sidecar's `@earendil-works/pi-coding-agent`
+    // version). Read from the committed package.json — the About row and the
+    // sidecar's own check-version stay one number.
+    let pi_pkg = repo_root.join("pi-harness/package.json");
+    println!("cargo:rerun-if-changed={}", pi_pkg.display());
+    let pi_version = fs::read_to_string(&pi_pkg).ok().and_then(|text| {
+        let key = "\"@earendil-works/pi-coding-agent\"";
+        let rest = &text[text.find(key)? + key.len()..];
+        let rest = rest[rest.find(':')? + 1..].trim_start();
+        let rest = rest.strip_prefix('"')?;
+        Some(rest[..rest.find('"')?].to_string())
+    });
+    inject("STEER_PI_DISTRO_VERSION", pi_version.as_deref());
 }
 
 /// Commit of the manox-app checkout this build reads from. A tree without its

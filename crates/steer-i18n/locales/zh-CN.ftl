@@ -1048,3 +1048,7 @@ canvas-tab-new-chat = 新会话
 canvas-tab-terminal = 终端
 canvas-home-hint = 起始页——在这里打开新的会话或终端
 canvas-sheet-unavailable = 这种 sheet 还没有可用的内容
+
+### pi（画布与启动器入口）
+canvas-tab-pi = pi
+launcher-action-pi = pi 会话
