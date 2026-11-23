@@ -72,9 +72,9 @@ manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（d
 - 已知降级（接 x-manox 通道未建模的部分）：UI 本地注释卡不持久、终端走内核 PTY 直连不走 AHP terminal 通道。
 - unarchive（整树复活，上游 #987 的 parent 边）：数据面就绪且经测（`revive_container`）；UI 入口待归档分区面（挂账——侧栏今日不渲染归档行，分区面落地即销账）。
 
-### 画布模型（crates/steer-canvas，PLAN-ABSORB-03）
+### 画布模型（crates/steer-canvas）
 
-容器持有画布、画布是布局树、叶子是 sheet。本 crate 是**状态层**（渲染面在 PLAN-ABSORB-04）。不可从代码推导的约束：
+容器持有画布、画布是布局树、叶子是 sheet。本 crate 是**状态层**（渲染面在 `agent-ui` 的 `workspace/canvas_view.rs`）。不可从代码推导的约束：
 
 - **sheet 的存在由 registry 决定**，布局只决定放在哪：`SheetKindSpec` 在装配点注册（kind 二次认领 panic 即 fail fast），`body` 是 `AnyView` 工厂——kind 的状态必须住自己的 store（切 tab 会卸载 body），不得驻留在视图里。两种形态：`body: Some(factory)` 由 kind 自己造视图；`body: None` 由画布按 kind 分派（`session:` 会话列与 `pi-session:` pi 会话走这条）。
 - **布局只有一个写者**：`CanvasState::set_layout(container_id, next, ticket)`。手势先 `take_ticket()` 再提交；过期票（含「该画布已切走」）静默丢弃。`sheet_count == 0` 返回 `AutoArchive(cid)`，归档动作由调用方走 workspace 的 teardown 面——状态层不做跨实体写。
@@ -124,7 +124,7 @@ script/local-manox.sh off           # 还原纯 git 依赖（CI 形态）
 # 然后 cargo update -p manox-agent（全部 8 依赖随同一 tag 整体移动）
 ```
 
-runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题在本仓修。状态根分层（PLAN-ABSORB-01）：应用层（Steer 平台）在 `~/.steer/`（`settings.toml` 存 `ui_language`、`projects.toml` 存项目注册表，`steer-paths` crate 是路径权威，`STEER_HOME` 可覆盖）；manox harness 层在 `~/.steer/.manox/`——两个 bin（steer/cx）启动早期（任何线程与 manox 路径解析之前）调 `steer_paths::install()` 注入 `MANOX_HOME` 并把旧 `~/.manox` 一次性 rename 进来，runtime 代码零改动（路径清单见 dspo/manox 仓 AGENTS.md）。
+runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题在本仓修。状态根分层：应用层（Steer 平台）在 `~/.steer/`（`settings.toml` 存 `ui_language`、`projects.toml` 存项目注册表，`steer-paths` crate 是路径权威，`STEER_HOME` 可覆盖）；manox harness 层在 `~/.steer/.manox/`——两个 bin（steer/cx）启动早期（任何线程与 manox 路径解析之前）调 `steer_paths::install()` 注入 `MANOX_HOME` 并把旧 `~/.manox` 一次性 rename 进来，runtime 代码零改动（路径清单见 dspo/manox 仓 AGENTS.md）。
 
 单实例：`~/.steer/instance.lock` 以非阻塞 `flock` 做唯一权威（进程退出内核自动释放，不留死锁）；第二实例先经 AppKit 把运行中的实例带到前台再自退（macOS），Linux 只保证不重复启动（`crates/steer-app/src/instance.rs`）。
 
@@ -251,9 +251,9 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
 
 ## 工作方法
 
-源自 nsh-pi 的工作方法（PLAN-ABSORB-07 吸纳），无脚本门禁，靠评审与自觉守：
+以下工作方法无脚本门禁，靠评审与自觉守：
 
-- **PR 编辑在独立 worktree**：`git worktree add $PWD.worktrees/pr_topic -b feat/pr_topic <PR目标分支>`（吸纳系列期间基分支为 `origin/integrate/absorb-nsh-pi`，其后回 `origin/main`）；合并后回收 branch 与 worktree。
+- **PR 编辑在独立 worktree**：`git worktree add $PWD.worktrees/pr_topic -b feat/pr_topic <PR目标分支>`（基分支 = 该 PR 的目标分支；成系列的工作有自己的集成分支时，以集成分支为准）；合并后回收 branch 与 worktree。
 - **先回应再动手**：收到指示后、第一次写操作前用一句话说清理解与打算，说完就继续，不等确认。
 - **尽早交付 PR**：提 PR 后不傻等远端检查，静态 review 与本地/CI 验证并行。
 - **review 别重复劳动**：GitHub CI 会验证的，review 时非必要不在本地再跑一遍。
