@@ -383,26 +383,33 @@ pub fn split_right(layout: &DockLayout, beside: &str, id: &str) -> DockLayout {
 }
 
 /// Drops sheets outside `keep` (their resource is gone), de-duplicates
-/// repeated ids within a group, and collapses groups that end up empty.
+/// repeated ids across the whole tree, and collapses groups that end up empty.
 ///
 /// Restore reads a stored layout through this before activating it: a layout
-/// is a claim about the past, and only surviving resources may be shown.
+/// is a claim about the past, and only surviving resources may be shown. The
+/// seen-set is shared across groups — a stored file may repeat an id in two
+/// tab groups, and two copies of one sheet would break "one sheet, one
+/// instance" the moment both are mounted.
 pub fn prune_layout(layout: &DockLayout, keep: &HashSet<String>) -> DockLayout {
+    let mut seen = HashSet::new();
     DockLayout {
-        center: prune_node(&layout.center, keep).unwrap_or_else(DockNode::empty_tabs),
+        center: prune_node(&layout.center, keep, &mut seen).unwrap_or_else(DockNode::empty_tabs),
     }
 }
 
-fn prune_node(node: &DockNode, keep: &HashSet<String>) -> Option<DockNode> {
+fn prune_node<'a>(
+    node: &'a DockNode,
+    keep: &HashSet<String>,
+    seen: &mut HashSet<&'a str>,
+) -> Option<DockNode> {
     match node {
         DockNode::Tabs {
             panels,
             active_index,
         } => {
-            let mut seen = HashSet::new();
             let panels: Vec<String> = panels
                 .iter()
-                .filter(|panel| keep.contains(panel.as_str()) && seen.insert((*panel).clone()))
+                .filter(|panel| keep.contains(panel.as_str()) && seen.insert(panel.as_str()))
                 .cloned()
                 .collect();
             if panels.is_empty() {
@@ -421,7 +428,7 @@ fn prune_node(node: &DockNode, keep: &HashSet<String>) -> Option<DockNode> {
         } => {
             let children: Vec<DockNode> = children
                 .iter()
-                .filter_map(|child| prune_node(child, keep))
+                .filter_map(|child| prune_node(child, keep, seen))
                 .collect();
             match children.len() {
                 0 => None,
@@ -640,6 +647,22 @@ mod tests {
         let pruned = prune_layout(&layout, &keep(&["a", "b"]));
         assert_eq!(ids(&pruned), ["a", "b"]);
         assert_eq!(active_panel_ids(&pruned, None).len(), 1);
+    }
+
+    #[test]
+    fn prune_deduplicates_an_id_repeated_across_groups() {
+        // A hand-edited or foreign file may carry one sheet in two tab
+        // groups; one sheet is one instance, wherever the repeat sits.
+        let split = DockNode::split(
+            Axis::Horizontal,
+            vec![
+                DockNode::tabs(["a".to_string(), "b".to_string()]),
+                DockNode::tabs(["a".to_string(), "c".to_string()]),
+            ],
+        );
+        let layout = DockLayout { center: split };
+        let pruned = prune_layout(&layout, &keep(&["a", "b", "c"]));
+        assert_eq!(ids(&pruned), ["a", "b", "c"]);
     }
 
     #[test]
