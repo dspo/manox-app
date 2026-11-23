@@ -4,7 +4,9 @@
 //! `ui_language` key of its settings document. Reads and writes touch only
 //! that key: the file's other keys are preserved byte-for-byte in value,
 //! because future app keys may share the document and this crate must never
-//! round-trip a document it does not fully model.
+//! round-trip a document it does not fully model — a document that does not
+//! parse is refused rather than rewritten, so persisting can never wipe the
+//! keys it does not model.
 //!
 //! The pre-split layout kept the key on the runtime's settings document
 //! (`<manox_root>/settings.toml`). The first touch of the new document
@@ -127,18 +129,17 @@ fn persist_at(path: &Path, lang: Language) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create settings dir {}", parent.display()))?;
     }
-    // Parse-edit-serialize keeps every other key intact; a parse failure is
-    // recovered by starting from an empty document so a corrupt file cannot
-    // permanently block a language change.
+    // Parse-edit-serialize keeps every other key intact. A file that does
+    // not parse is refused, never rewritten from an empty doc: the empty
+    // start would silently wipe the keys this crate does not model. A
+    // missing file is the first-boot shape — an empty doc is the whole
+    // truth there.
     let mut doc: toml::Value = match std::fs::read_to_string(path) {
-        Ok(raw) => toml::from_str(&raw).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "settings.toml parse failed; rewriting it from scratch");
-            toml::Value::Table(toml::map::Map::new())
-        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             toml::Value::Table(toml::map::Map::new())
         }
-        Err(e) => return Err(e).context("read settings.toml"),
+        raw => toml::from_str(&raw.context("read settings.toml")?)
+            .context("settings.toml does not parse; refusing an empty-doc rewrite")?,
     };
     let table = doc
         .as_table_mut()
@@ -260,5 +261,27 @@ mod tests {
         assert_eq!(read_language_at(&path), Language::En);
         persist_at(&path, Language::ZhCn).unwrap();
         assert_eq!(read_language_at(&path), Language::ZhCn);
+    }
+
+    /// A file that does not parse must never be rewritten from an empty doc:
+    /// other keys may share the settings document, and the empty-doc start
+    /// would silently wipe them. persist_at refuses and the corrupt bytes
+    /// stay untouched; a missing file is the first-boot shape and persists
+    /// fine.
+    #[test]
+    fn persistence_refuses_an_unparseable_file_instead_of_wiping_it() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("steer/settings.toml");
+        let corrupt = "ui_language = \"en\"\nbroken ====";
+        write_file(&path, corrupt);
+        assert!(
+            persist_at(&path, Language::ZhCn).is_err(),
+            "an unparseable file blocks the write"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
+
+        let fresh = root.path().join("fresh/settings.toml");
+        persist_at(&fresh, Language::En).unwrap();
+        assert_eq!(read_language_at(&fresh), Language::En);
     }
 }
