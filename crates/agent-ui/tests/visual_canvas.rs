@@ -42,6 +42,11 @@ mod macos {
             return;
         };
         let split = std::env::var("CANVAS_SPLIT").is_ok();
+        let dock = std::env::var("CANVAS_DOCK").is_ok();
+        let dock_right = std::env::var("CANVAS_DOCK_RIGHT").is_ok();
+        let zoom = std::env::var("CANVAS_ZOOM").is_ok();
+        let drag_slot = std::env::var("CANVAS_DRAG_SLOT").is_ok();
+        let drag_block = std::env::var("CANVAS_DRAG_BLOCK").is_ok();
 
         manox_agent::init();
         // render_to_image only exists on non-headless platforms (Metal
@@ -99,6 +104,66 @@ mod macos {
                 if let Some(ws) = agent_ui::dispatch::workspace_global() {
                     ws.update(cx, |ws, cx| {
                         ws.diagnostic_canvas_split_home(&session_sheet, cx)
+                    });
+                }
+            });
+            settle(&mut cx);
+        }
+
+        if split && (drag_slot || drag_block) {
+            cx.update(|cx| {
+                if let Some(ws) = agent_ui::dispatch::workspace_global() {
+                    ws.update(cx, |ws, cx| {
+                        ws.diagnostic_canvas_split_home(&session_sheet, cx)
+                    });
+                }
+            });
+            settle(&mut cx);
+        }
+        if dock {
+            cx.update(|cx| {
+                if let Some(ws) = agent_ui::dispatch::workspace_global() {
+                    ws.update(cx, |ws, cx| ws.diagnostic_canvas_toggle_dock("bottom", cx));
+                }
+            });
+            settle(&mut cx);
+        }
+        if dock_right {
+            // The right dock's first tenant: move the start page in (the
+            // same drop command the drag runs).
+            cx.update(|cx| {
+                if let Some(ws) = agent_ui::dispatch::workspace_global() {
+                    ws.update(cx, |ws, cx| {
+                        let home = steer_canvas::id::home_sheet_id(&container);
+                        ws.diagnostic_canvas_drop(&home, &format!("dock:right"), cx);
+                    });
+                }
+            });
+            settle(&mut cx);
+        }
+        if zoom {
+            cx.update(|cx| {
+                if let Some(ws) = agent_ui::dispatch::workspace_global() {
+                    ws.update(cx, |ws, cx| {
+                        ws.diagnostic_canvas_toggle_zoom(&session_sheet, cx)
+                    });
+                }
+            });
+            settle(&mut cx);
+        }
+        if drag_slot || drag_block {
+            cx.update(|cx| {
+                if let Some(ws) = agent_ui::dispatch::workspace_global() {
+                    let size = ws.read(cx).diagnostic_canvas_size(cx);
+                    ws.update(cx, |ws, cx| {
+                        // A slot drag aims at a strip (the 2pt brand line);
+                        // a block drag at a content area.
+                        let y = if drag_slot {
+                            size.1 * 0.017
+                        } else {
+                            (size.1 * 0.42).max(120.)
+                        };
+                        ws.diagnostic_canvas_stage_drag(&session_sheet, size.0 * 0.82, y, cx);
                     });
                 }
             });

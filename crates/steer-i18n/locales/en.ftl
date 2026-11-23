@@ -1091,6 +1091,12 @@ canvas-sheet-unavailable = No content for this sheet kind yet
 
 ### pi (canvas + launcher entry)
 canvas-tab-pi = pi
+
+### canvas interactions (drag/dock/zoom, PLAN-ABSORB-08)
+canvas-tab-zoom = Zoom
+canvas-tab-unzoom = Leave zoom
+canvas-split-right = Split right
+canvas-close-sheet = Close tab
 launcher-action-pi = pi session
 pi-selector-mode = mode
 pi-plan-title = plan

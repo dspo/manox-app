@@ -198,10 +198,14 @@ impl CanvasState {
         self.zoomed.as_deref()
     }
 
-    /// Zooms a panel of the shown layout, or leaves zoom (`None`). A panel the
-    /// layout does not hold clears the zoom instead of blanking the canvas.
+    /// Zooms a panel of the shown layout, or leaves zoom (`None`).
+    ///
+    /// The zoom is a center fact: a dock sheet never zooms (the dock region
+    /// is a fixed placement surface, not a full-canvas candidate), and a
+    /// panel the center does not hold clears the zoom instead of blanking
+    /// the canvas.
     pub fn set_zoom(&mut self, panel: Option<String>) {
-        let panel = panel.filter(|panel| layout::has_sheet(self.layout(), panel));
+        let panel = panel.filter(|panel| layout::has_center_sheet(self.layout(), panel));
         self.zoomed = panel;
     }
 
@@ -816,6 +820,28 @@ mod tests {
         assert!(state.forget_container("b"));
         assert_eq!(state.active_container(), None);
         assert_eq!(layout::panel_ids(state.layout()), ["home:scratch"]);
+    }
+
+    #[test]
+    fn a_zoom_never_names_a_dock_sheet() {
+        let mut state = CanvasState::new();
+        switch(&mut state, "a");
+        let ticket = state.take_ticket();
+        let with_dock = layout::toggle_dock(state.layout(), crate::layout::DockSide::Bottom);
+        state.set_layout("a", with_dock, ticket);
+        let ticket = state.take_ticket();
+        let next = layout::move_sheet(
+            state.layout(),
+            "t1",
+            crate::layout::DropTarget::Dock {
+                side: crate::layout::DockSide::Bottom,
+            },
+        );
+        state.set_layout("a", next, ticket);
+        state.set_zoom(Some("t1".to_string()));
+        assert_eq!(state.zoomed(), None, "a dock sheet does not zoom");
+        state.set_zoom(Some("home:a".to_string()));
+        assert_eq!(state.zoomed(), Some("home:a"));
     }
 
     #[test]

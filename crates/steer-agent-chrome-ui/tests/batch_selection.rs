@@ -102,7 +102,6 @@ fn mount(
         let config = ShellConfig {
             main: Arc::new(StubMain { view: main }),
             tool_kinds: vec![],
-            panel_surface: None,
             brand: None,
             fixed_rows: vec![],
             customizations: vec![],

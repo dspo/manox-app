@@ -146,5 +146,34 @@ async fn chrome_gestures_survive_their_real_leases(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
+    // ── the titlebar's dock toggle: the canvas dock is the host's write ───
+    // The click lands the host hook under the REAL lease shape (a shell
+    // update), and the flip is canvas state — the chrome keeps no mirror
+    // (invariant ②; the button's lit state is a render-time read).
+    fire(cx, window, |window, cx| {
+        shell.update(cx, |shell, cx| shell.toggle_bottom_dock(window, cx));
+    });
+    cx.run_until_parked();
+    let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, ..)| side == "bottom")
+        .expect("the flipped region exists");
+    assert!(bottom.1, "the toggle opened the canvas's bottom dock");
+    assert!(
+        bottom.2.iter().any(|sheet| sheet.starts_with("terminal:")),
+        "opening an empty bottom dock asked for a terminal"
+    );
+    fire(cx, window, |window, cx| {
+        shell.update(cx, |shell, cx| shell.toggle_bottom_dock(window, cx));
+    });
+    cx.run_until_parked();
+    let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, ..)| side == "bottom")
+        .expect("the region stays after closing");
+    assert!(!bottom.1, "the second toggle closed the dock");
+
     common::full_wiring_teardown(cx);
 }

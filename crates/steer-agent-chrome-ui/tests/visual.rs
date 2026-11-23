@@ -43,10 +43,9 @@ mod macos {
     use steer_agent_chrome_ui::right_pane::TabStore;
     use steer_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
     use steer_agent_chrome_ui::shell::SessionRow;
-    use steer_agent_chrome_ui::theme::IconAsset;
     use steer_agent_chrome_ui::{
-        CustomizationRow, FixedRow, HostHooks, MainSurface, PanelSurface, Shell, ShellConfig,
-        ToolTab, ToolTabFactory, icons, register_fonts,
+        CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, ToolTab,
+        ToolTabFactory, icons, register_fonts,
     };
 
     pub fn main() {
@@ -55,7 +54,6 @@ mod macos {
             return;
         };
         let right = std::env::var("CHROME_RIGHT").is_ok();
-        let panel = std::env::var("CHROME_PANEL").is_ok();
 
         manox_agent::init();
         // render_to_image only exists on non-headless platforms (Metal texture
@@ -237,16 +235,11 @@ mod macos {
                         cx.notify();
                     });
                 }
-                if right || panel {
+                if right {
                     shell.update(cx, |shell, cx| {
-                        if right {
-                            shell.open_right("dummy", window, cx);
-                            if std::env::var("CHROME_SWITCH").is_ok() {
-                                shell.open_right("second", window, cx);
-                            }
-                        }
-                        if panel {
-                            shell.toggle_panel(window, cx);
+                        shell.open_right("dummy", window, cx);
+                        if std::env::var("CHROME_SWITCH").is_ok() {
+                            shell.open_right("second", window, cx);
                         }
                         cx.notify();
                     });
@@ -343,7 +336,6 @@ mod macos {
                 }
                 kinds
             },
-            panel_surface: Some(Arc::new(DummyPanel)),
             brand: None,
             fixed_rows: vec![
                 FixedRow {
@@ -380,6 +372,8 @@ mod macos {
                 },
             ],
             hooks: HostHooks {
+                on_toggle_dock: None,
+                dock_open: None,
                 // Live nav edges: the screenshot is the only acceptance face
                 // for the titlebar's enabled-arrow state.
                 nav_avail: Some(Box::new(|_| steer_agent_chrome_ui::shell::NavAvail {
@@ -1078,38 +1072,6 @@ mod macos {
             _store: &TabStore,
         ) -> gpui::AnyElement {
             gpui::div().into_any_element()
-        }
-    }
-
-    struct DummyPanel;
-
-    struct DummyPanelView;
-
-    impl gpui::Render for DummyPanelView {
-        fn render(
-            &mut self,
-            _window: &mut gpui::Window,
-            _cx: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            gpui::div()
-                .w_full()
-                .h_full()
-                .p(px(12.))
-                .child("dummy panel body")
-        }
-    }
-
-    impl PanelSurface for DummyPanel {
-        fn title(&self) -> gpui::SharedString {
-            "Dummy".into()
-        }
-
-        fn icon(&self) -> IconAsset {
-            icons::TOOLS
-        }
-
-        fn open(&self, _window: &mut gpui::Window, cx: &mut gpui::App) -> Result<AnyView, String> {
-            Ok(AnyView::from(cx.new(|_| DummyPanelView)))
         }
     }
 }

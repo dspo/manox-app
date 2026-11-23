@@ -92,13 +92,13 @@ impl Workspace {
                 .ok();
                 beat(cx).await;
             }
-            // ── terminal subprocesses (the pane tabs + the dock) ─────────
+            // ── terminal subprocesses (the pane tabs + the canvas dock) ──
             let has_terminals = this
-                .update(cx, |_, cx| {
+                .update(cx, |ws, cx| {
                     crate::chrome_assembly::pane_open_kinds(cx)
                         .iter()
                         .any(|k| crate::tool_tabs::PTY_TAB_KINDS.contains(&k.as_str()))
-                        || crate::chrome_assembly::dock_terminal_live(cx)
+                        || ws.container_has_canvas_terminal(&sid, cx)
                 })
                 .unwrap_or(false);
             if has_terminals {
@@ -110,17 +110,18 @@ impl Workspace {
                     .ok();
                 beat(cx).await;
                 // The PTY tab kinds' `close` never re-enters the workspace
-                // (store resets + shell-only dock take), so they run inside
-                // the lease. Background external containers are NOT touched:
-                // they are independent containers (D6/D8) with their own 0 号
-                // processes — `/exit` is the outgoing container's death only,
-                // and the app process quitting is the only thing that ends
-                // the survivors, by design.
-                this.update(cx, |_, cx| {
+                // (store resets), so they run inside the lease; the dock's
+                // terminals are canvas sheets, and closing them drops their
+                // PTY views with them. Background external containers are
+                // NOT touched: they are independent containers (D6/D8) with
+                // their own 0 号 processes — `/exit` is the outgoing
+                // container's death only, and the app process quitting is
+                // the only thing that ends the survivors, by design.
+                this.update(cx, |ws, cx| {
                     for kind in crate::tool_tabs::PTY_TAB_KINDS {
                         crate::chrome_assembly::close_tool_tabs_of_kind(kind, cx);
                     }
-                    crate::chrome_assembly::stop_dock_terminal(cx);
+                    ws.close_container_terminal_sheets(&sid, cx);
                 })
                 .ok();
                 this.update(cx, |ws, cx| ws.note("exit-terminal-killed", &[], cx))

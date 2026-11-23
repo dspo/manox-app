@@ -22,11 +22,10 @@ use steer_ext_agents::SessionHandle;
 
 use crate::workspace::Workspace;
 
-/// One container's pane-side holdings: the stashed dock view (its drop tears
-/// the PTY down) and the stashed right-pane session (the tab set + store).
+/// One container's pane-side holding: the stashed right-pane session (the
+/// tab set + store). The dock lives in the canvas now — it keeps no stash.
 #[derive(Default)]
 pub(crate) struct PaneEntry {
-    pub(crate) dock: Option<gpui::AnyView>,
     pub(crate) right: Option<steer_agent_chrome_ui::right_pane::RightPaneSession>,
 }
 
@@ -37,35 +36,6 @@ pub(crate) struct PaneEntry {
 pub(crate) type KillHandles = HashMap<String, (String, Arc<SessionHandle>)>;
 
 impl Workspace {
-    // ── dock views ────────────────────────────────────────────────────
-
-    /// Park the outgoing live dock view under its container (the switch-out
-    /// half of the dock's per-container stash).
-    pub(crate) fn stash_dock(&mut self, container: &str, view: gpui::AnyView) {
-        self.pane_stash
-            .entry(container.to_string())
-            .or_default()
-            .dock = Some(view);
-    }
-
-    /// Take a container's stashed dock view back (the switch-in half).
-    /// `None` when the container never opened a dock — the slot stays empty
-    /// and the next expand spawns at that container's attrs cwd.
-    pub(crate) fn take_dock(&mut self, container: &str) -> Option<gpui::AnyView> {
-        self.pane_stash
-            .get_mut(container)
-            .and_then(|entry| entry.dock.take())
-    }
-
-    /// Which container's dock view is live in the shell right now.
-    pub(crate) fn dock_owner(&self) -> Option<String> {
-        self.live_dock_owner.clone()
-    }
-
-    pub(crate) fn set_dock_owner(&mut self, container: Option<String>) {
-        self.live_dock_owner = container;
-    }
-
     // ── right-pane sessions ───────────────────────────────────────────
 
     /// Park the outgoing live right-pane session under its container.
@@ -154,11 +124,9 @@ impl Workspace {
     /// `chrome_assembly::reclaim_container_panes`, which must run outside
     /// the workspace lease.
     pub(crate) fn reclaim_stash(&mut self, container: &str) {
-        let _ = self.take_dock(container);
         let _ = self.take_right(container);
         // An emptied entry is dead weight (the container is going away).
         if let Some(entry) = self.pane_stash.get(container)
-            && entry.dock.is_none()
             && entry.right.is_none()
         {
             self.pane_stash.remove(container);
@@ -166,19 +134,6 @@ impl Workspace {
     }
 
     // ── diagnostics (test-support only) ───────────────────────────────
-
-    /// The stashed dock keys and whether each holds a view — the
-    /// per-container keying regression read.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_dock_stash(&self) -> Vec<(String, bool)> {
-        let mut rows: Vec<(String, bool)> = self
-            .pane_stash
-            .iter()
-            .map(|(container, entry)| (container.clone(), entry.dock.is_some()))
-            .collect();
-        rows.sort();
-        rows
-    }
 
     /// Whether a container holds a stashed right-pane session.
     #[cfg(feature = "test-support")]
@@ -201,11 +156,10 @@ impl Workspace {
         pairs
     }
 
-    /// The live dock/right owner slots — the switch-tracking regression
-    /// read.
+    /// The live right-pane owner slot — the switch-tracking regression read.
     #[cfg(feature = "test-support")]
-    pub fn diagnostic_live_owners(&self) -> (Option<String>, Option<String>) {
-        (self.dock_owner(), self.right_owner())
+    pub fn diagnostic_live_owner(&self) -> Option<String> {
+        self.right_owner()
     }
 
     /// Diagnostic: register a CLI tab's kill handle under `(container, tab)`
