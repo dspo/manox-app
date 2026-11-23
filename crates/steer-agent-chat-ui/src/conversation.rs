@@ -113,8 +113,11 @@ pub enum ConvItem {
     /// it the moment the turn archives. Folding it hides the turn's segments
     /// (the reply is exempt); `hidden_by_turn_process` resolves that.
     TurnProcess {
-        /// Settled run length; `None`/0 renders the bare「已完成」.
+        /// Settled run length; `None`/0 renders the bare outcome label.
         secs: Option<i64>,
+        /// How the turn ended — the label and tone read off it, so a
+        /// cancelled/failed turn is visible as such at the head.
+        outcome: ahp_types::state::TurnState,
         collapsed: bool,
         user_toggled: bool,
     },
@@ -1291,7 +1294,7 @@ mod tests {
     use super::*;
     use crate::transcript::{Overlays, ProjectEnv, project};
     use ahp_types::actions::StateAction;
-    use ahp_types::state::ChatState;
+    use ahp_types::state::{ChatState, TurnState};
 
     /// An empty fold to fold actions into, exactly as the store holds one.
     fn empty_chat() -> ChatState {
@@ -1353,6 +1356,21 @@ mod tests {
             "type": "chat/turnComplete", "turnId": turn, "duration": duration_ms,
         }))
         .expect("the complete action parses")
+    }
+
+    fn cancelled(turn: &str, duration_ms: i64) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/turnCancelled", "turnId": turn, "duration": duration_ms,
+        }))
+        .expect("the cancelled action parses")
+    }
+
+    fn failed(turn: &str, duration_ms: i64) -> StateAction {
+        serde_json::from_value(serde_json::json!({
+            "type": "chat/error", "turnId": turn, "duration": duration_ms,
+            "part": { "error": { "errorType": "provider", "message": "boom" } },
+        }))
+        .expect("the error action parses")
     }
 
     fn env() -> (
@@ -1477,13 +1495,18 @@ mod tests {
             vec!["user:t-1", "tp:t-1", "seg:rs:p-r1", "md:p-1"],
             "segment = the maximal reasoning/tool run; the head sits above it"
         );
-        let ConvItem::TurnProcess { secs, .. } = &nodes[1].kind else {
+        let ConvItem::TurnProcess { secs, outcome, .. } = &nodes[1].kind else {
             panic!("the second row is the process head");
         };
         assert_eq!(
             *secs,
             Some(12),
             "the head's seconds come from turn.duration"
+        );
+        assert_eq!(
+            *outcome,
+            TurnState::Complete,
+            "the head carries the turn's outcome"
         );
         let ConvItem::Thinking(t) = &nodes[2].kind else {
             panic!("the third row is the segment");
@@ -1500,6 +1523,63 @@ mod tests {
             panic!("the last row is the answer");
         };
         assert!(activity_header, "the segment header carries the model");
+    }
+
+    /// The head must name a CANCELLED turn as such: its process produced no
+    /// visible transcript face (the final assistant message carries no
+    /// content), so the whole-turn head is the only place the outcome shows —
+    /// rendered as a completion it reads as "stopped at the error instantly".
+    /// The duration still rides: how long the round hung before the cancel
+    /// landed is information.
+    #[test]
+    fn a_cancelled_turn_s_head_carries_the_cancelled_outcome() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "read it"));
+        fold(&mut chat, &open_rs("t-1", "p-r1"));
+        fold(&mut chat, &reasoning_delta("t-1", "p-r1", "thinking"));
+        fold(&mut chat, &cancelled("t-1", 381_000));
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert_eq!(
+            keys_of(&nodes),
+            vec!["user:t-1", "tp:t-1", "seg:rs:p-r1"],
+            "a cancelled turn with activity still earns its head above the segment"
+        );
+        let ConvItem::TurnProcess { secs, outcome, .. } = &nodes[1].kind else {
+            panic!("the second row is the process head");
+        };
+        assert_eq!(*outcome, TurnState::Cancelled, "the head names the cancel");
+        assert_eq!(
+            *secs,
+            Some(381),
+            "the head's seconds come from turn.duration even when cancelled"
+        );
+    }
+
+    /// Same projection fact for a FAILED turn: the fold archives it with
+    /// `TurnState::Error`, and the head (not just the trailing error row)
+    /// must read as a failure.
+    #[test]
+    fn a_failed_turn_s_head_carries_the_error_outcome() {
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "read it"));
+        fold(&mut chat, &open_rs("t-1", "p-r1"));
+        fold(&mut chat, &reasoning_delta("t-1", "p-r1", "thinking"));
+        fold(&mut chat, &failed("t-1", 5_000));
+        let (env, _host) = env();
+        let mut overlays = Overlays::default();
+        let nodes = project(Some(&chat), &mut overlays, &env);
+        assert_eq!(
+            keys_of(&nodes),
+            vec!["user:t-1", "tp:t-1", "seg:rs:p-r1", "err:t-1:2"],
+            "the head sits above the segment; the error part follows as its row"
+        );
+        let ConvItem::TurnProcess { secs, outcome, .. } = &nodes[1].kind else {
+            panic!("the second row is the process head");
+        };
+        assert_eq!(*outcome, TurnState::Error, "the head names the failure");
+        assert_eq!(*secs, Some(5));
     }
 
     /// Tool state machine: a completed call carries the state's own result

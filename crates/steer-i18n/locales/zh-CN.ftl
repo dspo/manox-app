@@ -195,6 +195,8 @@ steering-verb = 正在驾驶
 # 类型由宿主给出，原样渲染）。
 subagent-steering-prefix = { $name }正在驾驶
 turn-process-completed = 已完成，用时
+turn-process-cancelled = 已取消，用时
+turn-process-failed = 失败，用时
 captain-activity-thinking = 思考中
 captain-activity-replying = 正在回复
 

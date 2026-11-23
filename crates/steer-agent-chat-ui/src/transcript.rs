@@ -791,6 +791,10 @@ fn push_turn(
                 key: ItemKey::TurnProcess(turn.id.to_string()),
                 kind: ConvItem::TurnProcess {
                     secs: secs.filter(|s| *s > 0),
+                    // The gate above only mints the head for archived turns,
+                    // whose state is always settled; `Complete` is unreachable
+                    // but keeps the cast total.
+                    outcome: turn.state.unwrap_or(TurnState::Complete),
                     collapsed: false,
                     user_toggled: false,
                 },
