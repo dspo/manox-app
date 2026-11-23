@@ -1,47 +1,18 @@
-//! ToolTab assembly adapters: wrap the app's real surfaces as chrome-shell
-//! right-pane tabs.
+//! The CLI spawn faces: the launch agents, the model picker they open on,
+//! and the PTY terminals the canvas sheets render.
 //!
-//! Kinds shipped here:
-//! - ghostty terminal ($SHELL on the libghostty-vt emulation core, standalone
-//!   PTY, GPUI-drawn from render-state snapshots) — the integrated terminal
-//!   since the Ghostty migration;
-//! - CLI agent terminals (claude / codex / copilot via the cx
-//!   `AgentBuilder`): the tab opens on a provider→model MODEL PICKER and
-//!   hands over to the TUI;
-//! - the editor (markdown write/preview, a `gpui_component` editor).
-//!
-//! The browser tab awaits its host's decoupling
-//! (`WorkspaceBrowserHost::install` binds to a `Workspace`), tracked as the
-//! remaining tranche-4 item.
-//!
-//! All tabs inherit per-container session state for free: the chrome
-//! `RightPaneSession` stash/restore carries the whole tab set across
-//! container switches (keyed by container id in the resource registry).
+//! The right pane this module once served (its ToolTab registry and the
+//! TabStore-backed families) retired with it: the canvas's right dock hosts
+//! these tools as sheets — one [`AgentPicker`] per `agent:` sheet, the
+//! spawn's kill handle riding the sheet id's registry entry. What remains
+//! here is what the canvas still calls: the spawn paths, the env layering
+//! (D11's authority chain) and the picker.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, SharedString, Window, px,
-};
-// Serves the browser tab's open() notification; compiled out with it.
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-use gpui_component::WindowExt as _;
-use steer_agent_chrome_ui::right_pane::{TabStore, ToolTab, ToolTabFactory};
-use steer_agent_chrome_ui::theme::{FG_DIM, icon, icons};
+use gpui::prelude::*;
+use gpui::{App, Context, Entity, SharedString, Window, px};
 use steer_ext_agents::cx_session::CxProcess;
-
-static INSTANCE: AtomicU64 = AtomicU64::new(0);
-
-fn next_instance_id(kind: &str) -> String {
-    format!("{kind}-{}", INSTANCE.fetch_add(1, Ordering::Relaxed))
-}
-
-/// The pane tab kinds whose content owns a PTY: the integrated terminal and
-/// the three CLI-agent TUI tabs (claude / codex / copilot). Closing the tab
-/// drops the view (the view drop tears the process tree down); the CLI tabs'
-/// children die by their registered kill handle first.
-pub const PTY_TAB_KINDS: [&str; 4] = ["ghostty", "claude", "codex", "copilot"];
 
 /// The FOREGROUND CONTAINER's working directory (D10/D6: resources root at
 /// their owning container's attrs cwd — a native container's session-channel
@@ -92,128 +63,6 @@ pub(crate) fn layered_env(
     env
 }
 
-// ── ghostty terminal ───────────────────────────────────────────────────────
-
-/// The ghostty-terminal kind: one shell per tab on the libghostty-vt
-/// emulation core (GPUI-drawn from render-state snapshots). The shell is
-/// `[terminal].shell` or the default user shell (login), env is the
-/// container snapshot layered under `[terminal].env`, and the surface colors
-/// come from the chrome palette (see [`ghostty_theme`]).
-pub struct GhosttyTool;
-
-impl ToolTabFactory for GhosttyTool {
-    fn kind(&self) -> &'static str {
-        "ghostty"
-    }
-
-    fn create(&self) -> Arc<dyn ToolTab> {
-        Arc::new(GhosttyTab {
-            id: next_instance_id("ghostty"),
-            view: std::sync::Mutex::new(None),
-        })
-    }
-
-    fn quick_action(&self) -> Option<SharedString> {
-        Some(steer_i18n::t("chrome-quick-ghostty").into())
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::TERMINAL, 15.).into_any_element()
-    }
-}
-
-struct GhosttyTab {
-    id: String,
-    /// Captured in `open` so `title` can mirror the terminal's live OSC
-    /// title without the store (the browser tab's pattern).
-    view: std::sync::Mutex<Option<Entity<steer_ghostty::GhosttyView>>>,
-}
-
-impl ToolTab for GhosttyTab {
-    fn kind(&self) -> &'static str {
-        "ghostty"
-    }
-
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn title(&self, cx: &App) -> SharedString {
-        let view = self.view.lock().unwrap().clone();
-        match view.and_then(|view| view.read(cx).live_title()) {
-            Some(title) => title.into(),
-            None => steer_i18n::t("chrome-tab-ghostty").into(),
-        }
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::TERMINAL, 15.).into_any_element()
-    }
-
-    fn open(
-        &self,
-        _window: &mut Window,
-        cx: &mut App,
-        store: &mut TabStore,
-        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
-    ) {
-        let attrs = thread_attrs_for_spawn(cx);
-        match steer_ghostty::GhosttyView::spawn_shell(
-            &attrs.cwd,
-            &layered_env(&attrs, &steer_ghostty::settings::load().env),
-            ghostty_theme(),
-            cx,
-        ) {
-            Ok(view) => {
-                *self.view.lock().unwrap() = Some(view.clone());
-                store.put(&self.id, view);
-            }
-            Err(e) => store.set_error(
-                &self.id,
-                steer_i18n::t_str("chrome-spawn-failed", &[("prog", "$SHELL"), ("err", &e)]),
-            ),
-        }
-    }
-
-    /// Teardown owns the shell: the pty is shared with the view's watcher
-    /// threads, so dropping the entity alone would leave the process running.
-    fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
-        if let Some(view) = self.view.lock().unwrap().take() {
-            view.update(cx, |view, _cx| view.kill());
-        }
-        store.reset(self.id());
-    }
-
-    fn render(&self, _window: &mut Window, cx: &App, store: &TabStore) -> AnyElement {
-        use gpui::{ParentElement, Styled, div, px};
-        match store.get::<steer_ghostty::GhosttyView>(&self.id) {
-            Some(view) => {
-                // A shell that exited leaves its last frame on screen; without
-                // the footer the tab reads as a hung terminal.
-                let mut body = div()
-                    .w_full()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(div().w_full().flex_1().min_h_0().child(view.clone()));
-                if view.read(cx).exited() {
-                    body = body.child(
-                        div()
-                            .flex_none()
-                            .px(px(8.))
-                            .py(px(4.))
-                            .text_size(px(11.))
-                            .text_color(FG_DIM)
-                            .child(steer_i18n::t("chrome-ghostty-exited")),
-                    );
-                }
-                body.into_any_element()
-            }
-            None => div().w_full().h_full().into_any_element(),
-        }
-    }
-}
-
 /// The terminal's palette: the chrome surface it sits in, so a light shell
 /// reads as part of the conversation panel rather than a dark inset. The
 /// component owns no colors of its own.
@@ -231,494 +80,11 @@ fn rgb(c: gpui::Rgba) -> steer_ghostty::Rgb {
     steer_ghostty::Rgb::new(channel(c.r), channel(c.g), channel(c.b))
 }
 
-// ── integrated browser ─────────────────────────────────────────────────────
-
-/// The integrated-browser kind: one untrusted wry webview per tab, driven
-/// by the process-wide `WorkspaceBrowserHost` (the same bridge the agent's
-/// web tools reach: notify/inbound routing, eval oneshots, yields). The tab
-/// body is the app's own `BrowserView` (its address bar + navigation chrome
-/// included), so the webview is a true instance of the shipping surface.
-/// Compiled out on Linux/FreeBSD with the integrated browser.
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-pub struct BrowserTool {
-    ws: Entity<crate::Workspace>,
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-impl BrowserTool {
-    pub fn new(ws: Entity<crate::Workspace>) -> Self {
-        Self { ws }
-    }
-
-    /// Adopt a browser tab the HOST opened (the agent's web tooling): its
-    /// webview already exists in the workspace and is routed in the browser
-    /// host, so the pane tab only renders it.
-    pub fn adopt(
-        &self,
-        tab_id: manox_agent::thread_engine::BrowserTabId,
-        url: &str,
-    ) -> Arc<dyn ToolTab> {
-        Arc::new(BrowserTab {
-            id: next_instance_id("browser"),
-            ws: self.ws.clone(),
-            tab_id: std::sync::Mutex::new(Some(tab_id)),
-            url: Arc::new(std::sync::Mutex::new(url.to_string())),
-            title: Arc::new(std::sync::Mutex::new(String::new())),
-            ticker_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            ticker_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        })
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-impl ToolTabFactory for BrowserTool {
-    fn kind(&self) -> &'static str {
-        "browser"
-    }
-
-    fn create(&self) -> Arc<dyn ToolTab> {
-        Arc::new(BrowserTab {
-            id: next_instance_id("browser"),
-            ws: self.ws.clone(),
-            tab_id: std::sync::Mutex::new(None),
-            url: Arc::new(std::sync::Mutex::new(String::new())),
-            title: Arc::new(std::sync::Mutex::new(String::new())),
-            ticker_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            ticker_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        })
-    }
-
-    /// Restore from the persisted payload (`{"url": "..."}`); a malformed
-    /// payload skips the entry rather than minting a blank tab.
-    fn restore(&self, spec: &str) -> Option<Arc<dyn ToolTab>> {
-        let url = serde_json::from_str::<serde_json::Value>(spec)
-            .ok()?
-            .get("url")?
-            .as_str()?
-            .to_string();
-        Some(Arc::new(BrowserTab {
-            id: next_instance_id("browser"),
-            ws: self.ws.clone(),
-            tab_id: std::sync::Mutex::new(None),
-            url: Arc::new(std::sync::Mutex::new(url)),
-            title: Arc::new(std::sync::Mutex::new(String::new())),
-            ticker_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            ticker_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        }))
-    }
-
-    fn quick_action(&self) -> Option<SharedString> {
-        Some(steer_i18n::t("chrome-quick-browser").into())
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::GLOBE, 15.).into_any_element()
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-struct BrowserTab {
-    id: String,
-    ws: Entity<crate::Workspace>,
-    /// The app-side browser tab id (allocated at open; the host routes by
-    /// it).
-    tab_id: std::sync::Mutex<Option<manox_agent::thread_engine::BrowserTabId>>,
-    /// The tab URL at construction (persisted for the next launch's
-    /// restore); updated by the title ticker as navigation happens.
-    url: Arc<std::sync::Mutex<String>>,
-    /// The live tab label (the page's `<title>`, mirrored by the ticker).
-    title: Arc<std::sync::Mutex<String>>,
-    /// Ticker lifecycle: cleared on close; `visible` follows `on_active`
-    /// (hidden tabs idle).
-    ticker_alive: Arc<std::sync::atomic::AtomicBool>,
-    ticker_visible: Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-impl ToolTab for BrowserTab {
-    fn kind(&self) -> &'static str {
-        "browser"
-    }
-
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        let live = self.title.lock().expect("browser title lock").clone();
-        if live.is_empty() {
-            steer_i18n::t("chrome-tab-browser").into()
-        } else {
-            live.into()
-        }
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::GLOBE, 15.).into_any_element()
-    }
-
-    fn open(
-        &self,
-        window: &mut Window,
-        cx: &mut App,
-        store: &mut TabStore,
-        pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
-    ) {
-        // The production browser-tab path on the embedded workspace: the
-        // view registers with the browser host (IPC routing) and lives in
-        // the workspace's own `browser_views` map — the host routes by tab
-        // id, so every open path reaches the same surface.
-        let url = {
-            let persisted = self.url.lock().expect("browser url lock").clone();
-            if persisted.is_empty() {
-                crate::views::browser_view::DEFAULT_URL.to_string()
-            } else {
-                persisted
-            }
-        };
-        // A preset id means the host already built and routed this webview
-        // (the agent's browser-open path); otherwise this open mints one.
-        let preset = *self.tab_id.lock().expect("browser tab id lock");
-        let built = self.ws.update(cx, |ws, cx| {
-            let tab_id = match preset {
-                Some(tab_id) => Some(tab_id),
-                None => ws.restore_browser_tab(&url, window, cx),
-            }?;
-            let view = ws
-                .browser_views
-                .get(&tab_id)
-                .cloned()
-                .expect("the tab's view is registered in the workspace");
-            Some((tab_id, view))
-        });
-        // The embed was refused (no usable webview): surface why and keep the
-        // pane empty rather than registering a dead tab.
-        let Some((tab_id, view)) = built else {
-            window.push_notification(
-                gpui_component::notification::Notification::error(steer_i18n::t(
-                    "browser-webview-unavailable",
-                )),
-                cx,
-            );
-            return;
-        };
-        *self.tab_id.lock().expect("browser tab id lock") = Some(tab_id);
-        *self.url.lock().expect("browser url lock") = url;
-        store.put(&self.id, view);
-        // Mirror the page's `<title>` onto the tab label: hidden tabs idle,
-        // the loop dies with the tab.
-        let alive = self.ticker_alive.clone();
-        let visible = self.ticker_visible.clone();
-        let title_slot = self.title.clone();
-        let url_slot = self.url.clone();
-        let pane = pane.clone();
-        let ws = self.ws.clone();
-        cx.spawn(async move |cx| {
-            while alive.load(std::sync::atomic::Ordering::Relaxed) {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(2))
-                    .await;
-                if !alive.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                if !visible.load(std::sync::atomic::Ordering::Relaxed) {
-                    continue;
-                }
-                let Some(host) = crate::browser_host::WorkspaceBrowserHost::concrete() else {
-                    continue;
-                };
-                // The host needs a live `&mut App`; hop through the async
-                // context.
-                let task = cx.update(|cx| host.page_title(tab_id, cx));
-                let Ok(title) = task.await else { continue };
-                let changed = {
-                    let mut slot = title_slot.lock().expect("browser title lock");
-                    if *slot == title {
-                        false
-                    } else {
-                        *slot = title;
-                        true
-                    }
-                };
-                // Keep the persisted URL in step with navigation.
-                if let Some(url) = ws.read_with(cx, |ws, cx| {
-                    ws.browser_views
-                        .get(&tab_id)
-                        .map(|v| v.read(cx).url().to_string())
-                }) {
-                    *url_slot.lock().expect("browser url lock") = url;
-                }
-                if changed && let Some(pane) = pane.upgrade() {
-                    // The pane entity's own notify is the repaint signal.
-                    pane.update(cx, |_, cx| cx.notify());
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
-        self.ticker_alive
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        if let Some(tab_id) = self.tab_id.lock().expect("browser tab id lock").take() {
-            self.ws
-                .update(cx, |ws, cx| ws.close_browser_tab(tab_id, cx));
-        }
-        store.reset(&self.id);
-    }
-
-    fn persist(&self, _cx: &App, _store: &TabStore) -> Option<String> {
-        let url = self.url.lock().expect("browser url lock").clone();
-        (!url.is_empty()).then(|| serde_json::json!({ "url": url }).to_string())
-    }
-
-    fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
-        use gpui::{ParentElement, Styled, div, px};
-        match store.get::<crate::views::browser_view::BrowserView>(&self.id) {
-            Some(view) => div()
-                .w_full()
-                .h_full()
-                .flex()
-                .p(px(4.))
-                .child(view)
-                .into_any_element(),
-            None => div().w_full().h_full().into_any_element(),
-        }
-    }
-
-    fn on_active(&self, visible: bool, cx: &mut App, store: &TabStore) {
-        self.ticker_visible
-            .store(visible, std::sync::atomic::Ordering::Relaxed);
-        // The wry subview is an OS-level child window: without a hide it
-        // floats above every other tab (and thread).
-        if let Some(view) = store.get::<crate::views::browser_view::BrowserView>(&self.id)
-            && let Some(webview) = view.read(cx).webview().cloned()
-        {
-            webview.update(cx, |w, _| {
-                if visible {
-                    w.show();
-                } else {
-                    w.hide();
-                }
-            });
-        }
-    }
-}
-
-/// Surface a browser tab the host opened as a right-pane tab (see
-/// [`crate::Workspace::open_browser_tab`]).
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-pub fn adopt_browser_tab(
-    ws: Entity<crate::Workspace>,
-    tab_id: manox_agent::thread_engine::BrowserTabId,
-    url: &str,
-) -> Arc<dyn ToolTab> {
-    BrowserTool::new(ws).adopt(tab_id, url)
-}
-
-// ── sub-agent observation ─────────────────────────────────────────────────
-
-/// The tab id one sub-agent run's panel rides on (the run id is the tab's
-/// identity — one panel per run; two runs may share a topic, never an id).
-pub fn subagent_tab_id(address: &str) -> String {
-    format!("subagent:{address}")
-}
-
-/// Wrap a built observation panel as a right-pane tab. The tab's IDENTITY
-/// is the run id (`address`) — `open_tab` dedups by id, so a second run
-/// with the same topic must not collide with the first one's panel — while
-/// the LABEL is the human-facing task topic.
-pub fn subagent_tab(
-    address: &str,
-    label: &str,
-    panel: Entity<crate::views::subagent_panel::SubagentPanel>,
-) -> Arc<dyn ToolTab> {
-    Arc::new(SubagentTab {
-        id: subagent_tab_id(address),
-        label: label.to_string(),
-        panel,
-    })
-}
-
-struct SubagentTab {
-    id: String,
-    /// The tab label — the run's task topic (the panel's own banner shows
-    /// it too).
-    label: String,
-    /// The observation panel this tab renders; its entity is the tab's
-    /// content, so teardown is a store reset.
-    panel: Entity<crate::views::subagent_panel::SubagentPanel>,
-}
-
-impl ToolTab for SubagentTab {
-    fn kind(&self) -> &'static str {
-        "subagent"
-    }
-
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        self.label.clone().into()
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::ROBOT, 15.).into_any_element()
-    }
-
-    fn open(
-        &self,
-        _window: &mut Window,
-        _cx: &mut App,
-        store: &mut TabStore,
-        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
-    ) {
-        store.put(&self.id, self.panel.clone());
-    }
-
-    fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
-        match store.get::<crate::views::subagent_panel::SubagentPanel>(&self.id) {
-            Some(panel) => panel.into_any_element(),
-            None => div_missing().into_any_element(),
-        }
-    }
-
-    /// Session-only: a child transcript does not survive the process, so the
-    /// kind has no persisted form.
-    fn persist(&self, _cx: &App, _store: &TabStore) -> Option<String> {
-        None
-    }
-}
-
-// ── CLI agent terminals ────────────────────────────────────────────────────
-
-/// The factory carries the multiplexer (the wire model rows — the picker's
-/// source) so created tabs can list launch configs at open time.
-pub struct AgentTool {
-    agent_id: &'static str,
-    display: &'static str,
-    svg: &'static str,
-    mux: Entity<crate::multiplexer::SessionMultiplexer>,
-}
-
-impl AgentTool {
-    pub fn new(
-        agent_id: &'static str,
-        display: &'static str,
-        svg: &'static str,
-        mux: Entity<crate::multiplexer::SessionMultiplexer>,
-    ) -> Self {
-        Self {
-            agent_id,
-            display,
-            svg,
-            mux,
-        }
-    }
-}
-
-impl ToolTabFactory for AgentTool {
-    fn kind(&self) -> &'static str {
-        self.agent_id
-    }
-
-    fn create(&self) -> Arc<dyn ToolTab> {
-        Arc::new(AgentTab {
-            id: next_instance_id(self.agent_id),
-            agent_id: self.agent_id,
-            display: self.display,
-            svg: self.svg,
-            mux: self.mux.clone(),
-        })
-    }
-
-    fn quick_action(&self) -> Option<SharedString> {
-        Some(steer_i18n::t_str("chrome-quick-agent", &[("agent", self.display)]).into())
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        brand_icon(self.svg)
-    }
-}
-
-struct AgentTab {
-    id: String,
-    agent_id: &'static str,
-    display: &'static str,
-    svg: &'static str,
-    mux: Entity<crate::multiplexer::SessionMultiplexer>,
-}
-
-impl ToolTab for AgentTab {
-    fn kind(&self) -> &'static str {
-        self.agent_id
-    }
-
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        self.display.into()
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        brand_icon(self.svg)
-    }
-
-    fn close(&self, _window: &mut Window, cx: &mut App, store: &mut TabStore) {
-        // Explicit kill on close (plan A2 — the orphaned-cx-child fix): the
-        // picker registered the child's handle under this tab at spawn; kill
-        // it through the registry rather than leaning on the view drop.
-        if let Some(ws) = crate::dispatch::workspace_global() {
-            ws.update(cx, |ws, _| {
-                ws.kill_handle_for_tab(&self.id);
-            });
-        }
-        store.reset(&self.id);
-    }
-
-    fn open(
-        &self,
-        _window: &mut Window,
-        cx: &mut App,
-        store: &mut TabStore,
-        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
-    ) {
-        // The tab opens on the MODEL PICKER; picking one spawns the agent
-        // under that endpoint and the
-        // picker renders the TUI from then on — one entity for the tab's
-        // whole lifetime, so close-tab teardown stays a single drop.
-        let picker = cx.new(|_| AgentPicker {
-            tab_id: self.id.clone(),
-            agent_id: self.agent_id,
-            display: self.display,
-            mux: self.mux.clone(),
-            launched: None,
-            error: None,
-        });
-        store.put(&self.id, picker);
-    }
-
-    fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
-        match store.get::<AgentPicker>(&self.id) {
-            Some(picker) => picker.into_any_element(),
-            None => div_missing().into_any_element(),
-        }
-    }
-}
-
-fn div_missing() -> gpui::Div {
-    use gpui::Styled as _;
-    gpui::div().w_full().h_full()
-}
-
 /// The full cx launch path: registry-pinned agent + the picked endpoint →
 /// `AgentBuilder` (PTY relay) → `CxProcess` → `GhosttyView`. Dropping the
-/// view kills the child; the handle is threaded OUT (the right-pane CLI tab
-/// record and the external record keep an independent clone) so a close can
-/// kill explicitly instead of leaning on drop timing — the contract
+/// view kills the child; the handle is threaded OUT (the CLI sheet's
+/// registry record keeps an independent clone) so a close can kill
+/// explicitly instead of leaning on drop timing — the contract
 /// `steer_ext_agents::cx_session` states.
 pub(crate) struct SpawnedAgentTerminal {
     pub view: Entity<steer_ghostty::GhosttyView>,
@@ -800,25 +166,79 @@ impl From<(String, CascadeEntry)> for PickRow {
     }
 }
 
-/// The model-picker body an agent tab opens on: the multiplexer's wire
+/// One launchable CLI (the picker's first segment: which agent to run).
+#[derive(Clone, Copy)]
+pub(crate) struct LaunchAgent {
+    pub id: &'static str,
+    pub display: &'static str,
+    /// The brand SVG (the agent glyph's brand mark; the canvas kind keeps
+    /// the static terminal glyph for the strip).
+    #[allow(dead_code)]
+    pub svg: &'static str,
+}
+
+pub(crate) const LAUNCH_AGENTS: [LaunchAgent; 3] = [
+    LaunchAgent {
+        id: "claude",
+        display: "Claude Code",
+        svg: "icons/claude.svg",
+    },
+    LaunchAgent {
+        id: "codex",
+        display: "Codex",
+        svg: "icons/codex.svg",
+    },
+    LaunchAgent {
+        id: "copilot",
+        display: "GitHub Copilot",
+        svg: "icons/githubcopilot.svg",
+    },
+];
+
+/// The model-picker body an agent sheet opens on: the multiplexer's wire
 /// model rows this agent may use, grouped provider→model (the sidebar
 /// cascade's rule — a missing `agents` column means non-cx registration and
 /// stays visible). Picking one spawns the agent under that endpoint and
 /// this entity renders the terminal from then on; a spawn failure stays on
 /// the picker with the error surfaced. The picker holds the spawn's payload
-/// (view + kill handle) — it IS the CLI tab's record.
-struct AgentPicker {
-    /// The tab instance this picker rides — the kill handle's registry key
-    /// (the tab's close kills through it).
-    tab_id: String,
-    agent_id: &'static str,
-    display: &'static str,
+/// (view + kill handle) — it IS the CLI sheet's record. The store owns the
+/// entity for the sheet id's whole life, so a tab switch never rebuilds a
+/// running conversation.
+pub(crate) struct AgentPicker {
+    /// The SHEET instance this picker rides — the kill handle's registry
+    /// key (the sheet's close and the container teardown both kill through
+    /// it).
+    pub(crate) sheet_id: String,
     mux: Entity<crate::multiplexer::SessionMultiplexer>,
+    /// The CLI this picker launches; `None` renders the agent segment
+    /// first (the canvas's one agent kind carries every CLI, so the pick
+    /// is the sheet's own first gesture).
+    pub(crate) agent: Option<LaunchAgent>,
     launched: Option<SpawnedAgentTerminal>,
     error: Option<String>,
 }
 
 impl AgentPicker {
+    /// A picker for `sheet`: it opens on the agent segment (the canvas's one
+    /// agent kind carries every CLI).
+    pub(crate) fn for_sheet(
+        sheet: &str,
+        mux: Entity<crate::multiplexer::SessionMultiplexer>,
+    ) -> Self {
+        Self {
+            sheet_id: sheet.to_string(),
+            mux,
+            agent: None,
+            launched: None,
+            error: None,
+        }
+    }
+
+    /// The picked CLI's display name, once the first segment is chosen.
+    pub(crate) fn picked_display(&self) -> Option<&'static str> {
+        self.agent.map(|agent| agent.display)
+    }
+
     fn groups(&self, cx: &App) -> Vec<(String, Vec<PickRow>)> {
         let models = self.mux.read(cx).agents(cx);
         cascade_provider_groups(&models)
@@ -837,12 +257,12 @@ impl AgentPicker {
 }
 
 impl gpui::Render for AgentPicker {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         use gpui::{InteractiveElement, ParentElement, StatefulInteractiveElement, Styled, div};
         use gpui_component::{ActiveTheme as _, h_flex, v_flex};
         let theme = cx.theme().clone();
 
-        // Launched: the terminal IS the tab body from here on.
+        // Launched: the terminal IS the sheet body from here on.
         if let Some(spawned) = &self.launched {
             return v_flex()
                 .size_full()
@@ -851,9 +271,48 @@ impl gpui::Render for AgentPicker {
                 .into_any_element();
         }
 
-        let heading = steer_i18n::t_str("chrome-agent-pick-model", &[("agent", self.display)]);
-        let groups = self.groups(cx);
         let mut list = v_flex().w_full().flex_1().min_h_0().gap_1();
+        let Some(agent) = self.agent else {
+            // First segment: which CLI. The kind is one; the CLIs are three.
+            let heading = steer_i18n::t("chrome-agent-pick-cli");
+            for launch in LAUNCH_AGENTS {
+                let next = launch;
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("pick-agent-{}", launch.id)))
+                        .on_click(cx.listener(
+                            move |this: &mut AgentPicker,
+                                  _,
+                                  _,
+                                  cx: &mut gpui::Context<AgentPicker>| {
+                                this.agent = Some(next);
+                                cx.notify();
+                            },
+                        ))
+                        .py(px(6.))
+                        .px(px(8.))
+                        .rounded(px(4.))
+                        .hover(|s| s.bg(theme.list_hover))
+                        .child(h_flex().items_center().child(launch.display)),
+                );
+            }
+            return v_flex()
+                .id("agent-picker")
+                .debug_selector(|| "agent-picker".into())
+                .size_full()
+                .p(px(8.))
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child(heading),
+                )
+                .child(list)
+                .into_any_element();
+        };
+        let heading = steer_i18n::t_str("chrome-agent-pick-model", &[("agent", agent.display)]);
+        let groups = self.groups(cx);
         if let Some(err) = self.error.clone() {
             list = list.child(
                 div()
@@ -861,7 +320,7 @@ impl gpui::Render for AgentPicker {
                     .text_color(theme.danger)
                     .child(steer_i18n::t_str(
                         "chrome-spawn-failed",
-                        &[("prog", self.display), ("err", &err)],
+                        &[("prog", agent.display), ("err", &err)],
                     )),
             );
         }
@@ -883,7 +342,7 @@ impl gpui::Render for AgentPicker {
                     .child(provider.clone()),
             );
             for row in rows {
-                let agent_id = self.agent_id;
+                let agent_id = agent.id;
                 let wire = row.wire.clone();
                 let display_name = row.display.clone();
                 let elem_id =
@@ -911,7 +370,7 @@ impl gpui::Render for AgentPicker {
                                 if let Some(ws) = crate::dispatch::workspace_global() {
                                     let container =
                                         ws.read(cx).foreground_container_id(cx).unwrap_or_default();
-                                    let tab_id = this.tab_id.clone();
+                                    let tab_id = this.sheet_id.clone();
                                     let handle = spawned.handle.clone();
                                     ws.update(cx, |ws, _| {
                                         ws.register_kill_handle(&container, &tab_id, handle);
@@ -940,6 +399,7 @@ impl gpui::Render for AgentPicker {
         }
         v_flex()
             .id("agent-picker")
+            .debug_selector(|| "agent-picker".into())
             .size_full()
             .p(px(8.))
             .gap(px(6.))
@@ -954,339 +414,17 @@ impl gpui::Render for AgentPicker {
     }
 }
 
-// ── editor ────────────────────────────────────────────────────────────────
-
-/// The markdown editor kind (write/preview), a right-pane tool tab. Content
-/// is per-tab-instance (a fresh
-/// editor per open); the chrome session stash carries it across thread
-/// switches.
-pub struct EditorTool;
-
-impl ToolTabFactory for EditorTool {
-    fn kind(&self) -> &'static str {
-        "editor"
-    }
-
-    fn create(&self) -> Arc<dyn ToolTab> {
-        Arc::new(EditorTab {
-            id: next_instance_id("editor"),
-        })
-    }
-
-    /// The editor restores as a fresh (empty) editor — its text is a live
-    /// draft, not a durable document.
-    fn restore(&self, _spec: &str) -> Option<Arc<dyn ToolTab>> {
-        Some(Arc::new(EditorTab {
-            id: next_instance_id("editor"),
-        }))
-    }
-
-    fn quick_action(&self) -> Option<SharedString> {
-        Some(steer_i18n::t("chrome-quick-editor").into())
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::SYMBOL_FILE, 15.).into_any_element()
-    }
-}
-
-struct EditorTab {
-    id: String,
-}
-
-impl ToolTab for EditorTab {
-    fn kind(&self) -> &'static str {
-        "editor"
-    }
-
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        steer_i18n::t("chrome-tab-editor").into()
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::SYMBOL_FILE, 15.).into_any_element()
-    }
-
-    fn open(
-        &self,
-        window: &mut Window,
-        cx: &mut App,
-        store: &mut TabStore,
-        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
-    ) {
-        let view = cx.new(|cx| {
-            gpui_component::input::EditorState::new(window, cx)
-                .language("markdown")
-                .line_number(true)
-                .folding(false)
-                .soft_wrap(true)
-                .submit_on_enter(false)
-                .placeholder(steer_i18n::t("chrome-editor-placeholder"))
-        });
-        store.put(&self.id, view);
-    }
-
-    fn render(&self, _window: &mut Window, _cx: &App, store: &TabStore) -> AnyElement {
-        use gpui::{ParentElement, Styled, div, px};
-        match store.get::<gpui_component::input::EditorState>(&self.id) {
-            Some(view) => div()
-                .w_full()
-                .h_full()
-                .flex()
-                .p(px(8.))
-                .child(view)
-                .into_any_element(),
-            None => div().w_full().h_full().into_any_element(),
-        }
-    }
-}
-
-// ── tool-card diff ────────────────────────────────────────────────────────
-
-/// The diff kind (the registry lookup key the workspace's open-diff path
-/// uses).
-pub const DIFF_KIND: &str = "diff";
-
-/// The edit family's full-diff kind: ONE tab per pane, its content REPLACED
-/// every time an edit card's open-diff chip fires. The instance id is fixed
-/// (no per-open minting — `open_kind`'s dedup then turns a second open into
-/// a focus), and the content lives on the workspace (`right_diff`) — the
-/// workspace re-parses each patch on its own event path, so an already-open
-/// tab shows the new patch without a close/reopen cycle. No quick action: a
-/// diff tab with no patch behind it is an empty page, so the kind is
-/// reachable only from the cards. Session-lived (no persisted form): the
-/// patch is a live tool output, and the workspace retires the tab on thread
-/// switch rather than showing another thread's patch.
-pub struct DiffTool {
-    ws: Entity<crate::Workspace>,
-}
-
-impl DiffTool {
-    pub fn new(ws: Entity<crate::Workspace>) -> Self {
-        Self { ws }
-    }
-}
-
-impl ToolTabFactory for DiffTool {
-    fn kind(&self) -> &'static str {
-        DIFF_KIND
-    }
-
-    fn create(&self) -> Arc<dyn ToolTab> {
-        Arc::new(DiffTab {
-            id: DIFF_KIND.to_string(),
-            ws: self.ws.clone(),
-        })
-    }
-
-    fn quick_action(&self) -> Option<SharedString> {
-        None
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::CODE, 15.).into_any_element()
-    }
-}
-
-struct DiffTab {
-    id: String,
-    ws: Entity<crate::Workspace>,
-}
-
-impl ToolTab for DiffTab {
-    fn kind(&self) -> &'static str {
-        DIFF_KIND
-    }
-
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn title(&self, cx: &App) -> SharedString {
-        match self.ws.read(cx).right_diff.as_ref() {
-            Some(diff) => diff.title.clone(),
-            None => steer_i18n::t("chrome-tab-diff").into(),
-        }
-    }
-
-    fn icon(&self, _cx: &App) -> AnyElement {
-        icon(icons::CODE, 15.).into_any_element()
-    }
-
-    /// Nothing to mint: the parsed diff lives on the workspace (see
-    /// [`DiffTool`]) and `render` reads it. An open with no patch behind it
-    /// (the pane's "+" on an active diff tab mints another instance whose
-    /// id dedups away) renders the empty body like any other tab.
-    fn open(
-        &self,
-        _window: &mut Window,
-        _cx: &mut App,
-        _store: &mut TabStore,
-        _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
-    ) {
-    }
-
-    fn render(&self, _window: &mut Window, cx: &App, _store: &TabStore) -> AnyElement {
-        use gpui::{InteractiveElement as _, ParentElement as _, Styled as _, div, px};
-        match self.ws.read(cx).right_diff.as_ref() {
-            Some(diff) => {
-                let body = match &diff.state {
-                    Ok(state) => gpui_component::diff::Diff::new(state).into_any_element(),
-                    Err(e) => div()
-                        .w_full()
-                        .p(px(12.))
-                        .text_color(FG_DIM)
-                        .child(e.clone())
-                        .into_any_element(),
-                };
-                div()
-                    .id("right-diff-tab")
-                    .size_full()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .debug_selector(|| "right-diff-tab".into())
-                    .child(body)
-                    .into_any_element()
-            }
-            None => div_missing().into_any_element(),
-        }
-    }
-}
-
-// ── shared helpers ────────────────────────────────────────────────────────
-
-/// A standalone PTY spawn (the chrome-example path): the tab owns its
-/// terminal fully; closing the tab drops the view and tears the process
-/// tree down with it. The PTY inherits the owning container's env snapshot
-/// (D11) layered over the process environment, with the user's
-/// `[terminal].env` (settings) applying last and winning — the same
-/// authority `default_source` gives it, now over a container-inherited base.
+/// A standalone PTY spawn (the project-menu path): the terminal is an
+/// app-side surface no agent turn touches, and the shell lands where the
+/// caller picked — the cascade's folder for the project menu. The PTY
+/// inherits the owning container's env snapshot (D11) layered over the
+/// process environment, with the user's `[terminal].env` (settings)
+/// applying last and winning — the same authority `layered_env` documents.
 pub(crate) fn spawn_standalone_terminal(
     cwd: &std::path::Path,
     attrs: &crate::workspace::container::ContainerAttrs,
     cx: &mut App,
 ) -> Result<Entity<steer_ghostty::GhosttyView>, String> {
-    // An app-owned PTY rooted at `cwd`: the terminal is an app-side surface
-    // no agent turn touches, and the shell must land where the caller
-    // picked — the foreground container's project for the dock and
-    // right-pane spawns, the cascade's folder for the project menu. The
-    // container's env snapshot rides BETWEEN the process world and the
-    // user's `[terminal].env` (the ghostty view does the layering with the
-    // same authority order `layered_env` documents).
     let env_layer = layered_env(attrs, &steer_ghostty::settings::load().env);
     steer_ghostty::GhosttyView::spawn_shell(cwd, &env_layer, ghostty_theme(), cx)
-}
-
-/// Brand glyph: the SVG asset rides the app's asset source
-/// (`ExtrasAssetSource`) — a gpui-component `Icon` with the custom path, sized
-/// `.small()`, colored by the surrounding text color.
-fn brand_icon(svg_path: &'static str) -> AnyElement {
-    use gpui_component::Sizable as _;
-    gpui_component::Icon::default()
-        .path(svg_path)
-        .small()
-        .into_any_element()
-}
-
-/// The full registry for the chrome assembly's right pane (quick-action
-/// order).
-pub fn registry(
-    mux: &Entity<crate::multiplexer::SessionMultiplexer>,
-    ws: &Entity<crate::Workspace>,
-) -> Vec<Arc<dyn ToolTabFactory>> {
-    // The only consumer of `ws` is the (platform-gated) browser factory.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    let _ = ws;
-    vec![
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        Arc::new(BrowserTool::new(ws.clone())),
-        Arc::new(GhosttyTool),
-        Arc::new(AgentTool::new(
-            "claude",
-            "Claude Code",
-            "icons/claude.svg",
-            mux.clone(),
-        )),
-        Arc::new(AgentTool::new(
-            "codex",
-            "Codex",
-            "icons/codex.svg",
-            mux.clone(),
-        )),
-        Arc::new(AgentTool::new(
-            "copilot",
-            "GitHub Copilot",
-            "icons/githubcopilot.svg",
-            mux.clone(),
-        )),
-        Arc::new(EditorTool),
-        Arc::new(DiffTool::new(ws.clone())),
-    ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::workspace::container::ContainerAttrs;
-    use std::{collections::BTreeMap, path::PathBuf};
-
-    /// The spawn env's authority chain (A7): `pty::open` applies the returned
-    /// slice over the process-inherited base with last-entry-wins, so the
-    /// ORDER `layered_env` emits is the layering — container snapshot first
-    /// (beats the process base), user settings last (beat the container).
-    #[test]
-    fn layered_env_orders_container_over_process_and_settings_over_container() {
-        let env_of = |pairs: &[(&str, &str)]| {
-            pairs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<BTreeMap<String, String>>()
-        };
-        let container = ContainerAttrs {
-            cwd: PathBuf::from("/tmp/proj"),
-            env: Arc::new(env_of(&[
-                ("AGENT_HOME", "/container/state"),
-                ("SHARED", "from-container"),
-            ])),
-        };
-        let settings = vec![
-            ("SHARED".to_string(), "from-settings".to_string()),
-            ("EXTRA".to_string(), "settings-only".to_string()),
-        ];
-        let layered = layered_env(&container, &settings);
-        // The container's entries come first — over the process base the
-        // spawner inherits — and the settings' entries after them, so a
-        // same-named key resolves to the settings value.
-        assert_eq!(
-            layered,
-            vec![
-                ("AGENT_HOME".to_string(), "/container/state".to_string()),
-                ("SHARED".to_string(), "from-container".to_string()),
-                ("SHARED".to_string(), "from-settings".to_string()),
-                ("EXTRA".to_string(), "settings-only".to_string()),
-            ],
-            "container snapshot between process base and settings; settings last-wins"
-        );
-    }
-
-    /// An empty container snapshot (a native container before its view ever
-    /// saw an env, or a fallback spawn): the settings ride over the bare
-    /// process base, nothing else is injected.
-    #[test]
-    fn layered_env_with_empty_snapshot_yields_settings_only() {
-        let container = ContainerAttrs {
-            cwd: PathBuf::from("/tmp"),
-            env: Default::default(),
-        };
-        let settings = vec![("MY_FLAG".to_string(), "1".to_string())];
-        assert_eq!(layered_env(&container, &settings), settings);
-        // No settings either: an empty slice — the process base alone.
-        assert!(layered_env(&container, &[]).is_empty());
-    }
 }

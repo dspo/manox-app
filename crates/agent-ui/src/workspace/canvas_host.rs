@@ -92,6 +92,12 @@ impl CanvasHost {
         self.state.zoomed()
     }
 
+    /// The key the shown canvas's layout lives under (the foreground
+    /// container, or the scratch key).
+    pub fn canvas_key(&self) -> &str {
+        self.state.canvas_key()
+    }
+
     /// Opens (or displays) a sheet: appended to the group of `prefer`, else the
     /// first group.
     pub fn open_sheet(&mut self, sheet: &str, prefer: Option<&str>) -> CanvasAction {

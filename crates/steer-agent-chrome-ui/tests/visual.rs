@@ -40,12 +40,11 @@ mod macos {
     use steer_agent_chat_ui::host::noop_host;
     use steer_agent_chat_ui::transcript::ItemKey;
     use steer_agent_chat_ui::views::message::MessageItem;
-    use steer_agent_chrome_ui::right_pane::TabStore;
     use steer_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
     use steer_agent_chrome_ui::shell::SessionRow;
     use steer_agent_chrome_ui::{
-        CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, ToolTab,
-        ToolTabFactory, icons, register_fonts,
+        CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, icons,
+        register_fonts,
     };
 
     pub fn main() {
@@ -53,7 +52,6 @@ mod macos {
             eprintln!("visual: CHROME_SHOT not set, skipping");
             return;
         };
-        let right = std::env::var("CHROME_RIGHT").is_ok();
 
         manox_agent::init();
         // render_to_image only exists on non-headless platforms (Metal texture
@@ -235,15 +233,6 @@ mod macos {
                         cx.notify();
                     });
                 }
-                if right {
-                    shell.update(cx, |shell, cx| {
-                        shell.open_right("dummy", window, cx);
-                        if std::env::var("CHROME_SWITCH").is_ok() {
-                            shell.open_right("second", window, cx);
-                        }
-                        cx.notify();
-                    });
-                }
                 cx.new(|cx| Root::new(shell, window, cx))
             })
             .expect("offscreen window");
@@ -281,42 +270,6 @@ mod macos {
         });
         cx.run_until_parked();
 
-        if std::env::var("CHROME_SWITCH").is_ok() {
-            // Now that the layout has settled, switch back to the FIRST tab —
-            // the long travel the animation exists for.
-            let shell = shell_slot.clone().expect("shell");
-            cx.update(|cx| {
-                shell.update(cx, |shell, cx| {
-                    shell.right.update(cx, |pane, cx| {
-                        pane.activate_tab("dummy-0", cx);
-                    });
-                    cx.notify();
-                });
-            });
-            // Tests have no platform frame loop: `request_animation_frame`
-            // schedules via on_next_frame, which only fires through
-            // `simulate_next_frame`; the slide duration elapses on the
-            // executor clock via `advance_clock`.
-            for _ in 0..40 {
-                cx.update_window(handle.into(), |_view, window, cx| {
-                    window.simulate_next_frame(cx);
-                })
-                .expect("window");
-                cx.run_until_parked();
-                cx.advance_clock(std::time::Duration::from_millis(12));
-            }
-            // Same presented-frame catch-up as above, for the slide back.
-            let settled = shell_slot.clone().expect("shell");
-            cx.update(|cx| {
-                settled.update(cx, |_, cx| cx.notify());
-            });
-            cx.run_until_parked();
-            let _ = cx.update_window(handle.into(), |_view, window, cx| {
-                window.simulate_next_frame(cx);
-            });
-            cx.run_until_parked();
-        }
-
         let shot = cx
             .capture_screenshot(handle.into())
             .expect("capture screenshot");
@@ -327,15 +280,6 @@ mod macos {
     fn shell_config(main: AnyView) -> ShellConfig {
         ShellConfig {
             main: Arc::new(MainSeat { view: main }),
-            tool_kinds: {
-                let mut kinds: Vec<Arc<dyn ToolTabFactory>> = vec![Arc::new(DummyKind)];
-                // Only under CHROME_SWITCH, so the baseline shot's quick-action
-                // list is unchanged by a diagnostic-only kind.
-                if std::env::var("CHROME_SWITCH").is_ok() {
-                    kinds.push(Arc::new(SecondKind));
-                }
-                kinds
-            },
             brand: None,
             fixed_rows: vec![
                 FixedRow {
@@ -957,121 +901,6 @@ mod macos {
                     },
                 ],
             }
-        }
-    }
-
-    struct DummyKind;
-
-    impl ToolTabFactory for DummyKind {
-        fn kind(&self) -> &'static str {
-            "dummy"
-        }
-
-        fn create(&self) -> Arc<dyn ToolTab> {
-            Arc::new(DummyTab)
-        }
-
-        fn quick_action(&self) -> Option<gpui::SharedString> {
-            Some("Dummy".into())
-        }
-
-        fn icon(&self, cx: &gpui::App) -> gpui::AnyElement {
-            DummyTab.icon(cx)
-        }
-    }
-
-    struct DummyTab;
-
-    impl ToolTab for DummyTab {
-        fn kind(&self) -> &'static str {
-            "dummy"
-        }
-
-        fn id(&self) -> &str {
-            "dummy-0"
-        }
-
-        fn title(&self, _cx: &gpui::App) -> gpui::SharedString {
-            "Dummy".into()
-        }
-
-        fn icon(&self, _cx: &gpui::App) -> gpui::AnyElement {
-            steer_agent_chrome_ui::theme::icon(icons::TOOLS, 15.).into_any_element()
-        }
-
-        fn open(
-            &self,
-            _window: &mut gpui::Window,
-            _cx: &mut gpui::App,
-            _store: &mut TabStore,
-            _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
-        ) {
-        }
-
-        fn render(
-            &self,
-            _window: &mut gpui::Window,
-            _cx: &gpui::App,
-            _store: &TabStore,
-        ) -> gpui::AnyElement {
-            gpui::div()
-                .w_full()
-                .h_full()
-                .p(px(12.))
-                .child("dummy tab body")
-                .into_any_element()
-        }
-    }
-
-    /// Diagnostic-only: a second tab kind, so `CHROME_SWITCH=1` can switch
-    /// between two tabs of different widths and exercise the indicator slide.
-    struct SecondKind;
-
-    impl ToolTabFactory for SecondKind {
-        fn kind(&self) -> &'static str {
-            "second"
-        }
-        fn create(&self) -> Arc<dyn ToolTab> {
-            Arc::new(SecondTab)
-        }
-        fn quick_action(&self) -> Option<gpui::SharedString> {
-            Some("Second".into())
-        }
-        fn icon(&self, cx: &gpui::App) -> gpui::AnyElement {
-            SecondTab.icon(cx)
-        }
-    }
-
-    struct SecondTab;
-
-    impl ToolTab for SecondTab {
-        fn kind(&self) -> &'static str {
-            "second"
-        }
-        fn id(&self) -> &str {
-            "second-0"
-        }
-        fn title(&self, _cx: &gpui::App) -> gpui::SharedString {
-            "A wider second tab".into()
-        }
-        fn icon(&self, _cx: &gpui::App) -> gpui::AnyElement {
-            steer_agent_chrome_ui::theme::icon(icons::GLOBE, 15.).into_any_element()
-        }
-        fn open(
-            &self,
-            _window: &mut gpui::Window,
-            _cx: &mut gpui::App,
-            _store: &mut TabStore,
-            _pane: &gpui::WeakEntity<steer_agent_chrome_ui::RightPane>,
-        ) {
-        }
-        fn render(
-            &self,
-            _window: &mut gpui::Window,
-            _cx: &gpui::App,
-            _store: &TabStore,
-        ) -> gpui::AnyElement {
-            gpui::div().into_any_element()
         }
     }
 }

@@ -16,7 +16,6 @@
 //!   opens (the agent's browser tab, a sub-agent observation panel) can reach
 //!   the live pane with no view-tree path to it.
 
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use gpui::{
@@ -24,15 +23,11 @@ use gpui::{
     WeakEntity, Window,
 };
 use gpui_component::{Root, WindowExt as _, notification::Notification};
-use steer_agent_chrome_ui::right_pane::ToolTab;
 use steer_agent_chrome_ui::{
     CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, icons,
 };
 
 use crate::Workspace;
-use crate::tool_tabs::registry;
-use crate::views::subagent_panel::SubagentPanel;
-
 /// The live shell, for pane opens that originate OUTSIDE the view tree (an
 /// agent-opened browser tab, a sub-agent observation panel requested from the
 /// conversation). Replaced on every window open; a stale handle simply fails
@@ -84,77 +79,6 @@ pub fn defer_shell(
     });
 }
 
-/// Open (or focus) a host-built tool tab in the live right pane.
-pub fn open_tool_tab(tab: Arc<dyn ToolTab>, cx: &mut App) {
-    defer_shell(cx, move |shell, window, cx| {
-        shell
-            .right
-            .update(cx, |pane, cx| pane.open_tab(tab, window, cx));
-    });
-}
-
-/// Close every open tab of `kind` in the live pane. The workspace retires the
-/// ephemeral observation panels through this when it leaves a thread: a
-/// panel's content is the child transcript ACCUMULATED SO FAR, so one carried
-/// across a thread switch would come back stale (the transcript catches up,
-/// the panel does not). Dropping them keeps the invariant "a restored panel
-/// == the thread's transcript at open time".
-pub fn close_tool_tabs_of_kind(kind: &str, cx: &mut App) {
-    let kind = kind.to_string();
-    defer_shell(cx, move |shell, window, cx| {
-        shell
-            .right
-            .update(cx, |pane, cx| pane.close_kind(&kind, window, cx));
-    });
-}
-
-/// Open (or focus) a right-pane tool kind from outside the view tree (the
-/// edit cards' open-diff path).
-pub fn open_right_kind(kind: &str, cx: &mut App) {
-    let kind = kind.to_string();
-    defer_shell(cx, move |shell, window, cx| {
-        shell.open_right(&kind, window, cx);
-    });
-}
-
-/// The open tool-tab instance ids in the live pane, in open order — the
-/// diagnostics face for single-instance kinds (the diff tab must never
-/// duplicate). Empty when no shell is live.
-pub fn pane_open_tab_ids(cx: &App) -> Vec<String> {
-    let Some(shell) = shell_handle() else {
-        return Vec::new();
-    };
-    shell.read(cx).right.read(cx).tab_ids()
-}
-
-/// The distinct tool-tab kinds open in the live pane — `/exit`'s read-only
-/// probe of what owns live processes. Empty when no shell is live.
-pub fn pane_open_kinds(cx: &App) -> Vec<String> {
-    let Some(shell) = shell_handle() else {
-        return Vec::new();
-    };
-    shell
-        .read(cx)
-        .right
-        .read(cx)
-        .open_kinds()
-        .into_iter()
-        .map(str::to_string)
-        .collect()
-}
-
-/// The open observation panel for a sub-agent address, when one is mounted in
-/// the live pane — how the workspace streams a child event into a panel the
-/// shell owns.
-pub fn subagent_panel(address: &str, cx: &App) -> Option<Entity<SubagentPanel>> {
-    let shell = shell_handle()?;
-    shell
-        .read(cx)
-        .right
-        .read(cx)
-        .tab_entity::<SubagentPanel>(&crate::tool_tabs::subagent_tab_id(address))
-}
-
 /// Build the whole chrome window root: multiplexer + shell + the projection
 /// pump. Called from the manox bin on every window open.
 pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
@@ -178,7 +102,6 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
             ws
         }
     };
-    let mux = ws.read(cx).multiplexer.clone();
     // The process-lifetime registries the app wires at startup:
     // the dispatch slot (dock badge pump + reopen-focus read it), the
     // process-wide capability provider (clipboard everywhere; browser ops
@@ -213,43 +136,11 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
         })
         .detach();
     }
-    let shell = cx.new(|cx| Shell::new(shell_config(ws.clone(), &mux, cx), window, cx));
+    let shell = cx.new(|cx| Shell::new(shell_config(ws.clone(), cx), window, cx));
     let shell_weak = shell.downgrade();
     match SHELL.write() {
         Ok(mut slot) => *slot = Some(shell.downgrade()),
         Err(poisoned) => *poisoned.into_inner() = Some(shell.downgrade()),
-    }
-    // Per-container dock state: each visited container keeps its live panel
-    // terminal across switches (the right-pane stash semantic — a
-    // stashed view keeps its process running; only explicit collapse of the
-    // LIVE dock tears one down). The stash and the live-owner tracking live
-    // in the resource registry (keyed by container id — a native thread id
-    // verbatim, an external row id while one owns the main column), so the
-    // container teardown can reclaim them.
-    //
-    // LIFETIME (registry-scoped, 2026-10-30): the stash outlives the window —
-    // a tray close + reopen keeps the dock's terminal and the right pane's
-    // terminal/CLI tabs (browser and editor tabs come back from the pane
-    // registry). The former shell-owned stashes died with the window; the
-    // registry matches the workspace's process-lifetime instead, which is
-    // what the resources' owner (the container) outlives.
-    // Per-container right-pane sessions: the open tab set + content store +
-    // active tab + visibility move with the foreground container (stash on
-    // switch-out, restore on switch-in; a container with no in-session stash
-    // falls back to its pane-registry snapshot — the pane's durable account —
-    // and starts on the fresh new-tab page only when neither exists).
-    // Persist the pane on every change: the shell's own notify is the
-    // change signal (tab open/close/activate, visibility, dock), so an
-    // upsert here keeps the durable row in step without the pane knowing
-    // about persistence.
-    {
-        let ws = ws.clone();
-        let shell_watch = shell.clone();
-        let observed = shell_watch.clone();
-        cx.observe(&observed, move |_shell, cx| {
-            persist_right_pane(&shell_watch, &ws, cx);
-        })
-        .detach();
     }
     cx.observe(&ws, move |ws, cx| {
         let Some(shell) = shell_weak.upgrade() else {
@@ -275,7 +166,6 @@ pub fn mount(window: &mut Window, cx: &mut App) -> Entity<Shell> {
 /// queued in the SAME update run after it (see [`defer_shell`]'s ordering
 /// note). The pane stash/restore below is what that ordering protects.
 fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
-    let mux = ws.read(cx).multiplexer.clone();
     // The process-lifetime registries the app wires at startup:
     // the dispatch slot (dock badge pump + reopen-focus read it) and the
     // process-wide browser host (IPC routing + the agent's web capability).
@@ -288,6 +178,7 @@ fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
         })
         .detach();
     }
+    let mux = ws.read(cx).multiplexer.clone();
     let rows = mux.read(cx).container_list(cx);
     // The grouping data source is the project registry (design §2.3):
     // projects in sidebar order + each container's membership. Rows
@@ -356,7 +247,7 @@ fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
     // bridge's only write into chrome state, and the projection pump is its
     // single writer (boundary invariant ①).
     {
-        let store = mux.read(cx).store();
+        let store = ws.read(cx).multiplexer.read(cx).store();
         let view = store.read(cx);
         let book = &view.book;
         crate::title_store::TitleStore::global().retain_live(|id| {
@@ -365,92 +256,13 @@ fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
                 || fg.as_deref() == Some(id)
         });
     }
-    let old_id = ws.read(cx).right_owner();
-    if fg != old_id && fg.is_some() {
-        // The outgoing pane leaves the shell first, lands under the
-        // outgoing container's key, then the incoming container's own
-        // comes back (or the pane falls back to its persisted snapshot /
-        // the fresh new-tab page). The dock rides the canvas layout — no
-        // shell-side stash.
-        let outgoing = shell.update(cx, |shell, cx| shell.stash_right_session(cx));
-        ws.update(cx, |ws, _| {
-            ws.set_right_owner(fg.clone());
-            if let Some(old_id) = &old_id
-                && let Some(session) = outgoing
-            {
-                ws.stash_right(old_id, session);
-            }
-        });
-        let right_in = ws.update(cx, |ws, _| fg.as_ref().and_then(|id| ws.take_right(id)));
-        shell.update(cx, |shell, cx| {
-            match right_in {
-                Some(session) => shell.restore_right_session(session, cx),
-                None => {
-                    // No in-session stash: rebuild from the container's
-                    // durable snapshot (browser/editor restore; live
-                    // session kinds are dropped — a dead process cannot
-                    // be resurrected). The window handle comes from the
-                    // dispatch slot (the restore builds webviews).
-                    let restored = fg.as_ref().and_then(|id| {
-                        let json = load_right_pane(id)?;
-                        let shape: serde_json::Value = serde_json::from_str(&json).ok()?;
-                        let visible = shape.get("visible")?.as_bool()?;
-                        let active = shape.get("active")?.as_u64()? as usize;
-                        let tabs = shape
-                            .get("tabs")?
-                            .as_array()?
-                            .iter()
-                            .filter_map(|t| {
-                                let kind = t.get("kind")?.as_str()?.to_string();
-                                let spec = t.get("spec")?.as_str()?.to_string();
-                                Some((kind, spec))
-                            })
-                            .collect::<Vec<_>>();
-                        Some((tabs, visible, active))
-                    });
-                    match restored {
-                        Some((tabs, visible, active)) => {
-                            // We are already inside `shell.update`; the
-                            // window handle (the restore builds webviews)
-                            // comes from the dispatch slot. Re-entering
-                            // the Shell entity here would double-lease.
-                            if let Some(handle) = crate::dispatch::window_global() {
-                                let _ = handle.update(cx, |_, w, cx| {
-                                    shell.right.update(cx, |pane, cx| {
-                                        pane.restore_persisted(tabs, visible, active, w, cx);
-                                    });
-                                });
-                            }
-                        }
-                        None => {
-                            // Fresh container: drop any lingering pane
-                            // state to the empty page, COLLAPSED — the
-                            // pane's per-container memory (stash/durable
-                            // snapshot) restores the container's own
-                            // visibility when it has one; a container
-                            // without one starts with the transcript
-                            // full-width.
-                            shell.right.update(cx, |pane, cx| {
-                                pane.new_tab_page(cx);
-                                pane.collapse(cx);
-                            });
-                        }
-                    }
-                }
-            }
-        });
-    }
+    // The right dock rides the canvas layout: no pane stash, no snapshot
+    // restore — the container's own sheets come back with its canvas.
 }
 
-fn shell_config(
-    ws: Entity<Workspace>,
-    mux: &Entity<crate::multiplexer::SessionMultiplexer>,
-    _cx: &mut Context<Shell>,
-) -> ShellConfig {
-    let mux = mux.clone();
+fn shell_config(ws: Entity<Workspace>, _cx: &mut Context<Shell>) -> ShellConfig {
     let placeholder: gpui::AnyView = ws.clone().into();
     ShellConfig {
-        tool_kinds: registry(&mux, &ws),
         main: Arc::new(PendingMain {
             view: placeholder,
             ws: ws.clone(),
@@ -500,7 +312,7 @@ fn shell_config(
             })),
             dock_open: Some(Box::new({
                 let ws = ws.clone();
-                move |cx| ws.read(cx).canvas_dock_open(cx)
+                move |side, cx| ws.read(cx).canvas_dock_open(side, cx)
             })),
             // Pin is a client-dispatchable extension action on the thread
             // channel: dispatching journals it host-side (the store row plus
@@ -509,9 +321,9 @@ fn shell_config(
             // reached the journal, so the write face (thread_store) and the
             // read face (AHP fold) were two states that never met.
             on_pin: Some(Box::new({
-                let mux = mux.clone();
+                let ws = ws.clone();
                 move |id, _w, cx| {
-                    let store = mux.read(cx).store();
+                    let store = ws.read(cx).multiplexer.read(cx).store();
                     store.update(cx, |store, cx| {
                         // The flip reads through the ONE pin read face (fold
                         // first, list `_meta` baseline second) — flipping
@@ -892,78 +704,6 @@ pub fn foreground_project() -> Option<std::path::PathBuf> {
         .clone()
 }
 
-/// The right-pane registry: client-owned presentation state (the home for
-/// pane snapshots after the db retired). Session-lifetime — the
-/// pane layout a process remembers is the pane layout it opened with.
-/// Keys are CONTAINER ids (native thread ids verbatim, external row ids for
-/// the external containers' own panes).
-static PANE_REGISTRY: std::sync::Mutex<Option<HashMap<String, String>>> =
-    std::sync::Mutex::new(None);
-
-/// Upsert the current foreground container's right-pane snapshot into the
-/// registry (the pane's own kind/spec encoding, one row per container).
-fn persist_right_pane(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &App) {
-    let Some(container) = ws.read(cx).foreground_container_id(cx) else {
-        return;
-    };
-    let (visible, active, tabs) = shell.read(cx).right.read(cx).persisted(cx);
-    let payload = serde_json::json!({
-        "visible": visible,
-        "active": active,
-        "tabs": tabs
-            .iter()
-            .map(|(kind, spec)| serde_json::json!({ "kind": kind, "spec": spec }))
-            .collect::<Vec<_>>(),
-    });
-    PANE_REGISTRY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .insert(container, payload.to_string());
-}
-
-/// Load a container's persisted right-pane snapshot (the chrome encoding).
-fn load_right_pane(container_id: &str) -> Option<String> {
-    PANE_REGISTRY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-        .and_then(|map| map.get(container_id))
-        .cloned()
-}
-
-/// Remove a container's persisted right-pane snapshot (the teardown's
-/// presentation leg): the snapshot is a restore source for a LIVE
-/// container's return, so a dead container's key must not outlive it.
-pub fn remove_right_pane(container_id: &str) {
-    if let Some(map) = PANE_REGISTRY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_mut()
-    {
-        map.remove(container_id);
-    }
-}
-
-/// Plant a pane snapshot verbatim (test-support only): the teardown
-/// regression plants under a container key directly — the production write
-/// (`persist_right_pane`) needs a live shell pane.
-#[cfg(feature = "test-support")]
-pub fn diagnostic_persist_right_pane(container_id: &str, payload: String) {
-    PANE_REGISTRY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .insert(container_id.to_string(), payload);
-}
-
-/// The test-support read over [`load_right_pane`] — the teardown regression
-/// proves a dead container's snapshot is gone.
-#[cfg(feature = "test-support")]
-pub fn diagnostic_right_pane_snapshot(container_id: &str) -> Option<String> {
-    load_right_pane(container_id)
-}
-
 /// The foreground thread's PROJECT directory, refreshed by the assembly's
 /// observer on every projection — "open in editor" and the project menu's
 /// no-project fallback read it rather than silently opening `$HOME`. The
@@ -1017,17 +757,16 @@ pub fn reclaim_container_panes(container: &str, cx: &mut App) {
     };
     // Belt and braces: the observer may have re-stashed under the dead key
     // between the workspace-side reclaim and this deferred half.
-    ws.update(cx, |ws, _| ws.reclaim_stash(container));
-    let right_mine = ws.read(cx).right_owner().as_deref() == Some(container);
-    if right_mine {
-        ws.update(cx, |ws, _| ws.set_right_owner(None));
-        // The PTY kinds' close never re-enters the workspace; the browser
-        // kind's does (its workspace half already reclaimed — the close is a
-        // no-op there) — all fine on the bare App.
-        for kind in crate::tool_tabs::PTY_TAB_KINDS {
-            close_tool_tabs_of_kind(kind, cx);
-        }
-        close_tool_tabs_of_kind("browser", cx);
+    // The dead container's tool sheets (CLI children, webviews, editors)
+    // reclaim through the pane store: the kill handles fire, the browser
+    // tabs close through their host routes.
+    let canvas = ws.read(cx).canvas_view_ref().cloned();
+    if let Some(canvas) = canvas {
+        canvas.update(cx, |canvas, cx| {
+            canvas
+                .panes
+                .update(cx, |panes, cx| panes.reclaim_container(container, cx));
+        });
     }
 }
 

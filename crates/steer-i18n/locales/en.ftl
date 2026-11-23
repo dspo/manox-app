@@ -1018,6 +1018,7 @@ chrome-quick-editor = Open the editor
 chrome-tab-diff = Diff
 chrome-editor-placeholder = Write markdown here…
 
+chrome-agent-pick-cli = Choose a CLI
 chrome-agent-pick-model = Choose a model for { $agent }
 
 workspace-change-rejected = Change not applied (rejected by the host)
@@ -1083,6 +1084,8 @@ canvas-tab-zoom = Zoom
 canvas-tab-unzoom = Leave zoom
 canvas-split-right = Split right
 canvas-close-sheet = Close tab
+canvas-tab-agent = CLI agent
+canvas-tab-subagent = Sub-agent
 launcher-action-pi = pi session
 pi-selector-mode = mode
 pi-plan-title = plan

@@ -70,7 +70,7 @@ pub mod gallery;
 use chat_column::ChatColumn;
 use steer_agent_chat_ui::ask_card::AskCardSnapshot;
 mod canvas_host;
-mod canvas_view;
+pub(crate) mod canvas_view;
 mod chat_access;
 mod chips;
 mod column_composer;
@@ -457,7 +457,6 @@ pub struct Workspace {
     /// The right pane's diff tab content (the edit family's full-diff face —
     /// see `right_diff.rs`): ONE tab per pane, its content replaced by every
     /// open-diff click. Session-lived, retired on thread switch.
-    pub(crate) right_diff: Option<right_diff::RightDiff>,
     /// Lazily created on the first `enter_settings` call so we don't pay the
     /// cost when the user never opens Settings.
     settings_view: Option<Entity<SettingsView>>,
@@ -488,8 +487,6 @@ pub struct Workspace {
     /// the pane-side stash keyed by container id, the live dock/pane owner
     /// slots, and the CLI tabs' kill handles. Process-lifetime (the
     /// workspace's own), main-thread by construction.
-    pub(crate) pane_stash: HashMap<String, crate::resource_registry::PaneEntry>,
-    pub(crate) live_right_owner: Option<String>,
     pub(crate) kill_handles: crate::resource_registry::KillHandles,
     /// The container-death cascade: the workspace subscribes to its own
     /// [`crate::workspace::container::ContainerEvent`] and tears the dead
@@ -1120,8 +1117,6 @@ impl Workspace {
             _rail_updates: rail_updates,
             speech,
             _speech_events: speech_events,
-            pane_stash: HashMap::new(),
-            live_right_owner: None,
             kill_handles: HashMap::new(),
             _died_sub: None,
             launcher: None,
@@ -1132,7 +1127,6 @@ impl Workspace {
             externals: Vec::new(),
             active_external: None,
             subagent_stream: None,
-            right_diff: None,
             settings_view: None,
             settings_sub: None,
             settings_nav: 0,
@@ -3356,6 +3350,56 @@ impl Workspace {
         !canvas.read(cx).terminal_sheets(container_id).is_empty()
     }
 
+    /// The pane store's diff keys (the /exit + diagnostic face).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_diff_keys(&self, cx: &App) -> Vec<String> {
+        let Some(canvas) = &self.canvas_view else {
+            return Vec::new();
+        };
+        canvas.read(cx).panes.read(cx).diagnostic_diff_keys()
+    }
+
+    /// The pane store's agent keys (the diagnostic face).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_agent_keys(&self, cx: &App) -> Vec<String> {
+        let Some(canvas) = &self.canvas_view else {
+            return Vec::new();
+        };
+        canvas.read(cx).panes.read(cx).diagnostic_agent_keys()
+    }
+
+    /// The canvas entity's read face for the bare-App reclaimer (which runs
+    /// outside any workspace lease).
+    pub(crate) fn canvas_view_ref(
+        &self,
+    ) -> Option<&Entity<crate::workspace::canvas_view::CanvasView>> {
+        self.canvas_view.as_ref()
+    }
+
+    /// Whether the canvas still holds a sheet of `prefix` for `container_id`
+    /// (the `/exit` waterfall's CLI probe — an agent sheet's kill handle is
+    /// the live child).
+    pub(crate) fn container_has_canvas_kind(
+        &self,
+        container_id: &str,
+        prefix: &str,
+        cx: &App,
+    ) -> bool {
+        let Some(canvas) = &self.canvas_view else {
+            return false;
+        };
+        canvas.read(cx).holds_kind_for(container_id, prefix)
+    }
+
+    /// Closes every shown sheet of a kind prefix (the `/exit` retire face;
+    /// the pane store reclaims through each close).
+    pub(crate) fn close_sheets_of_kind(&mut self, prefix: &str, cx: &mut Context<Self>) {
+        let Some(canvas) = self.canvas_view.clone() else {
+            return;
+        };
+        canvas.update(cx, |canvas, cx| canvas.close_sheets_of_prefix(prefix, cx));
+    }
+
     /// Closes the outgoing container's canvas terminal sheets (the `/exit`
     /// dock leg): their PTY views drop with the tabs, which is how the
     /// subprocess tree ends.
@@ -3376,7 +3420,10 @@ impl Workspace {
 
     /// Whether the canvas's bottom dock is open (the chrome's render-time
     /// read for the titlebar button — the dock is canvas state).
-    pub(crate) fn canvas_dock_open(&self, cx: &App) -> bool {
+    pub(crate) fn canvas_dock_open(&self, side_name: &str, cx: &App) -> bool {
+        let Some(side) = steer_canvas::layout::DockSide::from_name(side_name) else {
+            return false;
+        };
         let Some(canvas) = &self.canvas_view else {
             return false;
         };
@@ -3384,7 +3431,7 @@ impl Workspace {
             .read(cx)
             .host
             .layout()
-            .region(steer_canvas::layout::DockSide::Bottom)
+            .region(side)
             .is_some_and(|r| r.open)
     }
 
@@ -3431,6 +3478,12 @@ impl Workspace {
         let column = self.ensure_column_view(cx);
         let pi_store = self.ensure_pi_store(cx);
         let workspace = cx.weak_entity();
+        // The right dock's tool-kind store: one entity, keyed by sheet id.
+        // The repaint target (the canvas itself) is wired after mount.
+        let panes = cx.new(|_| {
+            let mux = self.multiplexer.clone();
+            crate::canvas_kinds::CanvasPaneStore::new(workspace.clone(), mux)
+        });
         // Titles come from the conversation entity, not from this workspace:
         // the canvas paints inside the workspace's own update, so a title
         // read through `self` would take a second lease.
@@ -3438,13 +3491,18 @@ impl Workspace {
         let view = cx.new(|_| {
             crate::workspace::canvas_view::CanvasView::new(
                 crate::workspace::canvas_host::CanvasHost::new(
-                    crate::workspace::canvas_view::registry(titles, pi_store.clone()),
+                    crate::workspace::canvas_view::registry(titles, pi_store.clone(), &panes),
                 ),
                 workspace,
                 pi_store,
+                panes,
             )
         });
         view.update(cx, |view, cx| view.set_column(column, cx));
+        let panes = view.read(cx).panes.clone();
+        panes.update(cx, |panes, _| {
+            panes.set_notify(view.downgrade());
+        });
         self.canvas_view = Some(view.clone());
         view
     }

@@ -131,6 +131,9 @@ pub struct CanvasView {
     pi_views: HashMap<String, Entity<PiSessionView>>,
     /// The pi harness's session store (owned by the workspace, shown here).
     pi_store: Entity<AcpStore>,
+    /// The right dock's tool kinds (webview/editor/diff/agent/subagent):
+    /// the per-sheet state the registry's body factories mint-or-reuse.
+    pub(crate) panes: Entity<crate::canvas_kinds::CanvasPaneStore>,
     /// The shown container's working directory: a terminal sheet spawns there.
     /// Injected by the workspace when the canvas opens a container (the canvas
     /// never reads the workspace itself — that would take a second lease while
@@ -204,7 +207,11 @@ fn static_title(key: &'static str) -> steer_canvas::registry::TitleFn {
 /// already holds, so a kind owns existence/title/closability and the last mile
 /// of painting is the host's. A kind whose own store builds the view (the pi
 /// sheet) registers a factory instead.
-fn v1_registry(titles: SheetTitles, pi_store: Entity<AcpStore>) -> steer_canvas::SheetRegistry {
+fn v1_registry(
+    titles: SheetTitles,
+    pi_store: Entity<AcpStore>,
+    panes: &Entity<crate::canvas_kinds::CanvasPaneStore>,
+) -> steer_canvas::SheetRegistry {
     use std::sync::Arc;
     use steer_canvas::{ParsedSheet, SheetKindSpec};
 
@@ -229,8 +236,11 @@ fn v1_registry(titles: SheetTitles, pi_store: Entity<AcpStore>) -> steer_canvas:
             body: None,
         }
     };
-    steer_canvas::SheetRegistry::new()
-        .with(pi_kind(pi_store))
+    let mut registry = steer_canvas::SheetRegistry::new().with(pi_kind(pi_store));
+    for spec in crate::canvas_kinds::pane_kinds(panes.clone()) {
+        registry = registry.with(spec);
+    }
+    registry
         .with(kind(
             "home",
             "home",
@@ -281,6 +291,9 @@ fn glyph_icon(glyph: &str) -> gpui_kit_assets::IconName {
         "terminal" => IconName::SquareTerminal,
         "chat" => IconName::MessageCircle,
         "pi" => IconName::Sparkles,
+        "frame" => IconName::Frame,
+        "code" => IconName::Code,
+        "bot" => IconName::Bot,
         _ => IconName::File,
     }
 }
@@ -290,6 +303,7 @@ impl CanvasView {
         host: CanvasHost,
         workspace: WeakEntity<Workspace>,
         pi_store: Entity<AcpStore>,
+        panes: Entity<crate::canvas_kinds::CanvasPaneStore>,
     ) -> Self {
         Self {
             host,
@@ -297,6 +311,7 @@ impl CanvasView {
             terminals: HashMap::new(),
             pi_views: HashMap::new(),
             pi_store,
+            panes,
             cwd: std::env::current_dir().unwrap_or_default(),
             workspace,
             size: Rc::new(std::cell::Cell::new(None)),
@@ -347,6 +362,78 @@ impl CanvasView {
             self.after_edit(cx);
             cx.notify();
         }
+    }
+
+    /// Opens (or focuses) `sheet` in the right dock: the tool kinds' open
+    /// channel (the diff card, the agent's browser page, a CLI sheet). A
+    /// sheet the canvas already holds only moves there; the dock region
+    /// opens with it (the drop is the explicit placement surface).
+    pub(crate) fn open_in_right_dock(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        let target = DropTarget::Dock {
+            side: DockSide::Right,
+        };
+        if self.host.drop_sheet(sheet, target) == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
+    /// Closes every shown sheet of a kind prefix (the `/exit` retire face;
+    /// the per-container canvas scopes ephemeral sheets by construction).
+    pub(crate) fn close_sheets_of_prefix(&mut self, prefix: &str, cx: &mut Context<Self>) {
+        let doomed: Vec<String> = steer_canvas::layout::panel_ids(self.host.layout())
+            .into_iter()
+            .filter(|sheet| sheet.starts_with(prefix))
+            .map(str::to_string)
+            .collect();
+        for sheet in doomed {
+            self.panes.update(cx, |panes, cx| panes.reclaim(&sheet, cx));
+            if self.host.close_sheet(&sheet) == CanvasAction::Applied {
+                self.after_edit(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The pane store prunes against the same union the terminal PTYs
+    /// prune against — a closed sheet's state ends, a parked canvas's
+    /// survives.
+    pub(crate) fn prune_panes(&mut self, cx: &mut Context<Self>) {
+        let kept: std::collections::HashSet<String> =
+            steer_canvas::projection::open_sheet_ids(self.host.layout(), self.host.held())
+                .into_iter()
+                .collect();
+        self.panes.update(cx, |panes, cx| panes.prune(&kept, cx));
+    }
+
+    /// The container's next unused instance index for a minting kind.
+    pub(crate) fn next_kind_index(&self, container: &str, prefix: &str) -> u32 {
+        let mut index = 1;
+        let taken: std::collections::HashSet<u32> =
+            steer_canvas::projection::open_sheet_ids(self.host.layout(), self.host.held())
+                .into_iter()
+                .filter_map(|sheet| {
+                    let rest = sheet.strip_prefix(prefix)?.strip_prefix(':')?;
+                    let rest = rest.strip_prefix(container)?.strip_prefix(':')?;
+                    rest.parse::<u32>().ok()
+                })
+                .collect();
+        while taken.contains(&index) {
+            index += 1;
+        }
+        index
+    }
+
+    /// Opens a CLI agent sheet in the right dock: the body is the picker
+    /// (agent segment → model segment → the TUI), so one kind carries every
+    /// CLI and the spawn's kill handle rides the sheet.
+    pub(crate) fn open_agent_sheet(&mut self, cx: &mut Context<Self>) {
+        let Some(container) = self.host.active_container().map(str::to_string) else {
+            return;
+        };
+        let index = self.next_kind_index(&container, "agent");
+        let sheet = steer_canvas::id::agent_sheet_id(&container, index);
+        self.open_in_right_dock(&sheet, cx);
     }
 
     /// Opens the container's next terminal sheet straight into the bottom
@@ -411,6 +498,21 @@ impl CanvasView {
                 tracing::warn!(%error, "canvas terminal spawn failed");
             }
         }
+    }
+
+    /// Whether the canvas holds a sheet of `prefix` for `container_id`
+    /// (shown or parked — the `/exit` probe reads the union).
+    pub(crate) fn holds_kind_for(&self, container_id: &str, prefix: &str) -> bool {
+        steer_canvas::projection::open_sheet_ids(self.host.layout(), self.host.held())
+            .iter()
+            .any(|sheet| {
+                sheet.starts_with(prefix)
+                    && sheet
+                        .strip_prefix(prefix)
+                        .and_then(|rest| rest.strip_prefix(':'))
+                        .and_then(|rest| rest.strip_prefix(container_id))
+                        .is_some_and(|rest| rest.starts_with(':'))
+            })
     }
 
     /// The container's terminal sheets still open anywhere on its canvas
@@ -700,6 +802,16 @@ impl CanvasView {
             );
         }
 
+        // The displayed sheets, for the pane store's visibility face (the
+        // webviews' OS windows follow it).
+        let shown: std::collections::HashSet<String> = boxes
+            .iter()
+            .filter(|box_| box_.region.is_none())
+            .filter_map(|box_| box_.panels.get(box_.active).cloned())
+            .collect();
+        self.panes
+            .update(cx, |panes, cx| panes.note_shown(shown, cx));
+
         let size_cell = self.size.clone();
         root.on_prepaint(move |bounds, window, _| {
             let next = Some(bounds.size);
@@ -763,6 +875,7 @@ impl CanvasView {
         match self.host.drop_sheet(sheet, target) {
             CanvasAction::Applied => {
                 self.prune_terminals();
+                self.prune_panes(cx);
                 self.after_edit(cx);
                 cx.notify();
             }
@@ -1141,6 +1254,17 @@ impl CanvasView {
                 )
                 .child(
                     gpui::div()
+                        .id("canvas-open-agent")
+                        .debug_selector(|| "canvas-open-agent".to_string())
+                        .px_1()
+                        .rounded(theme.radius)
+                        .cursor_pointer()
+                        .hover(|this| this.bg(theme.muted))
+                        .on_click(cx.listener(|this, _, _, cx| this.open_agent_sheet(cx)))
+                        .child(Icon::from(gpui_kit_assets::IconName::Bot).xsmall()),
+                )
+                .child(
+                    gpui::div()
                         .id("canvas-open-pi")
                         .debug_selector(|| "canvas-open-pi".to_string())
                         .px_1()
@@ -1195,7 +1319,12 @@ impl CanvasView {
         let mut pages = h_flex().h_full();
         for (index, sheet) in box_.panels.iter().enumerate() {
             let place = index as i32 - box_.active as i32;
-            let body = if place.abs() <= 1 {
+            // near(±1) keeps the slide honest — except the OS-window kinds:
+            // a webview ignores CSS clipping, so it exists only on its shown
+            // page (a CLI picker, same rule — it is an interactive surface,
+            // not a page neighbor).
+            let os_window_kind = matches!(sheet_kind(sheet), "webview" | "agent" | "subagent");
+            let body = if place.abs() <= 1 && !(os_window_kind && place != 0) {
                 self.render_sheet_body(sheet, window, cx)
             } else {
                 gpui::div().into_any_element()
@@ -1275,13 +1404,23 @@ fn active_id_of(box_: &TabBarBox) -> Option<String> {
 }
 
 impl CanvasView {
-    /// One sheet's content, produced by the entity that owns it.
+    /// One sheet's content, produced by the entity that owns it: a
+    /// kind-owned body (the registry's factory) first, then the host's own
+    /// faces (the conversation column, the PTY map, the pi store).
     fn render_sheet_body(
         &mut self,
         sheet: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(view) = self.host.registry().body(sheet, window, cx) {
+            return div()
+                .size_full()
+                .min_h_0()
+                .overflow_hidden()
+                .child(view)
+                .into_any_element();
+        }
         match sheet_kind(sheet) {
             "session" => match &self.column {
                 Some(column) => column.update(cx, |view, cx| view.render_page(window, cx)),
@@ -1422,9 +1561,11 @@ impl CanvasView {
             self.pi_store
                 .update(cx, |store, cx| store.close_session(&session_id, cx));
         }
+        self.panes.update(cx, |panes, cx| panes.reclaim(sheet, cx));
         match self.host.close_sheet(sheet) {
             CanvasAction::Applied => {
                 self.prune_terminals();
+                self.prune_panes(cx);
                 self.after_edit(cx);
                 cx.notify();
             }
@@ -1587,8 +1728,9 @@ impl Render for CanvasView {
 pub(crate) fn registry(
     titles: SheetTitles,
     pi_store: Entity<AcpStore>,
+    panes: &Entity<crate::canvas_kinds::CanvasPaneStore>,
 ) -> steer_canvas::SheetRegistry {
-    v1_registry(titles, pi_store)
+    v1_registry(titles, pi_store, panes)
 }
 
 /// The pi session kind: existence, title and closability; the body is painted

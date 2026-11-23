@@ -164,11 +164,21 @@ impl Workspace {
             );
             return None;
         };
-        let tab = crate::tool_tabs::adopt_browser_tab(cx.entity(), tab_id, url);
-        // The pane open crosses at the effect boundary (defer_shell): the
-        // command may touch the shell and the shell's tab `open` may reach
-        // this workspace again, neither of which is legal mid-update.
-        crate::chrome_assembly::open_tool_tab(tab, cx);
+        // The sheet lands in the container's right dock: the pane store
+        // adopts the already-minted tab (the host routes by it), and the
+        // body reuses the view on every show.
+        let Some(canvas) = self.canvas_view.clone() else {
+            return Some(tab_id);
+        };
+        canvas.update(cx, |canvas, cx| {
+            let container = canvas.host.canvas_key().to_string();
+            let index = canvas.next_kind_index(&container, "webview");
+            let sheet = steer_canvas::id::webview_sheet_id(&container, index);
+            canvas.panes.update(cx, |panes, _| {
+                panes.adopt_webview(&sheet, url, tab_id);
+            });
+            canvas.open_in_right_dock(&sheet, cx);
+        });
         Some(tab_id)
     }
 

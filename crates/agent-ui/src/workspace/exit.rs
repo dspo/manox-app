@@ -58,10 +58,10 @@ impl Workspace {
                     .ok();
                 beat(cx).await;
                 // The child turns are aborted by the host's cancel waterfall
-                // below; the observation panels go now so the pane does not
-                // carry them into the switch.
-                this.update(cx, |_ws, cx| {
-                    crate::chrome_assembly::close_tool_tabs_of_kind("subagent", cx);
+                // below; the observation sheets close now (their panel state
+                // reclaims through the pane store).
+                this.update(cx, |ws, cx| {
+                    ws.close_sheets_of_kind("subagent", cx);
                 })
                 .ok();
                 for name in &subagents {
@@ -92,12 +92,11 @@ impl Workspace {
                 .ok();
                 beat(cx).await;
             }
-            // ── terminal subprocesses (the pane tabs + the canvas dock) ──
+            // ── terminal subprocesses (the canvas sheets: terminals + CLI
+            // children) ──
             let has_terminals = this
                 .update(cx, |ws, cx| {
-                    crate::chrome_assembly::pane_open_kinds(cx)
-                        .iter()
-                        .any(|k| crate::tool_tabs::PTY_TAB_KINDS.contains(&k.as_str()))
+                    ws.container_has_canvas_kind(&sid, "agent", cx)
                         || ws.container_has_canvas_terminal(&sid, cx)
                 })
                 .unwrap_or(false);
@@ -109,18 +108,16 @@ impl Workspace {
                 this.update(cx, |ws, cx| ws.note("exit-killing-terminal", &[], cx))
                     .ok();
                 beat(cx).await;
-                // The PTY tab kinds' `close` never re-enters the workspace
-                // (store resets), so they run inside the lease; the dock's
-                // terminals are canvas sheets, and closing them drops their
-                // PTY views with them. Background external containers are
-                // NOT touched: they are independent containers (D6/D8) with
-                // their own 0 号 processes — `/exit` is the outgoing
-                // container's death only, and the app process quitting is
-                // the only thing that ends the survivors, by design.
+                // The canvas sheets carry every PTY: a terminal sheet's
+                // close drops its view, a CLI sheet's close fires the kill
+                // handle — both through the pane store. Background external
+                // containers are NOT touched: they are independent
+                // containers (D6/D8) with their own 0 号 processes — `/exit`
+                // is the outgoing container's death only, and the app
+                // process quitting is the only thing that ends the
+                // survivors, by design.
                 this.update(cx, |ws, cx| {
-                    for kind in crate::tool_tabs::PTY_TAB_KINDS {
-                        crate::chrome_assembly::close_tool_tabs_of_kind(kind, cx);
-                    }
+                    ws.close_sheets_of_kind("agent", cx);
                     ws.close_container_terminal_sheets(&sid, cx);
                 })
                 .ok();
@@ -152,11 +149,11 @@ impl Workspace {
                     // container (foreground), and the workspace half reclaims
                     // only the tabs registered under it — other containers'
                     // browser tabs survive the /exit.
-                    cx.update(|cx| {
-                        crate::chrome_assembly::close_tool_tabs_of_kind("browser", cx);
-                    });
-                    this.update(cx, |ws, cx| ws.close_container_browser_tabs(&sid, cx))
-                        .ok();
+                    this.update(cx, |ws, cx| {
+                        ws.close_sheets_of_kind("webview", cx);
+                        ws.close_container_browser_tabs(&sid, cx);
+                    })
+                    .ok();
                     this.update(cx, |ws, cx| ws.note("exit-browser-closed", &[], cx))
                         .ok();
                     beat(cx).await;

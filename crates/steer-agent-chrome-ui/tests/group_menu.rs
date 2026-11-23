@@ -88,7 +88,6 @@ fn chats_row(id: &str) -> SessionRow {
 fn shell_config(menu_log: MenuLog, main: gpui::AnyView) -> ShellConfig {
     ShellConfig {
         main: Arc::new(StubMain { view: main }),
-        tool_kinds: vec![],
         brand: None,
         fixed_rows: vec![],
         customizations: vec![],
@@ -316,7 +315,6 @@ fn nested_window_update_from_a_select_hook(cx: &mut TestAppContext) {
             Shell::new(
                 ShellConfig {
                     main: Arc::new(StubMain { view: main }),
-                    tool_kinds: vec![],
                     brand: None,
                     fixed_rows: vec![],
                     customizations: vec![],
@@ -385,7 +383,6 @@ fn external_row_menu_closes_the_session(cx: &mut TestAppContext) {
             Shell::new(
                 ShellConfig {
                     main: Arc::new(StubMain { view: main }),
-                    tool_kinds: vec![],
                     brand: None,
                     fixed_rows: vec![],
                     customizations: vec![],

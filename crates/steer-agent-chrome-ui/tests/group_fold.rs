@@ -93,7 +93,6 @@ fn mount(
             Shell::new(
                 ShellConfig {
                     main: Arc::new(StubMain { view: main }),
-                    tool_kinds: vec![],
                     brand: None,
                     fixed_rows: vec![],
                     customizations: vec![],
