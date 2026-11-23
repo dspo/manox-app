@@ -802,18 +802,27 @@ pub fn move_sheet(layout: &DockLayout, id: &str, target: DropTarget) -> DockLayo
 /// tab groups, and two copies of one sheet would break "one sheet, one
 /// instance" the moment both are mounted.
 pub fn prune_layout(layout: &DockLayout, keep: &HashSet<String>) -> DockLayout {
-    let mut next = layout.clone();
     // The dedup set is shared across the WHOLE canvas — center and every
     // dock region: a stored file may repeat an id in two tab groups, and
     // two copies of one sheet would break "one sheet, one instance" the
-    // moment both are mounted.
+    // moment both are mounted. The result is built fresh from `layout`
+    // (the seen-set holds refs into it; the pruned panels are clones), so
+    // no alias reaches the result.
     let mut seen = HashSet::new();
-    next.center = prune_node(&layout.center, keep, &mut seen).unwrap_or_else(DockNode::empty_tabs);
+    let mut next = DockLayout {
+        center: prune_node(&layout.center, keep, &mut seen).unwrap_or_else(DockNode::empty_tabs),
+        ..layout.clone()
+    };
     for side in DockSide::ALL {
-        if let Some(region) = next.region_mut(side) {
-            region.layout = prune_node(&region.layout, keep, &mut seen)
-                .unwrap_or_else(DockNode::empty_tabs);
-        }
+        let Some(region) = layout.region(side) else {
+            continue;
+        };
+        let pruned =
+            prune_node(&region.layout, keep, &mut seen).unwrap_or_else(DockNode::empty_tabs);
+        *next.region_or_create(side) = DockRegion {
+            layout: pruned,
+            ..region.clone()
+        };
     }
     next
 }
@@ -1140,7 +1149,10 @@ mod tests {
                 DockNode::tabs(["a".to_string(), "c".to_string()]),
             ],
         );
-        let layout = DockLayout { center: split };
+        let layout = DockLayout {
+            center: split,
+            ..DockLayout::default()
+        };
         let pruned = prune_layout(&layout, &keep(&["a", "b", "c"]));
         assert_eq!(ids(&pruned), ["a", "b", "c"]);
     }
