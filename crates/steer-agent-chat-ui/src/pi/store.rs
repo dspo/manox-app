@@ -16,7 +16,9 @@ use steer_acp::RequestId;
 
 use super::book::PiBook;
 use super::runtime::{OpenMode, PiConnection, PiRuntime, StoreEvent};
-use super::session::{parse_plan, parse_subagent_runs, parse_subagent_transcript};
+use super::session::{
+    parse_plan, parse_restored_asks, parse_subagent_runs, parse_subagent_transcript,
+};
 
 /// One window's pi sessions.
 pub struct AcpStore {
@@ -346,10 +348,11 @@ impl AcpStore {
         .detach();
     }
 
-    /// Refreshes the two request/response panels (the plan and the subagent
-    /// runs). Neither pushes: the harness's tools write the same store the
-    /// panel reads, so a pull after every bind and settled turn keeps them
-    /// current (the write paths answer with the fresh plan themselves).
+    /// Refreshes the request/response surfaces the sheet pulls (the plan, the
+    /// subagent runs, and the question cards a restart kept alive). None of
+    /// them pushes: the harness's tools write the same store the panel reads,
+    /// so a pull after every bind and settled turn keeps them current (the
+    /// write paths answer with the fresh plan themselves).
     pub fn refresh_panels(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let Some(connection) = self.connections.get(session_id).cloned() else {
             return;
@@ -367,10 +370,14 @@ impl AcpStore {
                         .request("_zu/subagents/list", json!({}))
                         .await
                         .map_err(|error| error.describe());
-                    Ok::<_, String>((plan, runs))
+                    let asks = connection
+                        .request("_zu/ask/pending", json!({}))
+                        .await
+                        .map_err(|error| error.describe());
+                    Ok::<_, String>((plan, runs, asks))
                 }
             };
-            let Ok((plan, runs)) = tokio_wait(call).await else {
+            let Ok((plan, runs, asks)) = tokio_wait(call).await else {
                 return;
             };
             this.update(cx, |store, cx| {
@@ -385,9 +392,71 @@ impl AcpStore {
                         .book
                         .set_subagents(&session_id, parse_subagent_runs(&runs));
                 }
+                if let Ok(asks) = asks {
+                    changed |= store
+                        .book
+                        .set_restored_asks(&session_id, parse_restored_asks(&asks));
+                }
                 if changed {
                     cx.notify();
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Answers a question card that outlived its turn (`_zu/ask/answer`): the
+    /// harness resolves a live wait or injects a late answer and starts a turn.
+    pub fn answer_restored_ask(
+        &mut self,
+        session_id: &str,
+        tool_call_id: String,
+        response: Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self.connections.get(session_id).cloned() else {
+            self.book
+                .note_error(session_id, "the pi harness is not connected");
+            cx.notify();
+            return;
+        };
+        // The card leaves the list before the wire write, so a double click
+        // cannot answer twice.
+        if let Some(view) = self.book.view_mut(session_id) {
+            view.restored_asks
+                .retain(|ask| ask.tool_call_id != tool_call_id);
+        }
+        cx.notify();
+        let session_id = session_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let call = {
+                let connection = connection.clone();
+                let tool_call_id = tool_call_id.clone();
+                move || async move {
+                    connection
+                        .request(
+                            "_zu/ask/answer",
+                            json!({ "toolCallId": tool_call_id, "response": response }),
+                        )
+                        .await
+                        .map_err(|error| error.describe())
+                }
+            };
+            let result = tokio_wait(call).await;
+            this.update(cx, |store, cx| {
+                match result {
+                    Ok(value) => {
+                        if value.get("delivered").and_then(Value::as_str) == Some("none") {
+                            store
+                                .book
+                                .note_error(&session_id, "the pi harness has no answerable ask");
+                        }
+                        store.refresh_panels(&session_id, cx);
+                    }
+                    Err(reason) => store.book.note_error(&session_id, &reason),
+                }
+                cx.notify();
             })
             .ok();
         })

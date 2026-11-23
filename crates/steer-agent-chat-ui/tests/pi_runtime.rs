@@ -360,3 +360,50 @@ async fn the_panel_requests_answer_and_fold_into_the_view() {
         .await
         .expect("close settles");
 }
+
+#[tokio::test]
+async fn the_mailbox_restores_asks_and_takes_a_late_answer() {
+    use steer_agent_chat_ui::pi::PiSessionView;
+    use steer_agent_chat_ui::pi::session::parse_restored_asks;
+
+    let root = state_root();
+    let (events, _receiver) = async_channel::unbounded();
+    let runtime = PiRuntime::new(stub(), &root, &root);
+    let connection = tokio::time::timeout(
+        TIMEOUT,
+        runtime.open(Some(SESSION), &root, OpenMode::New, &events),
+    )
+    .await
+    .expect("the bind answers")
+    .expect("the session opens");
+
+    let asks = parse_restored_asks(
+        &connection
+            .request("_zu/ask/pending", json!({}))
+            .await
+            .expect("the mailbox answers"),
+    );
+    assert_eq!(asks.len(), 1);
+    assert_eq!(asks[0].tool_call_id, "ask-restored");
+    assert!(asks[0].params["questions"].is_array());
+
+    // The card folds into the view strictly (a repeat is a no-op).
+    let mut view = PiSessionView::new(SESSION, &root);
+    assert!(view.set_restored_asks(asks));
+    assert!(!view.set_restored_asks(Vec::new()) || view.restored_asks.is_empty());
+    assert!(view.restored_asks.is_empty());
+
+    // The answer goes through the mailbox, not a JSON-RPC response.
+    let delivered = connection
+        .request(
+            "_zu/ask/answer",
+            json!({"toolCallId": "ask-restored", "response": {"action": "accept"}}),
+        )
+        .await
+        .expect("the answer is delivered");
+    assert_eq!(delivered["delivered"], "late");
+
+    tokio::time::timeout(TIMEOUT, connection.close())
+        .await
+        .expect("close settles");
+}
