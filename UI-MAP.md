@@ -28,8 +28,8 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 | Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4）。注入面挂载期间侧栏被 pin：强制可见、titlebar 隐藏开关惰性化——导航是该模式唯一出口，不可被藏到身后；pin 只借用可见性，卸载时还原用户原先的折叠状态 |
 
 共享状态层不变：`agent-ui`（multiplexer / client_store / browser_host / dispatch / 侧栏投影 /
-slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与消息管线）、
-`steer-webview`。
+slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与消息管线；pi 腿的数据面
+`AcpStore` 也在本 crate，见 §2.10）、`steer-webview`。
 
 壳的契约（均可在不改 agent-ui 的前提下扩展）：`MainSurface`（主栏槽）、`ToolTab` /
 `ToolTabFactory`（右栏 kind）、`PanelSurface`（dock 内容）、`HostHooks`（pin/archive/new/select
@@ -41,12 +41,15 @@ slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与�
 
 ---
 
-## Harness 现状（manox-harness）
+## Harness 现状（manox-harness + pi sidecar）
 
 老 manox harness（`harness-manox` crate 与 agent-ui 的 manox 变体）已完全
-删除；`crates/manox-harness/src/core`（TS Pi 内核移植）+ `crates/manox-harness/src/ext` 是唯一 harness
-核心，`manox-agent` / `agent-ui` 是宿主接线层。本文件只描述当前 manox-harness 路径的 UI；
-引用老 manox 实现请查 git 历史或 `origin/Manox` 备份分支。
+删除；`crates/manox-harness/src/core`（TS Pi 内核移植）+ `crates/manox-harness/src/ext` 是 manox
+harness 核心，`manox-agent` / `agent-ui` 是宿主接线层。pi 是**第二 harness**，以特许 sidecar
+二进制 `pi-acp`（`pi-harness/`，bun/TS 工程）与 manox 的 in-proc 腿平级：宿主侧投影是 chat
+crate 的 `AcpStore`（`pi/` 数据面），会话面是画布的 `pi-session:` sheet（§2.10）；pi 会话文件
+持久化在 pi 自己的状态目录（`PI_CODING_AGENT_DIR` 缺省 `~/.pi/agent`），不经 manox journal。
+本节其余只描述 manox-harness 路径的 UI；引用老 manox 实现请查 git 历史或 `origin/Manox` 备份分支。
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
@@ -127,6 +130,10 @@ crates/manox-harness/src/ext；宿主（manox-agent / agent-ui）只做装配与
 ### Overlays
 
 - [BlankProjectOverlay](#blankprojectoverlay)
+
+### pi 会话 sheet
+
+- [PiSessionView](#pisessionview) · [AcpStore](#acpstore)（pi 状态归属） · [pi 数据面与入口](#pi-数据面与入口) · [About 的 pi distro 版本行](#about-的-pi-distro-版本行)
 
 ### 右栏页签内容
 
@@ -297,7 +304,7 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 ---
 
-## 2.9 画布（容器视图本身，plan β）
+## 2.9 画布（容器视图本身）
 
 容器的画布：一张布局树（`steer-canvas`），叶子是 sheet。**画布就是容器视图**——不是与
 Chat/Settings 并列的 `ViewMode`：`Workspace::render_column` 每帧 `sync_canvas`（前景容器变了就
@@ -305,11 +312,11 @@ park 旧画布、恢复新画布），再由 `CanvasView::render_canvas` 画出�
 `canvas_host::CanvasHost` 是唯一写入路径（ticket + `set_layout`），`CanvasView` 只读布局、发命令。
 
 ```
-┌ CanvasView（前景容器） ──────────────────────────────┐
-│ [GroupFrame 0] tab strip：tab × | 终端 ＋ | 起始页 ＋ │
-│  ├ 显示中的 sheet body（会话列 / 起始页 / 终端）      │
-│ [GroupFrame 1] …（双击 tab = 把起始页挪到右侧新组）   │
-└───────────────────────────────────────────────────────┘
+┌ CanvasView（前景容器） ────────────────────────────────────────┐
+│ [GroupFrame 0] tab strip：tab × | 终端 ＋ | pi ＋ | 起始页 ＋   │
+│  ├ 显示中的 sheet body（会话列 / 起始页 / 终端 / pi 会话）      │
+│ [GroupFrame 1] …（双击 tab = 把起始页挪到右侧新组）             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 - 几何来自 `steer_canvas::projection`（`tab_bar_boxes` / `group_frames`），渲染只摆放；
@@ -317,25 +324,121 @@ park 旧画布、恢复新画布），再由 `CanvasView::render_canvas` 画出�
   strip 是 group 盒内的绝对子节点（原点 = group 原点），分屏后不会按画布坐标二次偏移；
 - tab 文本 = registry 的 `tab_title`（session 的 OSC 程序标题，回落 `title`）；`title` 经**宿主注入的
   `SheetTitles`** 解析——session sheet 读会话折的标题（与侧栏同一字符串），home/terminal 用静态
-  i18n 文案（`canvas-tab-home` / `canvas-tab-terminal`），未命中的 session 落 `canvas-tab-new-chat`。
+  i18n 文案（`canvas-tab-home` / `canvas-tab-terminal`），pi sheet 读 `AcpStore::title` 回落
+  `canvas-tab-pi`，未命中的 session 落 `canvas-tab-new-chat`。
   画布**不读 workspace**（渲染期正持有其租约）：标题源由装配点注入，捕获的是会话实体而非 workspace；
 - 单击 = 激活（走 host 的单写者）；双击 = 分屏：把容器的起始页放到该 tab 右侧的新组（已开则
-  **移动**而非复制——一个 sheet 只有一处）；`＋` = 打开起始页，终端 `＋` = 打开本容器的下一个终端 sheet；
-- 关掉最后一个 sheet 由 host 返回 `AutoArchive`，画布交给 `Workspace::canvas_auto_archive`（不跨实体写）；
-- 布局变更走 400ms 防抖保存泵（`SAVE_DEBOUNCE`，generation 去重）；
-- 切容器 = park（布局进 LRU，PTY 保活）与 restore；资源回收按 `open_sheet_ids(layout ∪ held)` 并集判定；
-- scratch 画布（`SCRATCH_CONTAINER`）不 park、不持久化；launcher 铸容器时 `migrate_scratch` 把 sheet 平移过去。
+  **移动**而非复制——一个 sheet 只有一处）；`＋` = 打开起始页，终端 `＋` = 打开本容器的下一个终端
+  sheet，pi `＋`（sparkles）= 在本容器开一张 pi 会话 sheet（见 [pi 会话 sheet](#210-pi-会话-sheet)）；
+- **关闭路径**：tab 的 × → `CanvasView::close_sheet`——布局提交 `Applied` 才生效（`Stale` 被状态机
+  丢弃，sheet 仍在，pi 会话照旧）；pi sheet 关闭时视图移除、会话经 `AcpStore::close_session` 连进程
+  一起关。**关掉容器最后一个 sheet**：先把起始页开回布局（画布永不空屏），再发
+  `CanvasEvent::AutoArchive` 事件，由 Workspace 的订阅处理（`workspace/lifecycle.rs` 的
+  `canvas_archive_requested`）——归档动作本身是 workspace 的写、落点会重入画布，所以走事件面：
+  无活跃依赖直接 `archive_containers`，有活跃依赖弹确认框（确认闭包经 effect 边界开窗），取消则
+  容器留在起始页。画布的手势回调里没有任何 `workspace.update`；
+- **归档落点**：`archive_containers`（容器归档的唯一落点，§2.0 生命周期）调
+  `CanvasView::forget_container`——布局从 shown / held 移除、终端 PTY 视图按 `layout ∪ held` 并集
+  回收、pi 会话与视图关闭、滞后的防抖保存作废；被归档容器正显示时主区回 scratch；
+- **保存泵**：400ms 防抖（`SAVE_DEBOUNCE`，generation 去重，最新编辑胜出）；容器离开前景前同步
+  落盘（park 前冲刷）；画布实体释放时冲刷（`on_release`）；`forget_container` 让被归档容器的
+  待写作废；
+- **恢复**：`CanvasView::open_container` 读持久化布局，经 registry 的 `restore` 接缝逐 sheet 裁决
+  （谓词答不上来的 id 读活——布局即事实），然后每个 `terminal:` sheet 重接新 PTY、每个
+  `pi-session:` sheet 在视图创建前调 `AcpStore::open_existing`（cwd 取容器的 cwd）；
+  `Workspace::sync_canvas` 让画布跟上前景容器，并带「前台容器已死」分支（forget 幂等，回收残余）；
+- 切容器 = park（布局进 LRU，PTY 保活）与 restore；资源回收按 `layout ∪ held` 并集判定；
+- scratch 画布（`SCRATCH_CONTAINER`）不 park、不持久化；launcher 铸容器时 `migrate_scratch` 把 sheet 平移过去；
+- **容器标题投影**：取创建序中最早存活、且 kind 声明 `names_container` 的 sheet 标题，跳过 `home:`，
+  也跳过「新会话」占位文案——占位符只命名 tab，从不命名容器（无标题可取时调用方落 cwd 尾段）。
 
-侧栏容器行的画布投影（`sidebar_projection::project_groups_with_canvas`）：标题 = 容器标题投影
-（创建序最早、且 kind 声明 `names_container` 的 sheet 的标题），第三行追加 sheet 计数
+侧栏容器行的画布投影（`sidebar_projection::project_groups_with_canvas`，数据经
+`Workspace::canvas_row_facts`）：标题 = 容器标题投影（见上），第三行追加 sheet 计数
 （`chrome-row-sheet-count`），选中行贴 3px 品牌色竖条（`session_list`，透明占位防位移）。
 
 离屏出图：`CHROME_SHOT=/tmp/canvas.png CHROME_CANVAS=1 cargo test -p agent-ui --features test-support
 --test visual_canvas`（`CANVAS_SPLIT=1` 加分屏；侧栏那半面是 chrome 的 `CHROME_CANVAS=1` 场景）。
 
 > Source: `crates/agent-ui/src/workspace/canvas_view.rs`, `crates/agent-ui/src/workspace/canvas_host.rs`,
+> `crates/agent-ui/src/workspace/lifecycle.rs`（`canvas_archive_requested` / `archive_containers`）,
+> `crates/agent-ui/src/workspace.rs`（`ensure_canvas_view` / `sync_canvas` / `canvas_row_facts`）,
 > `crates/steer-canvas/`, `crates/agent-ui/src/sidebar_projection.rs`,
 > `crates/steer-agent-chrome-ui/src/session_list.rs`
+
+## 2.10 pi 会话 sheet
+
+pi 第二 harness 的会话面，作为画布的一种 sheet kind（`pi-session:{uuid}`）。数据面与组件
+边界与 §2.0 同构：状态住在 store，视图只画。
+
+#### PiSessionView
+
+一张 sheet 的完整 body（`crates/steer-agent-chat-ui/src/views/pi/session.rs`），自上而下：
+
+- **头部**：标题 + 选择器 chips（`pi-selector-{id}`——model、thinking level、approval mode；
+  会话未声明某 kind 就不出该 chip；点击弹 `PopupMenu`，选中写回 store，harness 回
+  `config_option_update` 后菜单按新列表重建）+ 上下文用量（`pi-context-used` 百分比）；
+- **会话 banner 卡**：`_zu/session_banner` 折叠（`pi {version} · {model}`、thinking level、
+  skills / extensions / warnings 行）——harness 加载了什么、警告了什么；运行时值原样渲染，
+  只有行标签是本仓文案；
+- **计划面板**（标题键 `pi-plan-title` + `done/total` 进度：todo 行可点切换状态，group 行折叠
+  展示）与**子代理面板**（标题键 `pi-subagents-title`：run 行 `pi-subagent-{run_id}` 点击在视图
+  内展开该 run 的转录）；
+- **转录行**（`pi-transcript` 滚动区）：用户消息（右对齐气泡）/ 助手消息（思考走
+  [`Reasoning`](#reasoningblock)，正文 + 尾部错误行）/ 工具卡（[`Tool`](#tool)，`pi-tool:{id}`，
+  参数摘要 + 状态）/ 提示行（`Note`，severity 染 danger / warning / muted）；
+- **待处理卡**：权限审批卡（标题键 `pi-permission-title`）、elicitation 卡（schema 属性逐项
+  选择）、ask 卡（[`AskUserQuestion`](#askuserquestion) + `AskState`）；三种都在
+  composer 上方的卡区渲染，裁决经 `AcpStore::answer` / `refuse`；
+- **错误行**：store 级或会话级 error 在 composer 区上方渲染 danger 文本；
+- **slash 候选弹层**（`pi-slash-{name}`）：输入首 token 是 `/` 时列出 harness 注册的命令
+  （过滤 + 描述副行，上限 6 行），点击回填 composer；弹层永不取焦点；
+- **composer**：多行 `Input`（⏎ 发送、Change 驱动 slash 过滤）+ 停止按钮（streaming 时
+  `pi-stop:{id}`，danger）+ 发送（`pi-send`）+ 排队计数；
+- **dead 态重连行**（`pi-reconnect:{id}`）：会话进程死亡后给出重连按钮；
+- **「会话已关闭」空态**：store 里已没有该会话视图时整页退化为标题行 + 提示（文案键
+  `pi-session-closed`，调试选择器 `pi-closed`）——没有转录、没有 composer（prompt 已无处投递）。
+
+> Source: `crates/steer-agent-chat-ui/src/views/pi/session.rs`
+
+#### AcpStore（pi 状态归属）
+
+pi 会话的全部状态住在 `AcpStore`（`crates/steer-agent-chat-ui/src/pi/store.rs`，workspace 持有
+实体、画布展示）：`book.rs` 是纯折叠（`PiBook`——每个打开会话从传输事件同步折叠出的状态）、
+`session.rs` 是单会话视图状态（selectors / usage / banner / pending requests）、`transcript.rs`
+是纯 reducer（ACP update → 转录条目）、`runtime.rs` 是传输层（spawn / 握手 / 绑定 + 双通道泵，
+over `steer-acp`）。`PiSessionView` 只持有按条目 id / 请求 id 作键的卡片状态实体（reasoning、
+tool、ask、elicitation 选择四个 map）；视图的 render 不经 `cx.entity()` 访问自己。
+
+> Source: `crates/steer-agent-chat-ui/src/pi/`（`store.rs` / `book.rs` / `session.rs` /
+> `transcript.rs` / `runtime.rs`）
+
+#### pi 数据面与入口
+
+- **数据面**：`crates/steer-acp`（ACP 客户端薄层：spawn `pi-acp` 子进程、NDJSON JSON-RPC 2.0
+  over stdio、session 生命周期、updates / requests 双通道；gpui-free）与 `pi-harness/` sidecar
+  （构建产物 `dist/pi-acp`，协议权威 `pi-harness/src/acp/app.ts`——见 AGENTS.md「pi harness
+  （sidecar）」）。
+- **入口**：Launcher 的 pi 动作（`crates/agent-ui/src/workspace/launcher_entry.rs` 的
+  `launch_pi_session_from_launcher`）→ `CanvasView::open_pi_session`：宿主 `mint_session_id()`
+  铸 uuid，`AcpStore::open_new` 即刻起进程，sheet `pi-session:{uuid}` 经 host 落布局；画布条上的
+  pi `＋`（`canvas-open-pi`）同走一路。kind 注册在 `canvas_view.rs` 的 `pi_kind`（glyph `pi`、
+  `names_container: false`——pi 会话不命名容器、标题回落 `canvas-tab-pi`）；恢复路径
+  （§2.9 的 `open_container`）对每个 `pi-session:` sheet 在视图创建前调 `AcpStore::open_existing`。
+  关 sheet 即关会话：`CanvasView::close_pi_sheet` 移除视图并 `AcpStore::close_session`。
+
+> Source: `crates/steer-acp/src/lib.rs`, `pi-harness/`（`src/acp/app.ts`）,
+> `crates/agent-ui/src/workspace/launcher_entry.rs`, `crates/agent-ui/src/workspace/canvas_view.rs`
+> （`pi_kind` / `open_pi_session` / `close_pi_sheet`）
+
+#### About 的 pi distro 版本行
+
+[AboutWindow](#aboutwindow) 的 provenance 轴上有一行 pi distro pin：
+`pins::pi_distro_version()`（`crates/steer-app/src/pins.rs`）读编译期注入的 env——
+`crates/steer-app/build.rs` 从 `pi-harness/package.json` 解析
+`@earendil-works/pi-coding-agent` 的版本（与 sidecar 自报的 `src/version.ts` 同源）；解析不出
+则该行整个缺席（`crates/steer-app/src/about.rs`）。
+
+> Source: `crates/steer-app/src/pins.rs`, `crates/steer-app/build.rs`, `crates/steer-app/src/about.rs`
 
 ## 3. 会话列布局
 
@@ -365,15 +468,20 @@ carries no reserved overlay inset.
 
 #### MessageColumn
 
-Vertical flex container, fills remaining width.
+The conversation column's whole page — one vertical flex, fills remaining width. 「会话列实体化」
+后由 [`ChatColumnView`](#20-会话列实体chatcolumnview--chatenv) 装配：hero（首屏）／
+history gate 页／转录带／footer 四段在 `ChatColumnView::render_page` 排成一列
+（§2.0 的装配，画布经 `render_sheet_body` 调它）。
 
-> Source: `crates/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_page`)
 
 #### Body
 
-Vertical flex below TitleBar, `pt:TITLE_BAR_HEIGHT`, houses [Hero](#hero) or [HistoryLoading](#historyloading) (while a reopened thread's snapshot is in flight) or [MessageArea](#messagearea) + [Footer](#footer).
+The page's body: [Hero](#hero) or [HistoryLoading](#historyloading) (while a reopened thread's
+snapshot is in flight) or [MessageArea](#messagearea) + [Footer](#footer), stacked in
+`render_page`'s vertical flex.
 
-> Source: `crates/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_page`)
 
 #### 3.2.1 Hero
 
@@ -383,13 +491,13 @@ Shown when the thread has no substantive messages (and is not loading) — an EX
 
 Vertically centered welcome area: logo/heading + inline [Composer](#composer).
 
-> Source: `crates/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_page` 的 hero 臂)
 
 #### HistoryLoading
 
-Full-column pixel loading page that suppresses the hero, message list, and footer while a reopened thread's chat snapshot is still in flight: `ChatColumn.awaiting_history` is set at reopen attach when the caller declares it expects history (`expect_history`, not the wire-side `reopen` flag — a created session re-opens too) and the fold holds no chat channel. Cleared by the snapshot rebuild (history present), by the store observe (genuinely empty session → hero returns), or by the render-time timeout (`HISTORY_TIMEOUT`, 10s) so a failed reopen cannot pin the page. Render re-checks the fold, so a stale flag cannot pin it either. Layout: a 12×14-cell pixel meerkat sprite played as a 6-slot loop at 3 slots/sec (4 distinct frames: idle, bob, blink, tail flick — each cell a flat solid block, no bevel), centered above the heading (`workspace-history-loading-heading`) and the monospace thread id. No composer while it shows. The sprite, its grids and its clock live in the shared [`Meerkat`](#meerkat) component (`ai_elements::Meerkat`); this page is the heading, the thread id, and the timeout constant.
+Full-column pixel loading page that suppresses the hero, message list, and footer while a reopened thread's chat snapshot is still in flight: `ChatColumn.awaiting_history` is set at reopen attach when the caller declares it expects history (`expect_history`, not the wire-side `reopen` flag — a created session re-opens too) and the fold holds no chat channel. Cleared by the snapshot rebuild (history present), by the store observe (genuinely empty session → hero returns), or by the timeout gate (`HISTORY_TIMEOUT`, 10s) pruned at the very top of the page render — an expired gate degrades to the hero in the SAME frame, so a failed reopen cannot pin the page. Render re-checks the fold, so a stale flag cannot pin it either. Layout: a 12×14-cell pixel meerkat sprite played as a 6-slot loop at 3 slots/sec (4 distinct frames: idle, bob, blink, tail flick — each cell a flat solid block, no bevel), centered above the heading (`workspace-history-loading-heading`) and the monospace thread id. No composer while it shows. The sprite, its grids and its clock live in the shared [`Meerkat`](#meerkat) component (`ai_elements::Meerkat`); this page is the heading, the thread id, and the timeout constant.
 
-> Source: `crates/agent-ui/src/views/history_loading.rs` (page); sprite: `crates/ai-elements/src/meerkat.rs`. Gate: `crates/agent-ui/src/workspace/attach.rs` (`attach_thread`), `crates/agent-ui/src/workspace/render.rs` (`render_column`), `crates/steer-agent-chat-ui/src/column.rs` (`awaiting_history`)
+> Source: `crates/agent-ui/src/views/history_loading.rs` (page); sprite: `crates/ai-elements/src/meerkat.rs`. Gate: `crates/agent-ui/src/workspace/attach.rs` (`attach_thread`), `crates/agent-ui/src/workspace/column_view.rs` (`prune_history_gate`——页面渲染的帧首剪除，超时当帧即降级), `crates/steer-agent-chat-ui/src/column.rs` (`awaiting_history`)
 
 #### 3.2.2 MessageArea
 
@@ -398,15 +506,19 @@ Shown when the thread has messages. Replaces [Hero](#hero).
 
 #### MessageArea
 
-Wraps [MessageList](#messagelist).
+The transcript band (`ChatColumnView::transcript`) wrapping [MessageList](#messagelist): the
+message list, its rubber-band wrapper, its press / release bookkeeping, and the
+[TurnRail](#turnrail) mounted beside it. Shows nothing while the first screen or the history
+gate is up.
 
-> Source: `crates/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/column_view.rs` (`transcript`)
 
 #### MessageList
 
-Virtual list backed by native `gpui::list` (`gpui::list(list_state, render_item)`, `ListState` held directly on `Workspace`), wrapped in gpui-base `ScrollBounce` — the wrapper owns the vertical wheel and precise scrolling bounces with NSScrollView-tuned motion on macOS; its `on_scroll` notifies the chat because the bounce scrolls the ListState past the list's own scroll handler. GPUI owns virtualization, scroll, the per-item height cache, and tail-follow; `ListAlignment::Bottom` gives native chat-log semantics — short histories sit at the viewport bottom, long ones scroll — and `FollowMode::Tail` pins to the live end on each layout while following (disengaging on upward scroll, re-arming at the bottom). The row factory captures `Conversation` directly and is strictly read-only during list measurement/prepaint; Workspace-derived ask-card snapshots are synchronized before list construction. `MSG_LIST_OVERDRAW` pre-measures rows below the viewport. Visible rows re-measure every frame, but the pinned official GPUI revision retains off-screen row heights across width changes, so `MessageListWidthInvalidator` observes the final positive list width after layout, invalidates the complete cache with `remeasure_items`, and requests a settling frame while preserving the logical item/offset anchor. Count changes are reconciled via `splice` and in-place mutations via `remeasure_items`, both driven from the projection pass's `ProjectionChange` (count delta, per-index remeasures, a structural flag for mid-list moves). There is exactly ONE transcript path: `transcript ≡ project(&ChatState, &Overlays)` (`crates/steer-agent-chat-ui/src/transcript.rs`). Every trigger — the store observe on any fold change, a thread attach, an optimistic submit, a sub-agent panel's pump — funnels into `Workspace::sync_conversation`, which stages the projected nodes against the foreground session's fold and reconciles them by stable row key (`user:{turn}` / `md:{part}` / `seg:{first entry}` / `tc:{call}` / `ir:{request}` / `notice:{…}`; the part ids the manox projection mints are byte-stable across replay). Live streaming and history are the same keyed diff at two trigger timings — a parked thread's stream lands in its own fold and reaches the bound transcript only when that thread is the one bound (`cross_session_stream_isolation` pins the routing; the switch-back convergence is pinned by `reopen_rebuild_watermark`). Only the visible items render. Markdown text rows render through upstream gpui-base `TextView` (issue #124): the renderer reports content-driven intrinsic sizes per measure and reconciles them with the final allocated width at paint, so row heights track the text engine's own shaping without app-side geometry.
+Virtual list backed by native `gpui::list` (`gpui::list(list_state, render_item)`, the
+`ListState` held on `ChatColumn` — `crates/steer-agent-chat-ui/src/column.rs`), wrapped in gpui-base `ScrollBounce` — the wrapper owns the vertical wheel and precise scrolling bounces with NSScrollView-tuned motion on macOS; its `on_scroll` notifies the chat because the bounce scrolls the ListState past the list's own scroll handler. GPUI owns virtualization, scroll, the per-item height cache, and tail-follow; `ListAlignment::Bottom` gives native chat-log semantics — short histories sit at the viewport bottom, long ones scroll — and `FollowMode::Tail` pins to the live end on each layout while following (disengaging on upward scroll, re-arming at the bottom). The row factory captures `Conversation` directly and is strictly read-only during list measurement/prepaint; Workspace-derived ask-card snapshots are synchronized before list construction. `MSG_LIST_OVERDRAW` pre-measures rows below the viewport. Visible rows re-measure every frame, but the pinned official GPUI revision retains off-screen row heights across width changes, so `MessageListWidthInvalidator` observes the final positive list width after layout, invalidates the complete cache with `remeasure_items`, and requests a settling frame while preserving the logical item/offset anchor. Count changes are reconciled via `splice` and in-place mutations via `remeasure_items`, both driven from the projection pass's `ProjectionChange` (count delta, per-index remeasures, a structural flag for mid-list moves). There is exactly ONE transcript path: `transcript ≡ project(&ChatState, &Overlays)` (`crates/steer-agent-chat-ui/src/transcript.rs`). Every trigger — the store observe on any fold change, a thread attach, an optimistic submit, a sub-agent panel's pump — funnels into `Workspace::sync_conversation`, which stages the projected nodes against the foreground session's fold and reconciles them by stable row key (`user:{turn}` / `md:{part}` / `seg:{first entry}` / `tc:{call}` / `ir:{request}` / `notice:{…}`; the part ids the manox projection mints are byte-stable across replay). Live streaming and history are the same keyed diff at two trigger timings — a parked thread's stream lands in its own fold and reaches the bound transcript only when that thread is the one bound (`cross_session_stream_isolation` pins the routing; the switch-back convergence is pinned by `reopen_rebuild_watermark`). Only the visible items render. Markdown text rows render through upstream gpui-base `TextView` (issue #124): the renderer reports content-driven intrinsic sizes per measure and reconciles them with the final allocated width at paint, so row heights track the text engine's own shaping without app-side geometry.
 
-> Source: `crates/agent-ui/src/workspace/render.rs` (`ListState` wiring, `MSG_LIST_OVERDRAW`), `crates/steer-components/src/markdown/text_view.rs` (TextView assembly, code-highlight dispatch)
+> Source: `crates/agent-ui/src/workspace/column_view.rs` (`transcript` 的 `gpui::list` + ScrollBounce 装配), `crates/steer-agent-chat-ui/src/column.rs` (`list_state`, `MSG_LIST_OVERDRAW`), `crates/steer-components/src/markdown/text_view.rs` (TextView assembly, code-highlight dispatch)
 
 #### TurnRail
 
@@ -414,7 +526,7 @@ Left-edge turn navigation: the dsh TurnNavigator mirrored onto the conversation 
 
 Marks are re-derived from the conversation every frame — but only past the width gate, which short-circuits before the projection, and `render_turn_rail`'s `Some`/`None` is the single gate for both the rail and the gutter (`collect_rail_turns`: prompt = the user bubble's text collapsed and capped at 50 chars, or the ⌘M navigator's attachment-only / empty-message copy for a textless bubble — the same distinction `TurnEntry::new` draws; response = the turn's last non-empty assistant reply capped at 120 — dsh's `findLast` rule; both caps word-accumulate up to the budget (`split_whitespace` skips whitespace runs of any length, so indented blocks fill it like prose), so a huge turn costs O(limit), not O(全文)). The active mark is `active_rail_turn`: the last turn whose anchor item is at or above the list's `logical_scroll_top` item (the tail-follow floor reports `count`, resolving to the newest mark). Interactions: hover grows the tick 12→18px with a border→muted 140ms tween and the vacated mark sinks back in the same run — a pointer sweep reads as a wave down the ladder (dsh's CSS-transition semantics; each change keys one tween pair under `turn_rail_hover_gen`, with `turn_rail_hover_prev`/`_painted` snapshotting only on change; fast sweeps within the 140ms window truncate the wave's tail by design — the prev slot is single); hover opens a 300px preview card beside the rail (prompt line + response excerpt), fading in over 120ms with a 4px slide and traveling between marks over 140ms `ease_out_quint` (the from-top snapshots only when the hovered mark changes — the tab-indicator `indicator_from` discipline); click jumps through `Workspace::reveal_message` (the ⌘M navigator's own path). The active tick tweens width+color over 140ms on change (previous mark shrinks, new mark grows, keyed per generation; a tick that loses active while hovered hands the animation slot to the hover wave); active-follow scrolls the ladder (`scroll_to_item(Nearest)`) whenever the pointer is outside the strip (`turn_rail_pointer_inside` pauses it so marks never travel under the hand). An over-420px ladder scrolls inside the strip (`uniform_list` + `ListSizingBehavior::Infer` + `max_h`); the preview's geometry consumes the ladder's `ScrollHandle` offset **sign-corrected to positive-down** (gpui's raw offset runs negative scrolling down — the `-offset.y` convention `uniform_list` itself uses; round-1 C1). Thread re-projection (`attach_thread`, diagnostic replace) resets the interaction state via `ChatColumn::reset_turn_rail_interaction` — a stale hover index must not mount a preview on the new conversation. Tick rows follow the gpui hover-crossing rule: a row's leave retracts only its own mark.
 
-> Source: `crates/steer-agent-chat-ui/src/views/turn_rail.rs` (rail + state contract), state fields on `ChatColumn` (`crates/steer-agent-chat-ui/src/column.rs`), mounted in `crates/agent-ui/src/workspace/render.rs` (`render_column`)
+> Source: `crates/steer-agent-chat-ui/src/views/turn_rail.rs` (rail + state contract), state fields on `ChatColumn` (`crates/steer-agent-chat-ui/src/column.rs`), mounted in `crates/agent-ui/src/workspace/column_view.rs` (`transcript`——rail 与 gutter 由同一个 `Some`/`None` 门裁决)
 
 #### MessageItem
 
@@ -618,8 +730,6 @@ child_runs_of`), which is also the attach-time restore source for the rail's
 observation rows.
 
 > Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_captain_strip`), `crates/steer-agent-chat-ui/src/conversation.rs` (`live_activity`), `crates/agent-ui/src/workspace/subagent_stream.rs`
-
-> Source: `crates/agent-ui/src/workspace/render.rs`
 
 ##### SubagentStream
 
@@ -1262,9 +1372,15 @@ chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操
 
 #### ConversationColumn
 
-`Workspace::render_column`：会话列本身（hero 空屏／虚拟化消息列表／composer footer＋附件与 chips／ask 与 blank-project overlay／TurnNavigator overlay），四周的 gutter / 侧栏槽 / 卡壳 / 内嵌标题栏全部归壳；键盘动作面经根装饰器 `apply_chat_actions`。装配把该视图作为壳的 `MainSurface`，其 multiplexer 同时喂侧栏投影泵。
+`Workspace::render_column`：主区卡内容的挂载尾——模式分发（Settings / 外部会话 / SubagentStream /
+Launcher 各自的卡先行返回）之后，每帧 `sync_canvas`（§2.9）并把画布页挂进壳的主区卡：会话列
+本身就是前台容器的画布（hero 空屏／转录带／composer footer 在 `session:` sheet 的
+[ChatColumnView](#20-会话列实体chatcolumnview--chatenv) 页内；ask 卡内联在转录里；TurnNavigator
+overlay 挂在画布外圈）。四周的 gutter / 侧栏槽 / 卡壳归壳；键盘动作面经根装饰器
+`apply_chat_actions`。装配把该视图作为壳的 `MainSurface`，其 multiplexer 同时喂侧栏投影泵。
 
-> Source: `crates/agent-ui/src/workspace/render.rs`
+> Source: `crates/agent-ui/src/workspace/render.rs`（`render_column`）,
+> `crates/agent-ui/src/workspace/canvas_view.rs`（`render_canvas` / `render_sheet_body`）
 
 #### SettingsCard
 
