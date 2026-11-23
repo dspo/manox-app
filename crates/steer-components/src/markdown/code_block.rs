@@ -158,9 +158,15 @@ pub(crate) enum BlockView {
 }
 
 /// The editor panel: header bar over a body the shape and view decide. The
-/// code always reads at the mono size the rest of the app's code surfaces
-/// use, so a block is the same artifact wherever it lands.
-pub(crate) fn code_element(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> AnyElement {
+/// code reads at the document's own body size — prose code matches the
+/// prose it sits in — falling back to the theme's mono size on surfaces
+/// that pin none.
+pub(crate) fn code_element(
+    node: &MarkdownNode,
+    body_size: Option<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let Some(payload) = node.data::<Arc<EditorPayload>>() else {
         return div().child(node.as_text().to_string()).into_any_element();
     };
@@ -185,6 +191,7 @@ pub(crate) fn code_element(node: &MarkdownNode, window: &mut Window, cx: &mut Ap
         &code,
         payload.lang.as_deref(),
         key,
+        body_size,
         window,
         cx,
     )
@@ -208,12 +215,14 @@ pub(crate) enum PanelShape<'a> {
 /// One editor panel for arbitrary code — the same artifact a fence renders,
 /// callable from outside the markdown pipeline (the diagram blocks' source
 /// faces). `key` namespaces the panel's element ids and keyed state; pass a
-/// key distinct from the caller's other uses.
+/// key distinct from the caller's other uses. `body_size` is the document's
+/// own body size where the surface pins one.
 pub(crate) fn panel(
     shaped: PanelShape<'_>,
     code: &str,
     lang: Option<&str>,
     key: u64,
+    body_size: Option<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -276,12 +285,17 @@ pub(crate) fn panel(
     let palette = DispatchPalette::new(&theme);
     let body = match (shape, showing) {
         (Some(FenceShape::Diff(parts)), BlockView::Split) => {
-            diff_view::split_body(parts, key, &theme)
+            let text_size = code_surface::panel_text_size(body_size, &theme);
+            diff_view::split_body(parts, key, text_size, &theme)
         }
         (Some(FenceShape::Merge(segments)), BlockView::Merge) => {
-            diff_view::merge_body(segments, key, &theme)
+            let text_size = code_surface::panel_text_size(body_size, &theme);
+            diff_view::merge_body(segments, key, text_size, &theme)
         }
-        _ => flat_body(&code, lang, &palette, &theme, key),
+        _ => {
+            let text_size = code_surface::panel_text_size(body_size, &theme);
+            flat_body(&code, lang, &palette, &theme, text_size, key)
+        }
     };
 
     div()
@@ -323,6 +337,7 @@ fn flat_body(
     lang: Option<&str>,
     palette: &DispatchPalette,
     theme: &Theme,
+    text_size: Pixels,
     key: u64,
 ) -> AnyElement {
     // An empty fence numbers nothing: a gutter row reading "1" over no code
@@ -345,7 +360,7 @@ fn flat_body(
         .min_w_0()
         .items_start()
         .font_family(theme.mono_font_family.clone())
-        .text_size(theme.mono_font_size)
+        .text_size(text_size)
         .line_height(relative(1.6))
         .whitespace_nowrap()
         .when(!gutter.is_empty(), |row| {

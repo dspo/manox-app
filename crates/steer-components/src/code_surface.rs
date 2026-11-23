@@ -134,17 +134,24 @@ pub fn row_accent(kind: CodeRowKind, theme: &Theme) -> Hsla {
     }
 }
 
-/// The one line height every code surface paints: the flat panel's
-/// relative(1.6) at the mono size. As a fixed row height it is the invariant
-/// that keeps paired columns aligned.
-pub fn row_height(theme: &Theme) -> Pixels {
-    theme.mono_font_size * 1.6
+/// The size a panel paints its code at: the document's own body size where
+/// the surface pins one — prose code matches the prose around it — else the
+/// theme's mono size, the chrome fallback.
+pub fn panel_text_size(body_size: Option<Pixels>, theme: &Theme) -> Pixels {
+    body_size.unwrap_or(theme.mono_font_size)
+}
+
+/// The one line height every code surface paints: relative(1.6) at the
+/// panel's text size. As a fixed row height it is the invariant that keeps
+/// paired columns aligned.
+pub fn row_height(text_size: Pixels) -> Pixels {
+    text_size * 1.6
 }
 
 /// The width of a line-number gutter carrying `digits`: right-aligned
 /// numbers with breathing room on both sides.
-pub fn gutter_width(digits: usize, theme: &Theme) -> Pixels {
-    px(8.) + theme.mono_font_size * 0.65 * digits as f32 + px(8.)
+pub fn gutter_width(digits: usize, text_size: Pixels) -> Pixels {
+    px(8.) + text_size * 0.65 * digits as f32 + px(8.)
 }
 
 /// The gutter digit count for a set of rows: the widest number either side
@@ -165,7 +172,7 @@ pub const BODY_PAD_Y: f32 = 12.;
 
 /// The horizontal-scroll root a panel face's body sits in — the face owns
 /// its horizontal axis, the block shell owns the vertical one.
-pub fn scroll_root(key: u64, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+pub fn scroll_root(key: u64, text_size: Pixels, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(("code-x", key))
         .w_full()
@@ -173,7 +180,7 @@ pub fn scroll_root(key: u64, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .py(px(BODY_PAD_Y))
         .overflow_x_scroll()
         .font_family(theme.mono_font_family.clone())
-        .text_size(theme.mono_font_size)
+        .text_size(text_size)
         .line_height(relative(1.6))
         .whitespace_nowrap()
 }
@@ -188,13 +195,15 @@ pub fn text_row(text: &str, fg: Hsla, bg: Option<Hsla>, row_h: Pixels) -> gpui::
     row.child(text.to_string())
 }
 
-/// A numbered line — the merge view's context rows.
+/// A numbered line — the merge view's context rows. `gutter_w` is the
+/// resolved gutter width ([`gutter_width`] at the caller, which owns the
+/// digit count and the text size).
 pub fn numbered_row(
     number: usize,
     text: &str,
     fg: Hsla,
     bg: Option<Hsla>,
-    digits: usize,
+    gutter_w: Pixels,
     row_h: Pixels,
     theme: &Theme,
 ) -> gpui::Div {
@@ -205,7 +214,7 @@ pub fn numbered_row(
         .text_color(fg)
         .child(
             div()
-                .w(gutter_width(digits, theme))
+                .w(gutter_w)
                 .flex_shrink_0()
                 .px_2()
                 .text_right()

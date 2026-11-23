@@ -5,21 +5,23 @@
 //! pinned in ai-elements' `code_view_selection` test.
 
 use gpui::{
-    AppContext as _, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, div, px,
+    AppContext as _, IntoElement, ParentElement as _, Pixels, Render, Styled as _, TestAppContext,
+    div, px,
 };
 use gpui_component::Root;
 use steer_components::markdown::{ChatDocument, message_document};
 
 struct Host {
     doc: ChatDocument,
+    body: Pixels,
 }
 
 impl Host {
     /// A host over one synced document.
-    fn synced(text: &str, cx: &mut gpui::Context<Self>) -> Self {
+    fn synced(text: &str, body: Pixels, cx: &mut gpui::Context<Self>) -> Self {
         let mut doc = ChatDocument::default();
         doc.sync(text, cx);
-        Self { doc }
+        Self { doc, body }
     }
 }
 
@@ -33,7 +35,7 @@ impl Render for Host {
         let state = self.doc.state().expect("synced").clone();
         div()
             .w(px(640.))
-            .child(message_document(&state, &theme, px(14.), cx))
+            .child(message_document(&state, &theme, self.body, cx))
     }
 }
 
@@ -44,6 +46,7 @@ async fn a_diff_fence_renders_the_split_face(cx: &mut TestAppContext) {
         let host = cx.new(|cx| {
             Host::synced(
                 "```diff\n@@ -1,2 +1,2 @@\n-let gone = 1;\n+let here = 2;\n```",
+                px(14.),
                 cx,
             )
         });
@@ -78,6 +81,7 @@ async fn the_diff_face_toggle_round_trips(cx: &mut TestAppContext) {
         let host = cx.new(|cx| {
             Host::synced(
                 "```diff\n@@ -1,2 +1,2 @@\n-let gone = 1;\n+let here = 2;\n```",
+                px(14.),
                 cx,
             )
         });
@@ -115,7 +119,7 @@ async fn a_streaming_diff_fence_opens_the_split_face_when_it_completes(cx: &mut 
     cx.update(gpui_component::init);
     // The language token lands first; the body streams in later — the shape
     // a live diff fence really mounts with.
-    let host = cx.update(|cx| cx.new(|cx| Host::synced("```diff\n", cx)));
+    let host = cx.update(|cx| cx.new(|cx| Host::synced("```diff\n", px(14.), cx)));
     let window = cx.add_window(|window, cx| Root::new(host.clone(), window, cx));
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     visual.run_until_parked();
@@ -164,6 +168,7 @@ async fn an_svg_fence_s_source_face_is_the_editor_panel(cx: &mut TestAppContext)
                     "```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" ",
                     "height=\"60\"><rect width=\"120\" height=\"60\" fill=\"#3b82f6\"/></svg>\n```"
                 ),
+                px(14.),
                 cx,
             )
         });
@@ -209,5 +214,49 @@ async fn an_svg_fence_s_source_face_is_the_editor_panel(cx: &mut TestAppContext)
          (flip right {:?}, copy left {:?})",
         flip.right(),
         copy.left()
+    );
+}
+
+/// The flat panel paints at the document's own body size — the transcript's
+/// code matches the prose it sits in — so the same fence paints taller in a
+/// larger-body document. Before, the panel read the theme's mono size and
+/// both documents painted it identically.
+#[gpui::test]
+async fn the_flat_panel_paints_at_the_document_body_size(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let fence = "```\nlet a = 1;\nlet b = 2;\nlet c = 3;\nlet d = 4;\n```";
+    let small = cx.add_window(|window, cx| {
+        let host = cx.new(|cx| Host::synced(fence, px(13.), cx));
+        Root::new(host, window, cx)
+    });
+    let large = cx.add_window(|window, cx| {
+        let host = cx.new(|cx| Host::synced(fence, px(14.), cx));
+        Root::new(host, window, cx)
+    });
+    let mut small_visual = gpui::VisualTestContext::from_window(small.into(), cx);
+    let mut large_visual = gpui::VisualTestContext::from_window(large.into(), cx);
+    small_visual.run_until_parked();
+    large_visual.run_until_parked();
+    small_visual.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    large_visual.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let small_height = small_visual
+        .debug_bounds("markdown-editor-code")
+        .expect("the fence renders as the editor panel")
+        .size
+        .height;
+    let large_height = large_visual
+        .debug_bounds("markdown-editor-code")
+        .expect("the fence renders as the editor panel")
+        .size
+        .height;
+    // Four code lines at relative(1.6): the 1px body-size step is 6.4px of
+    // panel height, far past rounding noise.
+    assert!(
+        large_height - small_height > px(4.),
+        "the panel must follow the document's body size ({small_height:?} vs {large_height:?})"
     );
 }
