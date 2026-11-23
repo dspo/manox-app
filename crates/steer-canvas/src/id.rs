@@ -338,6 +338,9 @@ mod tests {
                 index: u32::MAX
             })
         );
+    }
+
+    #[test]
     fn the_tool_sheet_ids_round_trip() {
         // Browser: the container keeps its colons; the index is the tail.
         let web = webview_sheet_id("external:pi:1234", 2);
