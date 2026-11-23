@@ -388,6 +388,10 @@ impl Drop for Connection {
 
 /// The reader: one line in, one dispatch out. It never awaits a consumer: the
 /// channels are unbounded, so a slow host cannot stall the harness's stdout.
+/// A framing failure is fatal for the connection: an overrun line means the
+/// stream is desynced, and a child left writing into a pipe nobody drains
+/// would never exit — hang up so the waiter settles every pending call with
+/// the stderr tail.
 async fn read_loop(connection: Arc<Connection>, mut stdout: BufReader<ChildStdout>) {
     let mut line = Vec::new();
     loop {
@@ -409,6 +413,7 @@ async fn read_loop(connection: Arc<Connection>, mut stdout: BufReader<ChildStdou
             }
             Err(error) => {
                 connection.push_stderr(format!("acp: stdout framing failed: {error}"));
+                connection.kill();
                 break;
             }
         }
