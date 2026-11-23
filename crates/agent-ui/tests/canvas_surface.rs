@@ -700,3 +700,55 @@ async fn a_restored_pi_sheet_reopens_its_session(cx: &mut TestAppContext) {
     );
     drop_layout(container);
 }
+
+/// The container-title projection: a session with no title yet answers its
+/// tab's localized placeholder, and the placeholder names a TAB, never the
+/// container — the row keeps its own catalogue title (the seed name / cwd
+/// tail). A session that has earned a title names the container again.
+#[gpui::test]
+async fn an_untitled_session_does_not_name_its_container(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let container = "title-cnt";
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store.clone(), container, cx);
+    });
+    draw(&mut visual);
+
+    let facts = workspace
+        .read_with(&visual.cx, |ws, cx| {
+            ws.diagnostic_canvas_row_facts(container, cx)
+        })
+        .expect("the container has a canvas");
+    assert!(facts.sheet_count >= 2, "the canvas reports its sheet count");
+    assert_eq!(
+        facts.title, None,
+        "an untitled session must not name its container"
+    );
+
+    let summary: ahp_types::state::SessionSummary = serde_json::from_value(serde_json::json!({
+        "resource": format!("ahp-session:/{container}"),
+        "provider": "test",
+        "title": "Steady container",
+        "status": 0,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "modifiedAt": "2026-01-01T00:00:00Z",
+    }))
+    .expect("the summary parses");
+    store.update(&mut visual.cx, |store, _| {
+        store.book.summaries.insert(container.to_string(), summary);
+    });
+    let facts = workspace
+        .read_with(&visual.cx, |ws, cx| {
+            ws.diagnostic_canvas_row_facts(container, cx)
+        })
+        .expect("the container has a canvas");
+    assert_eq!(
+        facts.title.as_deref(),
+        Some("Steady container"),
+        "a titled session names the container again"
+    );
+    drop_layout(container);
+}

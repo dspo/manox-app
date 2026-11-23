@@ -3599,6 +3599,18 @@ impl Workspace {
         self._canvas_events = None;
     }
 
+    /// The container's canvas row facts (sheet count + the container-title
+    /// projection), as the sidebar consumes them through the chrome assembly.
+    /// Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_row_facts(
+        &self,
+        container_id: &str,
+        cx: &App,
+    ) -> Option<crate::sidebar_projection::CanvasRowFacts> {
+        self.canvas_row_facts(container_id, cx)
+    }
+
     /// The multiplexer's shared AHP store, for tests that plant fold state
     /// (the archive confirm gate's live dependents). Test-support read face.
     #[cfg(feature = "test-support")]

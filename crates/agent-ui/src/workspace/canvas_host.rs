@@ -75,9 +75,15 @@ impl CanvasHost {
     /// A container's title projection (the earliest surviving sheet whose kind
     /// names the container). `None` when nothing names it — the caller falls
     /// back to the session title / cwd tail.
+    ///
+    /// A kind with no title yet answers its tab's localized placeholder; the
+    /// placeholder names a tab, never a container, so the projection skips it
+    /// and keeps walking. The tab itself still shows the placeholder — this
+    /// filter lives on the container projection only.
     pub fn container_title(&self, container_id: &str, cx: &App) -> Option<String> {
         self.state.container_title(container_id, |sheet| {
-            self.registry.container_title_of(sheet, cx)
+            let title = self.registry.container_title_of(sheet, cx)?;
+            (title != crate::i18n::t("canvas-tab-new-chat")).then_some(title)
         })
     }
 
@@ -284,5 +290,46 @@ mod tests {
         // The scratch canvas has nothing to write.
         host.show_scratch();
         assert_eq!(host.pending_save(), None);
+    }
+
+    /// The container-title projection skips a kind's untitled placeholder:
+    /// the localized placeholder names a tab, never a container, so the
+    /// projection answers None (the row keeps its catalogue title) while the
+    /// registry's own title face — the tab's — still shows it. A real title
+    /// names the container again.
+    #[gpui::test]
+    fn an_untitled_session_names_no_container(cx: &mut gpui::TestAppContext) {
+        use steer_canvas::SheetKindSpec;
+
+        let untitled = SheetKindSpec {
+            kind: "session",
+            title: std::sync::Arc::new(|_, _| crate::i18n::t("canvas-tab-new-chat")),
+            tab_title: None,
+            glyph: "chat",
+            closable: true,
+            names_container: true,
+            restore: None,
+            parse: None,
+            body: None,
+        };
+        let titled = SheetKindSpec {
+            title: std::sync::Arc::new(|_, _| gpui::SharedString::from("Steady")),
+            ..untitled.clone()
+        };
+        let mut host = CanvasHost::new(SheetRegistry::new().with(untitled));
+        host.switch_container("c1", None, |_| true);
+        host.open_sheet("session:s1", None);
+        cx.update(|cx| {
+            assert_eq!(host.container_title("c1", cx), None);
+            assert_eq!(
+                host.registry().title("session:s1", cx).as_deref(),
+                Some(crate::i18n::t("canvas-tab-new-chat").as_ref())
+            );
+        });
+
+        let mut host = CanvasHost::new(SheetRegistry::new().with(titled));
+        host.switch_container("c1", None, |_| true);
+        host.open_sheet("session:s1", None);
+        cx.update(|cx| assert_eq!(host.container_title("c1", cx).as_deref(), Some("Steady")));
     }
 }
