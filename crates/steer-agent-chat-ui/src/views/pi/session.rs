@@ -26,8 +26,8 @@ use steer_acp::RequestId;
 use crate::i18n::{t, t_str};
 use crate::pi::store::fallback_title;
 use crate::pi::{
-    AcpStore, Entry, PendingRequest, PiBannerEntry, PiCommand, PiSessionState, PiTodo,
-    PiTodoStatus, ToolEntry, ToolStatus, transcript::DiffBlock,
+    AcpStore, Entry, PendingRequest, PiBannerEntry, PiCommand, PiRestoredAsk, PiSessionState,
+    PiTodo, PiTodoStatus, ToolEntry, ToolStatus, transcript::DiffBlock,
 };
 
 /// How many slash rows the composer lists before it stops (the list sits
@@ -772,7 +772,7 @@ impl PiSessionView {
         cx: &mut Context<Self>,
         theme: &gpui_component::Theme,
     ) -> Vec<AnyElement> {
-        let (permissions, elicitations, asks) = {
+        let (permissions, elicitations, asks, restored) = {
             let store = self.store.read(cx);
             let Some(session) = store.book().view(&self.session_id) else {
                 return Vec::new();
@@ -781,6 +781,7 @@ impl PiSessionView {
                 session.pending_permissions.clone(),
                 session.pending_elicitations.clone(),
                 session.pending_asks.clone(),
+                session.restored_asks.clone(),
             )
         };
         let mut cards = Vec::new();
@@ -792,6 +793,9 @@ impl PiSessionView {
         }
         for request in asks {
             cards.push(self.ask_card(&request, cx));
+        }
+        for ask in restored {
+            cards.push(self.restored_ask_card(&ask, cx));
         }
         cards
     }
@@ -966,6 +970,41 @@ impl PiSessionView {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        self.build_ask(
+            tool_call_id.clone(),
+            questions,
+            AskTarget::Request(request.id.clone()),
+            cx,
+        )
+    }
+
+    /// A question card that outlived its turn (`_zu/ask/pending`): answered
+    /// through the mailbox, which either resolves the live wait or injects the
+    /// answer as a late turn.
+    fn restored_ask_card(&mut self, ask: &PiRestoredAsk, cx: &mut Context<Self>) -> AnyElement {
+        let questions = ask
+            .params
+            .get("questions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        self.build_ask(
+            ask.tool_call_id.clone(),
+            questions,
+            AskTarget::Mailbox(ask.tool_call_id.clone()),
+            cx,
+        )
+    }
+
+    /// One ask card, whatever its answer route: the live wire request or the
+    /// mailbox entry that survived a restart.
+    fn build_ask(
+        &mut self,
+        tool_call_id: String,
+        questions: Vec<Value>,
+        target: AskTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let multi = questions
             .iter()
             .map(|question| {
@@ -1013,14 +1052,13 @@ impl PiSessionView {
             blocks.push(block);
         }
 
-        let id = request.id.clone();
         let submit_store = self.store.clone();
         let close_store = self.store.clone();
-        let session_id = self.session_id.clone();
+        let submit_session = self.session_id.clone();
         let close_session = self.session_id.clone();
         let submit_state = state.clone();
         let submit_questions = questions;
-        let close_id = id.clone();
+        let submit_target = target.clone();
 
         AskUserQuestion::new(tool_call_id, &state)
             .name(t("pi-ask-title"))
@@ -1028,18 +1066,34 @@ impl PiSessionView {
             .on_submit(move |_, cx| {
                 let answers = submit_state.read(cx).answers(cx);
                 let response = ask_response(&submit_questions, &answers);
-                submit_store.update(cx, |store, cx| {
-                    let _ = store.answer(&session_id, &id, response, cx);
+                submit_store.update(cx, |store, cx| match &submit_target {
+                    AskTarget::Request(id) => {
+                        let _ = store.answer(&submit_session, id, response, cx);
+                    }
+                    AskTarget::Mailbox(tool_call_id) => store.answer_restored_ask(
+                        &submit_session,
+                        tool_call_id.clone(),
+                        response,
+                        cx,
+                    ),
                 });
             })
             .on_close(move |_, cx| {
-                close_store.update(cx, |store, cx| {
-                    let _ = store.answer(
+                close_store.update(cx, |store, cx| match &target {
+                    AskTarget::Request(id) => {
+                        let _ = store.answer(
+                            &close_session,
+                            id,
+                            serde_json::json!({ "action": "cancel" }),
+                            cx,
+                        );
+                    }
+                    AskTarget::Mailbox(tool_call_id) => store.answer_restored_ask(
                         &close_session,
-                        &close_id,
+                        tool_call_id.clone(),
                         serde_json::json!({ "action": "cancel" }),
                         cx,
-                    );
+                    ),
                 });
             })
             .into_any_element()
@@ -1292,6 +1346,15 @@ fn ask_response(questions: &[Value], answers: &[(Vec<usize>, String)]) -> Value 
         }
     }
     serde_json::json!({ "action": "accept", "answers": envelope })
+}
+
+/// Where an ask card's answer goes.
+#[derive(Clone)]
+enum AskTarget {
+    /// A live `_zu/ask/create` request: the answer is its JSON-RPC response.
+    Request(RequestId),
+    /// A card the mailbox kept alive: the answer is `_zu/ask/answer`.
+    Mailbox(String),
 }
 
 fn request_key(id: &RequestId) -> String {

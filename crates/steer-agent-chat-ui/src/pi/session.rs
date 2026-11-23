@@ -249,6 +249,17 @@ pub struct PiSubagentMessage {
     pub text: String,
 }
 
+/// A question card that outlived its turn (`_zu/ask/pending`). It has no
+/// JSON-RPC request id — it is answered by tool call id through
+/// `_zu/ask/answer`, which the harness either resolves (a live wait) or
+/// injects as a late answer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PiRestoredAsk {
+    pub tool_call_id: String,
+    /// The ask tool's arguments (`{questions: [...]}`).
+    pub params: Value,
+}
+
 /// One pi session, as the host sees it.
 #[derive(Clone, Debug)]
 pub struct PiSessionView {
@@ -292,6 +303,8 @@ pub struct PiSessionView {
     pub expanded_subagent: Option<String>,
     /// Fetched subagent transcripts, keyed by run id.
     pub subagent_transcripts: HashMap<String, Vec<PiSubagentMessage>>,
+    /// Question cards that survived a restart or a turn end (B2's mailbox).
+    pub restored_asks: Vec<PiRestoredAsk>,
 }
 
 impl PiSessionView {
@@ -322,6 +335,7 @@ impl PiSessionView {
             subagents: Vec::new(),
             expanded_subagent: None,
             subagent_transcripts: HashMap::new(),
+            restored_asks: Vec::new(),
         }
     }
 
@@ -542,6 +556,15 @@ impl PiSessionView {
     ) -> bool {
         self.subagent_transcripts
             .insert(run_id.to_owned(), messages);
+        true
+    }
+
+    /// Folds a `_zu/ask/pending` answer: the cards a restart kept alive.
+    pub fn set_restored_asks(&mut self, asks: Vec<PiRestoredAsk>) -> bool {
+        if self.restored_asks == asks {
+            return false;
+        }
+        self.restored_asks = asks;
         true
     }
 
@@ -827,6 +850,24 @@ pub fn parse_subagent_transcript(value: &Value) -> Vec<PiSubagentMessage> {
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parses a `_zu/ask/pending` answer (`{asks: [{toolCallId, args}]}`).
+pub fn parse_restored_asks(value: &Value) -> Vec<PiRestoredAsk> {
+    value
+        .get("asks")
+        .and_then(Value::as_array)
+        .map(|asks| {
+            asks.iter()
+                .filter_map(|ask| {
+                    Some(PiRestoredAsk {
+                        tool_call_id: ask.get("toolCallId").and_then(Value::as_str)?.to_owned(),
+                        params: ask.get("args").cloned().unwrap_or(Value::Null),
                     })
                 })
                 .collect()

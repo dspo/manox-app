@@ -5,9 +5,9 @@
 # decides from the prompt text, so every lifecycle branch is reachable without
 # a model: `wait` settles on session/cancel, `permission` asks the host first,
 # `ask` sends a `_zu/ask/create` card, `crash` exits mid-turn, `missing` is the
-# unknown-session id. The panel methods (`_zu/todos/*`, `_zu/subagents/*`) answer
-# with fixed fixture data. stdout carries protocol only; everything the script
-# itself has to say goes to stderr.
+# unknown-session id. The panel methods (`_zu/todos/*`, `_zu/subagents/*`,
+# `_zu/ask/pending|answer`) answer with fixed fixture data. stdout carries
+# protocol only; everything the script itself has to say goes to stderr.
 #
 # Bash 3.2 safe (macOS): integer read timeouts, no associative arrays.
 
@@ -163,6 +163,12 @@ dispatch() {
       ;;
     _zu/subagents/transcript)
       respond "$id" '{"run":{"runId":"r-1","agent":"Explore","task":"look around","status":"running","startedAt":1},"messages":[{"role":"assistant","text":"looking"}]}'
+      ;;
+    _zu/ask/pending)
+      respond "$id" '{"asks":[{"toolCallId":"ask-restored","args":{"questions":[{"question":"Which db?","options":[{"label":"sqlite"},{"label":"pg"}]}]}}]}'
+      ;;
+    _zu/ask/answer)
+      respond "$id" '{"delivered":"late"}'
       ;;
     *)
       respond_error "$id" -32601 "unknown method" method_not_found
