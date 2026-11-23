@@ -46,6 +46,12 @@ impl SessionProxy {
     /// Runs one turn and settles with the stop reason (`end_turn`,
     /// `cancelled`, …). Streamed updates arrive on the process's update
     /// channel while this call is pending.
+    ///
+    /// No timeout by design: a turn may legitimately run for many minutes.
+    /// It ends when the agent stops, the host calls
+    /// [`SessionProxy::cancel`], or the process dies (every pending call
+    /// then fails with the harness's stderr tail). Callers that want a
+    /// wall-clock bound wrap the future in their own timeout.
     pub async fn prompt(&self, text: &str) -> Result<String, AcpError> {
         let result = self
             .connection
@@ -75,7 +81,8 @@ impl SessionProxy {
     }
 
     /// `session/set_config_option` (model, thought level): the fresh selector
-    /// list.
+    /// list. Unbounded, like [`SessionProxy::prompt`] — wrap the future in a
+    /// timeout when the caller needs a bound.
     pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<Value, AcpError> {
         let result = self
             .connection
@@ -92,7 +99,9 @@ impl SessionProxy {
         Ok(result.get("configOptions").cloned().unwrap_or(Value::Null))
     }
 
-    /// `session/set_mode` (the approval policy).
+    /// `session/set_mode` (the approval policy). Unbounded, like
+    /// [`SessionProxy::prompt`] — wrap the future in a timeout when the
+    /// caller needs a bound.
     pub async fn set_mode(&self, mode_id: &str) -> Result<(), AcpError> {
         self.connection
             .request(
@@ -106,12 +115,14 @@ impl SessionProxy {
 
     /// A pi extension request (`_zu/subagents/dispatch`, `_zu/todos/write`,
     /// …). `params` must carry `sessionId` when the method is session-scoped;
-    /// [`SessionProxy::request_scoped`] adds it.
+    /// [`SessionProxy::request_scoped`] adds it. Unbounded, like
+    /// [`SessionProxy::prompt`].
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
         self.connection.request(method, params, None).await
     }
 
     /// The same call with this session's id merged into the params.
+    /// Unbounded, like [`SessionProxy::prompt`].
     pub async fn request_scoped(&self, method: &str, mut params: Value) -> Result<Value, AcpError> {
         if let Some(object) = params.as_object_mut() {
             object.insert(
@@ -123,7 +134,9 @@ impl SessionProxy {
     }
 
     /// `session/close`: free the session, keep the process. A failure is the
-    /// caller's to log; the process stays usable either way.
+    /// caller's to log; the process stays usable either way. Unbounded, like
+    /// [`SessionProxy::prompt`] — wrap the future in a timeout when the
+    /// caller needs a bound.
     pub async fn close(&self) -> Result<(), AcpError> {
         self.connection
             .request(

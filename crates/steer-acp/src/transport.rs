@@ -145,6 +145,14 @@ impl Connection {
     }
 
     /// Sends one message and waits for its answer.
+    ///
+    /// `timeout = None` leaves the call unbounded by design: the harness side
+    /// decides when it ends (`session/prompt` may legitimately run for many
+    /// minutes), the host can cut a turn short via `session/cancel`, and a
+    /// dead process settles every pending call with the stderr tail. Callers
+    /// that want a wall-clock bound wrap the future in their own timeout;
+    /// only the start calls (`initialize`, the session binds) carry a budget
+    /// here.
     pub(crate) async fn request(
         &self,
         method: &str,
