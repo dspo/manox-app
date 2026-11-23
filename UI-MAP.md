@@ -272,6 +272,28 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 ---
 
+## 2.9 画布（ViewMode::Canvas，plan β）
+
+容器的画布：一张布局树（`steer-canvas`），叶子是 sheet。`agent_ui::workspace::canvas_view::CanvasView`
+是它的渲染面，`canvas_host::CanvasHost` 是唯一写入路径（ticket + `set_layout`）。当前入口是
+`Workspace::open_canvas()`（容器视图的默认化待剩余 kind 落地后开启）。
+
+```
+┌ CanvasView ─────────────────────────────────┐
+│ [GroupFrame 0] tab strip：tab × / ＋        │
+│  ├ 显示中的 sheet body（会话列 / 起始页）   │
+│ [GroupFrame 1] …（双击 tab = 向右分屏）      │
+└─────────────────────────────────────────────┘
+```
+
+- 几何来自 `steer_canvas::projection`（`tab_bar_boxes` / `group_frames`），渲染只摆放；
+- 每个 group 一条 tab strip（`canvas-strip-*` 调试选择器）+ 每 tab 的关闭键（`canvas-tab-close-*`）；
+- 单击 = 激活（走 host 的单写者），双击 = 在右侧新建一组并打开容器的起始页，`＋` = 打开起始页；
+- 关掉最后一个 sheet 由 host 返回 `AutoArchive`，画布交给 `Workspace::canvas_auto_archive`（不跨实体写）；
+- 布局变更走 400ms 防抖保存泵（`SAVE_DEBOUNCE`，generation 去重）。
+
+尚未落地：terminal sheet（PTY 记账户）、侧栏容器行、scratch 铸容器、出图场景。
+
 ## 3. 会话列布局
 
 会话列是壳主区卡的内部内容，四周的 gutter / 侧栏槽 / 卡壳 / 内嵌标题栏全部由壳负责。
