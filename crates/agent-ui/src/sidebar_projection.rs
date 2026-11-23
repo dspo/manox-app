@@ -107,7 +107,7 @@ impl MemberKind {
 impl ContainerRow {
     /// Whether the row is a container's LEVEL-1 child: a `subagent`
     /// memberKind, or a parent edge that arrived without a recognized
-    /// annotation (the plan's fold rule keys on the parent too). Children
+    /// annotation — the parent edge is a fold key on its own. Children
     /// never render as top-level sidebar rows — the catalogue folds them
     /// out (`SessionMultiplexer::container_rows`); they stay in the book for
     /// the roster surface and whole-tree unarchive.
@@ -234,8 +234,8 @@ pub fn derive_status(item: &ContainerRow) -> SessionStatus {
 /// Project a partition's rows into the chrome group shape with the container
 /// tree materialized: captains in list order, each followed by its child
 /// rows ([`ContainerRow::is_child`] rows pointing at the captain — the wire
-/// tree is never deeper than the plan's two levels, so no recursion is
-/// needed). The catalogue feed never carries children (they fold out in
+/// tree is never deeper than two levels, captain then children, so no
+/// recursion is needed). The catalogue feed never carries children (they fold out in
 /// `container_rows`), so the sidebar walk is a pass-through today; the
 /// roster feed joins children later through this same shape. Children no
 /// longer indent — the captain's chevron is the only nesting marker, and
@@ -493,7 +493,7 @@ mod tests {
         assert!(!r.is_child(), "an unannotated row renders top-level");
 
         // A parent edge without a recognized memberKind still folds: the
-        // tree edge is the plan's fold fact, not just the annotation.
+        // tree edge alone is the fold fact, not just the annotation.
         let parent_only = summary(serde_json::json!({
             "x-manox": { "parentSessionId": "cap-1" },
         }));
