@@ -54,8 +54,11 @@ objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
 
-# The About window's OS row reads the chip's marketing name via
-# sysctlbyname("machdep.cpu.brand_string") — one syscall, no subprocess.
+# Unix-only process seams: the single-instance lock's flock (src/instance.rs
+# is `#[cfg(unix)]`) must build on Linux too, and the About window's OS row
+# reads the chip via sysctlbyname — a macOS-only call site under a unix-wide
+# dependency.
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
