@@ -212,6 +212,8 @@ steering-verb = is steering
 # "Explore(fix the login redirect)"); the type comes from the host verbatim.
 subagent-steering-prefix = { $name } is steering
 turn-process-completed = Completed in
+turn-process-cancelled = Cancelled after
+turn-process-failed = Failed after
 captain-activity-thinking = Thinking
 captain-activity-replying = Replying
 

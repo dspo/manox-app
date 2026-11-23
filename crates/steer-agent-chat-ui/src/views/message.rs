@@ -890,9 +890,10 @@ pub fn render_item(
         }
         ConvItem::TurnProcess {
             secs,
+            outcome,
             collapsed,
             user_toggled: _,
-        } => render_turn_process(*secs, *collapsed, ix, theme, tool_ctx, cx),
+        } => render_turn_process(*secs, *outcome, *collapsed, ix, theme, tool_ctx, cx),
         ConvItem::ToolCall(t) => {
             if t.name == manox_agent::tools::ASK_USER_QUESTION {
                 render_ask_user_card(t, ix, theme, tool_ctx, copy, cx)
@@ -1839,9 +1840,12 @@ fn render_activity_entry(
 /// The whole-turn process head (dsh's TurnProcess row): one tertiary line
 /// above the turn's first segment once the turn settled —「已完成，用时
 /// 2分5秒」— whose fold hides the turn's segments (render-layer overlay, the
-/// reply exempt). Live/failed turns never carry one.
+/// reply exempt). The label reads the turn's outcome: a cancelled/failed
+/// turn is named as such (the duration still shows — how long the turn ran
+/// before it died is information).
 fn render_turn_process(
     secs: Option<i64>,
+    outcome: ahp_types::state::TurnState,
     collapsed: bool,
     ix: usize,
     theme: &Theme,
@@ -1849,14 +1853,14 @@ fn render_turn_process(
     _cx: &mut App,
 ) -> gpui::AnyElement {
     let muted = theme.muted_foreground;
+    let (key, color) = match outcome {
+        ahp_types::state::TurnState::Complete => ("turn-process-completed", muted.opacity(0.9)),
+        ahp_types::state::TurnState::Cancelled => ("turn-process-cancelled", muted.opacity(0.9)),
+        ahp_types::state::TurnState::Error => ("turn-process-failed", theme.danger),
+    };
     let label: SharedString = match secs {
-        Some(n) => format!(
-            "{}{}",
-            i18n::t("turn-process-completed"),
-            i18n::t_duration(n)
-        )
-        .into(),
-        None => i18n::t("turn-process-completed"),
+        Some(n) => format!("{}{}", i18n::t(key), i18n::t_duration(n)).into(),
+        None => i18n::t(key),
     };
     let mut row = h_flex()
         .id(("turn-process", ix))
@@ -1867,7 +1871,7 @@ fn render_turn_process(
         .items_center()
         .gap_1()
         .text_sm()
-        .text_color(muted.opacity(0.9))
+        .text_color(color)
         .child(gpui::div().min_w_0().truncate().child(label));
     if let Some(tool_ctx) = tool_ctx {
         let host = tool_ctx.host.clone();
