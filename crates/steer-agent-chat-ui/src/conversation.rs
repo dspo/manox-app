@@ -588,7 +588,15 @@ impl ConversationState {
                         ItemKey::User(turn) => env.entering_turns.contains(turn),
                         _ => false,
                     };
-                    let item = new_node_item(node.kind.clone(), &node.role, id, env, entering, cx);
+                    let item = new_node_item(
+                        node.kind.clone(),
+                        &node.role,
+                        id,
+                        node.key.clone(),
+                        env,
+                        entering,
+                        cx,
+                    );
                     self.items.push(item);
                     self.keys.push(node.key.clone());
                 }
@@ -718,6 +726,16 @@ impl ConversationState {
         self.items
             .iter()
             .position(|item| matches!(item.read(cx).kind(), ConvItem::ToolCall(t) if t.id == id))
+    }
+
+    /// Locate the row whose stable projection key is `key`. Keys are unique
+    /// across the list (reconcile reuses an entity only for an identical
+    /// key), so the first hit is the only one — click faces that captured a
+    /// row's key at render time re-resolve it here, because the serial they
+    /// also captured is not a position (a mid-list insert shifts rows
+    /// without renumbering serials).
+    pub fn find_item_by_key(&self, key: &ItemKey) -> Option<usize> {
+        self.keys.iter().position(|k| k == key)
     }
 
     /// Locate a `Thinking` container's entry — a reasoning round or a tool
@@ -868,6 +886,7 @@ fn new_node_item(
     kind: ConvItem,
     role: &str,
     id: usize,
+    key: crate::transcript::ItemKey,
     env: &ProjectEnv,
     entering: bool,
     cx: &mut App,
@@ -886,7 +905,7 @@ fn new_node_item(
             ConvItem::Assistant { text, .. } => Some(text.clone()),
             _ => None,
         };
-        let mut item = MessageItem::new(kind, own_role, id, env.host.clone());
+        let mut item = MessageItem::new(kind, own_role, id, key, env.host.clone());
         if entering {
             // Optimistic bubbles, plus the fold rows the sync's receipts
             // name (`entering_turns`) — a steer's landing rides the entrance
@@ -2131,6 +2150,116 @@ mod tests {
         // index (the head inserted above it).
         assert!(!streaming, "settled");
         assert!(collapsed, "the derived fold is immediate — no 1s timer");
+    }
+
+    /// The settled-turn trap: the projection inserts the whole-turn process
+    /// head ABOVE the turn's first segment, shifting the segment's list
+    /// position while its construction serial stays put. A click addressed
+    /// by the serial — the render closures' old arithmetic — lands on the
+    /// head; the keyed body must land on the segment. Both faces asserted
+    /// against one reconcile.
+    #[gpui::test]
+    fn settled_head_insert_keeps_keyed_toggles_on_target(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        // A live turn: user row, segment, streaming answer — serials equal
+        // positions while the list is append-only.
+        let mut chat = empty_chat();
+        fold(&mut chat, &start("t-1", "read it"));
+        fold(&mut chat, &open_rs("t-1", "p-r1"));
+        fold(&mut chat, &reasoning_delta("t-1", "p-r1", "thinking"));
+        fold(&mut chat, &open_md("t-1", "p-1"));
+        fold(&mut chat, &delta("t-1", "p-1", "working"));
+        let conversation = cx.update(|cx| projected(cx, &chat));
+        let seg_key = cx.read(|cx| {
+            let c = conversation.read(cx);
+            c.keys()
+                .iter()
+                .find(|k| matches!(k, ItemKey::Segment(_)))
+                .expect("the live segment is on screen")
+                .clone()
+        });
+        let seg_serial = cx.read(|cx| {
+            let c = conversation.read(cx);
+            let pos = c.find_item_by_key(&seg_key).expect("the segment is keyed");
+            let id = c.items()[pos].read(cx).diagnostic_id();
+            assert_eq!(
+                pos, id,
+                "live: the serial IS the position — the trap's origin"
+            );
+            id
+        });
+
+        // The turn settles: the head inserts above the segment. The segment's
+        // position moves, its serial does not — serial arithmetic now names
+        // the head.
+        fold(&mut chat, &complete("t-1", 12_345));
+        cx.update(|cx| resync(&conversation, &chat, cx));
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            assert_eq!(
+                c.keys(),
+                &[
+                    ItemKey::User("t-1".into()),
+                    ItemKey::TurnProcess("t-1".into()),
+                    ItemKey::Segment("rs:p-r1".into()),
+                    ItemKey::Answer("p-1".into()),
+                ],
+                "the head sits above the segment it folded"
+            );
+            let pos = c.find_item_by_key(&seg_key).expect("the segment survives");
+            assert_eq!(pos, 2, "the segment moved down");
+            assert_ne!(seg_serial, pos, "serial and position have parted ways");
+            assert!(
+                matches!(
+                    c.items().get(seg_serial).map(|item| item.read(cx).kind()),
+                    Some(ConvItem::TurnProcess { .. })
+                ),
+                "serial arithmetic names the head — the old clicks' silent miss"
+            );
+        });
+
+        // The keyed body flips the TARGET segment; the head the serial
+        // pointed at stays untouched. The settle derived-folded the segment
+        // (true), so the user flip lands reading "open" — proof the click
+        // reached the segment and not the head beside it.
+        let flipped = conversation.update(&mut *cx, |c, cx| {
+            crate::views::message::toggle_row_fold(c, &seg_key, cx)
+        });
+        assert!(flipped, "the keyed body reaches the segment");
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            let pos = c
+                .find_item_by_key(&seg_key)
+                .expect("the segment still keyed");
+            let ConvItem::Thinking(t) = c.items()[pos].read(cx).kind() else {
+                panic!("the keyed row is the segment");
+            };
+            assert!(
+                !t.collapsed && t.user_toggled,
+                "the segment's fold flipped as a user toggle"
+            );
+            assert!(
+                matches!(
+                    c.items().get(seg_serial).map(|item| item.read(cx).kind()),
+                    Some(ConvItem::TurnProcess {
+                        collapsed: false,
+                        ..
+                    })
+                ),
+                "the head the serial pointed at stayed open"
+            );
+        });
+
+        // A stranger kind (or an absent key) is the same no-op a missing row
+        // always was.
+        let stranger = conversation.update(&mut *cx, |c, cx| {
+            crate::views::message::toggle_row_fold(c, &ItemKey::Answer("p-1".into()), cx)
+        });
+        assert!(!stranger, "a stranger kind does not flip");
+        let ghost = conversation.update(&mut *cx, |c, cx| {
+            crate::views::message::toggle_row_fold(c, &ItemKey::Segment("ghost".into()), cx)
+        });
+        assert!(!ghost, "an absent key does not flip");
     }
 
     #[gpui::test]

@@ -20,8 +20,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::conversation::{
-    ActivityEntry, AgentTaskItem, ConvItem, ThinkingContainer, ToolCallItem, UserImage,
-    UserTurnMeta,
+    ActivityEntry, AgentTaskItem, ConvItem, ConversationState, ThinkingContainer, ToolCallItem,
+    UserImage, UserTurnMeta,
 };
 use crate::i18n;
 use crate::views::activity_chain::{ActivityChain, ActivityChainHeader, ActivityStep};
@@ -242,6 +242,13 @@ pub struct MessageItem {
     /// segments would stack the same name over and over).
     pub(crate) model_repeats: bool,
     id: usize,
+    /// The row's stable projection key, assigned once at construction and
+    /// never mutated — reconcile reuses an entity only for an identical key,
+    /// so the assignment is terminal. Click faces captured at render time
+    /// re-resolve the row by it: the serial (`id`) is an element key, not a
+    /// position, and a mid-list insert shifts positions without renumbering
+    /// serials.
+    key: crate::transcript::ItemKey,
     /// Weak handle to the owning `Workspace`, used by interactive message
     /// rows such as `AgentTask` to open their peer right-pane view.
     host: ChatHostHandle,
@@ -310,12 +317,19 @@ impl CopyFeedbackHost for MessageItem {
 }
 
 impl MessageItem {
-    pub fn new(kind: ConvItem, role: String, id: usize, host: ChatHostHandle) -> Self {
+    pub fn new(
+        kind: ConvItem,
+        role: String,
+        id: usize,
+        key: crate::transcript::ItemKey,
+        host: ChatHostHandle,
+    ) -> Self {
         Self {
             kind,
             model: crate::model_tag::ModelTag::resolve(&role),
             model_repeats: false,
             id,
+            key,
             host,
             markdown: None,
             preview: None,
@@ -764,6 +778,7 @@ impl Render for MessageItem {
         let element = centered(render_item(
             &self.kind,
             self.id,
+            self.key.clone(),
             &self.model,
             self.model_repeats,
             &theme,
@@ -815,11 +830,15 @@ impl Render for MessageItem {
     }
 }
 
-/// Render a `ConvItem` as an element. `ix` is the entry index (stable key for
-/// collapsibles and text-block element ids). `agent_ctx` supplies expansion
-/// state for `AgentTask` cards; `tool_ctx` carries the workspace host handle
-/// for `ToolCall` cards to flip their own collapse flag. `None` renders them
-/// in a static state with no-op clicks (used when the owning Workspace is gone).
+/// Render a `ConvItem` as an element. `ix` is the row's construction serial —
+/// an element-id namespace only (collapsibles, text-block ids, debug
+/// selectors), never a position. `key` is the row's stable projection key,
+/// what the interactive fold faces re-resolve their clicks by (a mid-list
+/// insert shifts positions while serials stay put). `agent_ctx` supplies
+/// expansion state for `AgentTask` cards; `tool_ctx` carries the workspace
+/// host handle for `ToolCall` cards to flip their own collapse flag. `None`
+/// renders them in a static state with no-op clicks (used when the owning
+/// Workspace is gone).
 ///
 /// `body` is the owned `ChatDocument` for a top-level text body
 /// (Assistant / Reasoning); `notice_panel` is the owned paginated
@@ -834,6 +853,7 @@ impl Render for MessageItem {
 pub fn render_item(
     item: &ConvItem,
     ix: usize,
+    key: crate::transcript::ItemKey,
     model: &crate::model_tag::ModelTag,
     model_repeats: bool,
     theme: &Theme,
@@ -886,14 +906,14 @@ pub fn render_item(
             cx,
         ),
         ConvItem::Thinking(t) => {
-            render_thinking(t, ix, model, model_repeats, theme, tool_ctx, copy, cx)
+            render_thinking(t, ix, key, model, model_repeats, theme, tool_ctx, copy, cx)
         }
         ConvItem::TurnProcess {
             secs,
             outcome,
             collapsed,
             user_toggled: _,
-        } => render_turn_process(*secs, *outcome, *collapsed, ix, theme, tool_ctx, cx),
+        } => render_turn_process(*secs, *outcome, *collapsed, ix, key, theme, tool_ctx, cx),
         ConvItem::ToolCall(t) => {
             if t.name == manox_agent::tools::ASK_USER_QUESTION {
                 render_ask_user_card(t, ix, theme, tool_ctx, copy, cx)
@@ -1643,6 +1663,7 @@ fn segment_layout(t: &ThinkingContainer) -> SegmentLayout {
 pub fn render_thinking(
     t: &ThinkingContainer,
     ix: usize,
+    key: crate::transcript::ItemKey,
     model: &crate::model_tag::ModelTag,
     model_repeats: bool,
     theme: &Theme,
@@ -1763,26 +1784,7 @@ pub fn render_thinking(
     chain = chain.header(header);
 
     if interactive {
-        chain = chain.on_toggle(move |_, _window, cx: &mut App| {
-            let Some(host) = host.clone() else {
-                return;
-            };
-            let Some(conv) = host.conversation(cx) else {
-                return;
-            };
-            conv.update(cx, |c, cx| {
-                if let Some(item) = c.items().get(ix) {
-                    item.update(cx, |item, cx| {
-                        if let ConvItem::Thinking(t) = item.kind_mut() {
-                            t.collapsed = !t.collapsed;
-                            t.user_toggled = true;
-                        }
-                        cx.notify();
-                    });
-                }
-                cx.notify();
-            });
-        });
+        chain = chain.on_toggle(keyed_fold_toggle(host, key));
     }
 
     v_flex()
@@ -1843,24 +1845,30 @@ fn render_activity_entry(
 /// reply exempt). The label reads the turn's outcome: a cancelled/failed
 /// turn is named as such (the duration still shows — how long the turn ran
 /// before it died is information).
+// One render input per slot (the leaf-dispatch convention `render_item`
+// documents — a config struct would only rename the same values).
+#[allow(clippy::too_many_arguments)]
 fn render_turn_process(
     secs: Option<i64>,
     outcome: ahp_types::state::TurnState,
     collapsed: bool,
     ix: usize,
+    key: crate::transcript::ItemKey,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
     _cx: &mut App,
 ) -> gpui::AnyElement {
     let muted = theme.muted_foreground;
-    let (key, color) = match outcome {
+    // `label_key` — not `key`: the ItemKey parameter is the toggle address
+    // and must not be shadowed by the i18n label id.
+    let (label_key, color) = match outcome {
         ahp_types::state::TurnState::Complete => ("turn-process-completed", muted.opacity(0.9)),
         ahp_types::state::TurnState::Cancelled => ("turn-process-cancelled", muted.opacity(0.9)),
         ahp_types::state::TurnState::Error => ("turn-process-failed", theme.danger),
     };
     let label: SharedString = match secs {
-        Some(n) => format!("{}{}", i18n::t(key), i18n::t_duration(n)).into(),
-        None => i18n::t(key),
+        Some(n) => format!("{}{}", i18n::t(label_key), i18n::t_duration(n)).into(),
+        None => i18n::t(label_key),
     };
     let mut row = h_flex()
         .id(("turn-process", ix))
@@ -1887,28 +1895,7 @@ fn render_turn_process(
                 .xsmall()
                 .text_color(muted),
             )
-            .on_click(move |_, _window, cx: &mut App| {
-                let Some(conv) = host.conversation(cx) else {
-                    return;
-                };
-                conv.update(cx, |c, cx| {
-                    if let Some(item) = c.items().get(ix) {
-                        item.update(cx, |item, cx| {
-                            if let ConvItem::TurnProcess {
-                                collapsed,
-                                user_toggled,
-                                ..
-                            } = item.kind_mut()
-                            {
-                                *collapsed = !*collapsed;
-                                *user_toggled = true;
-                            }
-                            cx.notify();
-                        });
-                    }
-                    cx.notify();
-                });
-            });
+            .on_click(keyed_fold_toggle(Some(host), key));
     }
     row.into_any_element()
 }
@@ -1952,6 +1939,68 @@ fn reasoning_round_toggle(
             cx.notify();
         });
     }
+}
+
+/// The click face the segment cover and the whole-turn process head share:
+/// host → conversation → fold toggle keyed by the row's stable projection
+/// key. Addressing by key, never by the render-time serial — the serial is
+/// an element id, and a mid-list insert (a settled turn's head lands above
+/// the turn's first segment) shifts positions while serials stay put, so
+/// serial arithmetic lands the click on whatever row now occupies the slot.
+/// Fits both `on_toggle` and `on_click`.
+fn keyed_fold_toggle(
+    host: Option<ChatHostHandle>,
+    key: crate::transcript::ItemKey,
+) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut App) + 'static {
+    move |_, _window, cx: &mut App| {
+        let Some(host) = host.clone() else {
+            return;
+        };
+        let Some(conv) = host.conversation(cx) else {
+            return;
+        };
+        conv.update(cx, |c, cx| {
+            toggle_row_fold(c, &key, cx);
+            cx.notify();
+        });
+    }
+}
+
+/// The keyed toggles' shared body: flip the fold of the row `key` names,
+/// kind-guarded — a stranger kind (or an absent key) is the same no-op a
+/// missing row always was. Returns whether a fold flipped.
+pub(crate) fn toggle_row_fold(
+    c: &mut ConversationState,
+    key: &crate::transcript::ItemKey,
+    cx: &mut gpui::Context<ConversationState>,
+) -> bool {
+    let Some(pos) = c.find_item_by_key(key) else {
+        return false;
+    };
+    let Some(item) = c.items().get(pos) else {
+        return false;
+    };
+    item.update(cx, |item, cx| {
+        let flipped = match item.kind_mut() {
+            ConvItem::Thinking(t) => {
+                t.collapsed = !t.collapsed;
+                t.user_toggled = true;
+                true
+            }
+            ConvItem::TurnProcess {
+                collapsed,
+                user_toggled,
+                ..
+            } => {
+                *collapsed = !*collapsed;
+                *user_toggled = true;
+                true
+            }
+            _ => false,
+        };
+        cx.notify();
+        flipped
+    })
 }
 
 /// A reasoning round's step — the dsh disclosure shape: a thinking icon and
@@ -3393,6 +3442,7 @@ mod tests {
                     ConvItem::Thinking(container),
                     "model".into(),
                     0,
+                    crate::transcript::ItemKey::Optimistic(0),
                     crate::host::noop_host(),
                 )
             })
@@ -3625,6 +3675,7 @@ mod tests {
                     }),
                     "model".into(),
                     0,
+                    crate::transcript::ItemKey::Optimistic(0),
                     host.clone() as crate::host::ChatHostHandle,
                 )
             });
@@ -3904,6 +3955,7 @@ mod tests {
                         .child(render_item(
                             &thinking_item,
                             0,
+                            crate::transcript::ItemKey::Optimistic(0),
                             &crate::model_tag::ModelTag::resolve("test-model"),
                             false,
                             &theme,
@@ -3919,6 +3971,7 @@ mod tests {
                         .child(render_item(
                             &agent_item,
                             1,
+                            crate::transcript::ItemKey::Optimistic(1),
                             &crate::model_tag::ModelTag::resolve("test-model"),
                             false,
                             &theme,
@@ -4035,6 +4088,7 @@ mod tests {
                         .child(render_item(
                             item,
                             ix,
+                            crate::transcript::ItemKey::Optimistic(ix),
                             &model,
                             false,
                             &theme,

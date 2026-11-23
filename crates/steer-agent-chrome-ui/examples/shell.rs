@@ -27,6 +27,7 @@ use gpui::{ClickEvent, StatefulInteractiveElement};
 use gpui_component::Root;
 use steer_agent_chat_ui::conversation::{ConvItem, ToolCallItem};
 use steer_agent_chat_ui::host::noop_host;
+use steer_agent_chat_ui::transcript::ItemKey;
 use steer_agent_chat_ui::views::message::MessageItem;
 use steer_agent_chrome_ui::right_pane::TabStore;
 use steer_agent_chrome_ui::session_list::SessionStatus;
@@ -928,7 +929,15 @@ impl ChatPreview {
                            item: ConvItem,
                            role: &str,
                            cx: &mut Context<Self>| {
-            items.push(cx.new(|_| MessageItem::new(item, role.to_string(), id, noop_host())));
+            items.push(cx.new(|_| {
+                MessageItem::new(
+                    item,
+                    role.to_string(),
+                    id,
+                    ItemKey::Optimistic(id),
+                    noop_host(),
+                )
+            }));
             id += 1;
         };
         next_id(
