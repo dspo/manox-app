@@ -211,8 +211,9 @@ fn width_box(width: f32) -> SvgSize {
 ///
 /// `body_size` is the text size where the surface pins one (`None` leaves
 /// the size to the inherited text style, as a per-frame chrome document
-/// does); the math block's inline run reads it, and the source faces of the
-/// diagram blocks render as editor panels, which style themselves.
+/// does); the math block's inline run reads it, and the editor panels —
+/// the plain fences and the diagram blocks' source faces — paint their
+/// code at it.
 pub fn with_fence_blocks(view: TextView, body_size: Option<Pixels>, cx: &App) -> TextView {
     let extensions = extensions(cx.svg_renderer(), body_size);
     view.markdown_extensions(extensions)
@@ -249,17 +250,23 @@ pub(crate) fn extensions(renderer: SvgRenderer, body_size: Option<Pixels>) -> Ma
     let extensions = MarkdownExtensions::default()
         .block_parser(move |node, cx| svg_fence(node, cx, &renderer))
         .block_renderer(BLOCK_NAME, move |node, window, cx| {
-            svg_element(node, BLOCK_NAME, window, cx)
+            svg_element(node, BLOCK_NAME, body_size, window, cx)
         })
         .block_parser(move |node, cx| {
             super::mermaid_block::mermaid_fence(node, cx, &mermaid_renderer)
         })
         .block_renderer(super::mermaid_block::BLOCK_NAME, move |node, window, cx| {
-            svg_element(node, super::mermaid_block::BLOCK_NAME, window, cx)
+            svg_element(
+                node,
+                super::mermaid_block::BLOCK_NAME,
+                body_size,
+                window,
+                cx,
+            )
         })
         .block_parser(super::code_block::code_fence)
-        .block_renderer(super::code_block::BLOCK_NAME, |node, window, cx| {
-            super::code_block::code_element(node, window, cx)
+        .block_renderer(super::code_block::BLOCK_NAME, move |node, window, cx| {
+            super::code_block::code_element(node, body_size, window, cx)
         });
     super::math_block::math_extensions(extensions, math_renderer, math_text_size)
 }
@@ -332,6 +339,7 @@ impl DiagramFence {
 fn svg_element(
     node: &MarkdownNode,
     name: &'static str,
+    body_size: Option<Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -371,6 +379,7 @@ fn svg_element(
                         &fence.code,
                         fence.lang.as_deref(),
                         key,
+                        body_size,
                         window,
                         cx,
                     ))

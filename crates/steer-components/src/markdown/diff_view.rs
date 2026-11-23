@@ -94,8 +94,13 @@ fn split_rows(rows: &[CodeRow]) -> Vec<SplitRow> {
 }
 
 /// The side-by-side face of a parsed diff.
-pub(crate) fn split_body(parts: &[DiffPart], key: u64, theme: &Theme) -> AnyElement {
-    let row_h = row_height(theme);
+pub(crate) fn split_body(
+    parts: &[DiffPart],
+    key: u64,
+    text_size: Pixels,
+    theme: &Theme,
+) -> AnyElement {
+    let row_h = row_height(text_size);
     let digits = parts
         .iter()
         .flat_map(|part| match part {
@@ -123,12 +128,18 @@ pub(crate) fn split_body(parts: &[DiffPart], key: u64, theme: &Theme) -> AnyElem
                     Some(theme.secondary.opacity(0.6)),
                     row_h,
                 ));
-                body = body.child(row_pair_columns(&split_rows(rows), digits, row_h, theme));
+                body = body.child(row_pair_columns(
+                    &split_rows(rows),
+                    digits,
+                    row_h,
+                    text_size,
+                    theme,
+                ));
             }
         }
     }
 
-    scroll_root(key, theme)
+    scroll_root(key, text_size, theme)
         .debug_selector(|| "markdown-editor-split".into())
         .child(body)
         .into_any_element()
@@ -136,8 +147,13 @@ pub(crate) fn split_body(parts: &[DiffPart], key: u64, theme: &Theme) -> AnyElem
 
 /// The merge face of a parsed conflict fence: column groups per conflict,
 /// context rows between them.
-pub(crate) fn merge_body(segments: &[MergeSegment], key: u64, theme: &Theme) -> AnyElement {
-    let row_h = row_height(theme);
+pub(crate) fn merge_body(
+    segments: &[MergeSegment],
+    key: u64,
+    text_size: Pixels,
+    theme: &Theme,
+) -> AnyElement {
+    let row_h = row_height(text_size);
     let digits = segments
         .iter()
         .filter_map(|segment| match segment {
@@ -147,6 +163,7 @@ pub(crate) fn merge_body(segments: &[MergeSegment], key: u64, theme: &Theme) -> 
         .map(|last| last.to_string().len())
         .max()
         .unwrap_or(1);
+    let gutter_w = gutter_width(digits, text_size);
 
     let mut body = v_flex().min_w(relative(1.));
     for segment in segments {
@@ -158,7 +175,7 @@ pub(crate) fn merge_body(segments: &[MergeSegment], key: u64, theme: &Theme) -> 
                         line,
                         theme.foreground,
                         None,
-                        digits,
+                        gutter_w,
                         row_h,
                         theme,
                     ));
@@ -170,7 +187,7 @@ pub(crate) fn merge_body(segments: &[MergeSegment], key: u64, theme: &Theme) -> 
         }
     }
 
-    scroll_root(key, theme)
+    scroll_root(key, text_size, theme)
         .debug_selector(|| "markdown-editor-merge".into())
         .child(body)
         .into_any_element()
@@ -189,8 +206,14 @@ enum Side {
 /// One hunk's paired columns: the old side left, the new side right, a
 /// hairline between. A column's width is its own longest line, so the group
 /// is only as wide as the diff needs; the body scrolls it as one region.
-fn row_pair_columns(rows: &[SplitRow], digits: usize, row_h: Pixels, theme: &Theme) -> gpui::Div {
-    let gutter_w = gutter_width(digits, theme);
+fn row_pair_columns(
+    rows: &[SplitRow],
+    digits: usize,
+    row_h: Pixels,
+    text_size: Pixels,
+    theme: &Theme,
+) -> gpui::Div {
+    let gutter_w = gutter_width(digits, text_size);
     h_flex()
         .items_start()
         .child(side_column(Side::Old, rows, gutter_w, row_h, theme))
