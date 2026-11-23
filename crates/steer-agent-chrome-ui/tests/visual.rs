@@ -120,6 +120,7 @@ mod macos {
                             tag: None,
                             team_leader: false,
                             last_message_at: Some(1_700_000_000 + rank * 60),
+                            sheet_count: None,
                         }
                     };
                     shell.update(cx, |shell, _cx| {
@@ -374,6 +375,7 @@ mod macos {
                     // The picker shot needs rankable rows: a None stamp reads
                     // "no messages" and drops the row from the panel.
                     last_message_at: Some(t.updated_at),
+                    sheet_count: None,
                     updated_at: t.updated_at,
                     sort_stamp: t.updated_at,
                     rank: ix as i64,

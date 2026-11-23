@@ -65,6 +65,7 @@ fn row(id: &str, stamp: i64, rank: i64, pinned: bool, project: Option<&str>) -> 
         tag: None,
         team_leader: false,
         last_message_at: None,
+        sheet_count: None,
     }
 }
 
@@ -244,6 +245,7 @@ fn the_stamp_survives_the_from_group_round_trip() {
         tag: None,
         team_leader: false,
         last_message_at: Some(100),
+        sheet_count: None,
     };
     let carried = SessionRow::from_group(SessionGroup {
         name: "steer".into(),

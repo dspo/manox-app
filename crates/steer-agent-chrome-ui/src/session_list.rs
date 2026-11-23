@@ -129,6 +129,9 @@ pub struct SessionRowData {
     /// The session picker ranks by it; `None` rows are not rankable and
     /// stay out of the picker. The sidebar ignores it.
     pub last_message_at: Option<i64>,
+    /// How many sheets the container's canvas holds (`None` = no canvas yet).
+    /// The info line shows it beside the last-active time.
+    pub sheet_count: Option<usize>,
 }
 
 /// The row's primary status, one glyph in the 16px slot: `Pending` the
@@ -1256,7 +1259,7 @@ fn session_row(
                     _ => None,
                 }),
         )
-        // Line 3: info — last-active time only.
+        // Line 3: info — last-active time, then the canvas's sheet count.
         .child(
             div()
                 .h(px(L3_H))
@@ -1264,6 +1267,7 @@ fn session_row(
                 .pl(px(text_indent))
                 .flex()
                 .items_center()
+                .gap(px(6.))
                 .child(
                     div()
                         .min_w_0()
@@ -1271,7 +1275,14 @@ fn session_row(
                         .text_size(px(11.))
                         .text_color(FG_FAINT)
                         .child(format_active_time(data.updated_at, now_unix_secs())),
-                ),
+                )
+                .children(data.sheet_count.filter(|count| *count > 0).map(|count| {
+                    div()
+                        .debug_selector(|| "chrome-row-sheet-count".to_string())
+                        .text_size(px(11.))
+                        .text_color(FG_FAINT)
+                        .child(format!("· {count}"))
+                })),
         );
 
     // The selected row's brand edge (plan 04 §3.5): a 3px accent bar hugging

@@ -310,9 +310,12 @@ fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
     // other clients' sessions) all fall to the loose bucket.
     let projects = crate::projects::list_projects();
     let mut sessions: Vec<steer_agent_chrome_ui::shell::SessionRow> =
-        crate::sidebar_projection::project_groups(&rows, &projects, &|id| {
-            crate::projects::membership_of(id)
-        })
+        crate::sidebar_projection::project_groups_with_canvas(
+            &rows,
+            &projects,
+            &|id| crate::projects::membership_of(id),
+            &|id| ws.read(cx).canvas_row_facts(id, cx),
+        )
         .into_iter()
         .flat_map(steer_agent_chrome_ui::shell::SessionRow::from_group)
         .collect();

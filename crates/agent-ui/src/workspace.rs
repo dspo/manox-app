@@ -3373,6 +3373,31 @@ impl Workspace {
         });
     }
 
+    /// The canvas's contribution to a sidebar row: its sheet count and the
+    /// container title projection (the earliest surviving sheet that names the
+    /// container). `None` when the container has no canvas.
+    pub(crate) fn canvas_row_facts(
+        &self,
+        container_id: &str,
+        cx: &App,
+    ) -> Option<crate::sidebar_projection::CanvasRowFacts> {
+        let canvas = self.canvas_view.as_ref()?;
+        let canvas = canvas.read(cx);
+        if canvas.host.active_container() != Some(container_id) {
+            // Only the shown canvas has a layout to count (parked ones keep
+            // their own, but the row belongs to the foreground view).
+            return canvas
+                .host
+                .held()
+                .contains(container_id)
+                .then_some(crate::sidebar_projection::CanvasRowFacts::default());
+        }
+        Some(crate::sidebar_projection::CanvasRowFacts {
+            sheet_count: steer_canvas::layout::sheet_count(canvas.host.layout()),
+            title: canvas.host.container_title(container_id, cx),
+        })
+    }
+
     /// The canvas's sheet ids, in layout order. Test-support read face (the
     /// canvas entity and host stay private).
     #[cfg(feature = "test-support")]

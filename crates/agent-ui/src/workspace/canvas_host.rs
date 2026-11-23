@@ -17,6 +17,7 @@
 //!   body's state lives with its kind, so switching tabs or parking a canvas
 //!   never destroys it.
 
+use gpui::App;
 use steer_canvas::state::{CanvasSnapshot, CanvasState, SetLayoutOutcome, SwitchOutcome};
 use steer_canvas::{DockLayout, SheetRegistry, layout};
 
@@ -69,6 +70,15 @@ impl CanvasHost {
     /// The shown container, or `None` for the scratch canvas.
     pub fn active_container(&self) -> Option<&str> {
         self.state.active_container()
+    }
+
+    /// A container's title projection (the earliest surviving sheet whose kind
+    /// names the container). `None` when nothing names it — the caller falls
+    /// back to the session title / cwd tail.
+    pub fn container_title(&self, container_id: &str, cx: &App) -> Option<String> {
+        self.state.container_title(container_id, |sheet| {
+            self.registry.container_title_of(sheet, cx)
+        })
     }
 
     /// The parked canvases (the LRU the shell's park gesture fills).
