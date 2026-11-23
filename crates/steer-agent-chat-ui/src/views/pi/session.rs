@@ -14,19 +14,25 @@ use ai_elements::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, IntoElement, Render, SharedString, Subscription,
-    Window, div, px,
+    AnyElement, App, ClickEvent, Context, DismissEvent, Entity, IntoElement, Render, SharedString,
+    Subscription, Window, div, px,
 };
 use gpui_component::ActiveTheme;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use serde_json::Value;
 use steer_acp::RequestId;
 
 use crate::i18n::{t, t_str};
 use crate::pi::store::fallback_title;
 use crate::pi::{
-    AcpStore, Entry, PendingRequest, PiSessionState, ToolEntry, ToolStatus, transcript::DiffBlock,
+    AcpStore, Entry, PendingRequest, PiCommand, PiSessionState, ToolEntry, ToolStatus,
+    transcript::DiffBlock,
 };
+
+/// How many slash rows the composer lists before it stops (the list sits
+/// above the input, so a long catalogue must not push the composer away).
+const SLASH_ROWS: usize = 6;
 
 /// One pi session's sheet body.
 pub struct PiSessionView {
@@ -38,6 +44,10 @@ pub struct PiSessionView {
     asks: HashMap<String, Entity<AskState>>,
     /// Elicitation form choices, keyed by request id then schema property.
     elicitation_choices: HashMap<String, HashMap<String, String>>,
+    /// The open header selector, if any: its config id (`model`,
+    /// `thought_level`) or `mode`, plus the menu entity the sheet paints and
+    /// the dismissal subscription that clears it.
+    menu: Option<(String, Entity<PopupMenu>, Subscription)>,
     _store_sub: Subscription,
     _input_sub: Subscription,
 }
@@ -52,12 +62,18 @@ impl PiSessionView {
         let session_id = session_id.into();
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder(t("pi-composer-placeholder")));
-        let input_sub =
-            cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, .. } = event {
-                    this.submit(window, cx);
+        let input_sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
+                // The slash candidates filter on every keystroke.
+                InputEvent::Change => {
+                    cx.notify();
                 }
-            });
+                _ => {}
+            },
+        );
         let store_sub = cx.observe(&store, |_, _, cx| cx.notify());
         Self {
             store,
@@ -67,6 +83,7 @@ impl PiSessionView {
             tools: HashMap::new(),
             asks: HashMap::new(),
             elicitation_choices: HashMap::new(),
+            menu: None,
             _store_sub: store_sub,
             _input_sub: input_sub,
         }
@@ -84,12 +101,254 @@ impl PiSessionView {
         let session_id = self.session_id.clone();
         store.update(cx, |store, cx| store.prompt(&session_id, text, cx));
     }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Opens (or closes) one header selector. The rows are a snapshot of the
+    /// store's current options — after a pick the harness's
+    /// `config_option_update` lands the new list, so the menu is rebuilt from
+    /// the store next time rather than mutated in place.
+    fn toggle_menu(&mut self, selector: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .menu
+            .as_ref()
+            .is_some_and(|(open, ..)| open == selector)
+        {
+            self.close_menu(cx);
+            return;
+        }
+        // `(value, label)` rows: the config option's choices, or the modes.
+        let rows = {
+            let store = self.store.read(cx);
+            let Some(view) = store.book().view(&self.session_id) else {
+                return;
+            };
+            if selector == "mode" {
+                view.modes
+                    .iter()
+                    .map(|mode| (mode.id.clone(), mode.name.clone()))
+                    .collect::<Vec<_>>()
+            } else {
+                view.config_options
+                    .iter()
+                    .find(|option| option.id == selector)
+                    .map(|option| {
+                        option
+                            .choices
+                            .iter()
+                            .map(|choice| (choice.value.clone(), choice.name.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let store = self.store.clone();
+        let session_id = self.session_id.clone();
+        let is_mode = selector == "mode";
+        let config_id = selector.to_owned();
+        let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
+            let mut menu = menu;
+            for (value, label) in rows {
+                let store = store.clone();
+                let session_id = session_id.clone();
+                let config_id = config_id.clone();
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    store.update(cx, |store, cx| {
+                        if is_mode {
+                            store.set_mode(&session_id, value.clone(), cx);
+                        } else {
+                            store.set_config_option(
+                                &session_id,
+                                config_id.clone(),
+                                value.clone(),
+                                cx,
+                            );
+                        }
+                    });
+                }));
+            }
+            menu
+        });
+        let sub = cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+            this.menu = None;
+            cx.notify();
+        });
+        self.menu = Some((selector.to_owned(), menu, sub));
+        cx.notify();
+    }
+
+    /// The header's selector chips (model, thinking level, approval mode).
+    /// Each shows the current label and opens the harness's choices; a kind
+    /// the session did not announce gets no chip.
+    fn selector_chips(
+        &mut self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let (options, modes, current_mode) = {
+            let store = self.store.read(cx);
+            match store.book().view(&self.session_id) {
+                Some(view) => (
+                    view.config_options.clone(),
+                    view.modes.clone(),
+                    view.current_mode.clone(),
+                ),
+                None => (Vec::new(), Vec::new(), None),
+            }
+        };
+        let mut chips = Vec::new();
+        for option in options {
+            if option.kind != "select" || option.choices.is_empty() {
+                continue;
+            }
+            let label = option
+                .choices
+                .iter()
+                .find(|choice| Some(&choice.value) == option.current_value.as_ref())
+                .map(|choice| choice.name.clone())
+                .or_else(|| option.current_value.clone())
+                .unwrap_or_else(|| option.name.clone());
+            chips.push(self.selector_chip(&option.id, &label, theme, cx));
+        }
+        if !modes.is_empty() {
+            let label = current_mode
+                .and_then(|current| {
+                    modes
+                        .iter()
+                        .find(|mode| mode.id == current)
+                        .map(|mode| mode.name.clone())
+                })
+                .unwrap_or_else(|| t("pi-selector-mode").to_string());
+            chips.push(self.selector_chip("mode", &label, theme, cx));
+        }
+        chips
+    }
+
+    fn selector_chip(
+        &mut self,
+        selector: &str,
+        label: &str,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selector = selector.to_owned();
+        let open = self
+            .menu
+            .as_ref()
+            .is_some_and(|(open, ..)| *open == selector);
+        let trigger = div()
+            .id(gpui::ElementId::Name(
+                format!("pi-selector-{selector}").into(),
+            ))
+            .px_1()
+            .rounded(theme.radius)
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .cursor_pointer()
+            .hover(|this| this.bg(theme.muted))
+            .child(SharedString::from(label.to_owned()))
+            .on_click(cx.listener({
+                let selector = selector.clone();
+                move |this, _, window, cx| this.toggle_menu(&selector, window, cx)
+            }));
+        if !open {
+            return trigger.into_any_element();
+        }
+        let Some((_, menu, _)) = self.menu.as_ref() else {
+            return trigger.into_any_element();
+        };
+        div()
+            .relative()
+            .child(trigger)
+            .child(
+                gpui::deferred(
+                    div()
+                        .id(gpui::ElementId::Name(
+                            format!("pi-selector-menu-{selector}").into(),
+                        ))
+                        .absolute()
+                        .top_full()
+                        .right_0()
+                        .occlude()
+                        .child(menu.clone()),
+                )
+                .with_priority(1),
+            )
+            .into_any_element()
+    }
+
+    /// The slash candidates the composer offers: when the input's only token
+    /// starts with `/`, the harness's registered commands filtered by it.
+    /// Clicking a row fills the composer; the popover never takes focus.
+    fn slash_candidates(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let value = self.input.read(cx).value().to_string();
+        let token = value.trim_start();
+        let Some(query) = token.strip_prefix('/') else {
+            return Vec::new();
+        };
+        if query.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let query = query.to_lowercase();
+        let store = self.store.read(cx);
+        let Some(view) = store.book().view(&self.session_id) else {
+            return Vec::new();
+        };
+        slash_matches(&view.commands, &query)
+            .into_iter()
+            .map(|command| {
+                let input = self.input.clone();
+                let name = command.name.clone();
+                let description = command.description.clone();
+                div()
+                    .id(gpui::ElementId::Name(
+                        format!("pi-slash-{}", command.name).into(),
+                    ))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .hover(|this| this.bg(theme.muted))
+                    .on_click(move |_, window, cx| {
+                        let text = format!("/{name} ");
+                        input.update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(format!("/{}", command.name))),
+                    )
+                    .children((!description.is_empty()).then(|| {
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(SharedString::from(description.clone()))
+                    }))
+                    .into_any_element()
+            })
+            .collect()
+    }
 }
 
 impl Render for PiSessionView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let (title, error, rows, state, loading, streaming, queued, model, mode, usage, version) = {
+        let (title, error, rows, state, loading, streaming, queued, usage, version) = {
             let store = self.store.read(cx);
             let view = store.book().view(&self.session_id);
             let title = fallback_title(store, &self.session_id);
@@ -98,33 +357,20 @@ impl Render for PiSessionView {
                     .map(SharedString::from)
             });
             let rows = store.book().rows(&self.session_id);
-            let (state, loading, streaming, queued, model, mode, usage, version) = view
+            let (state, loading, streaming, queued, usage, version) = view
                 .map(|view| {
                     (
                         view.state,
                         view.loading,
                         view.streaming,
                         view.queued,
-                        view.model
-                            .as_ref()
-                            .map(|model| model.name.clone().unwrap_or_else(|| model.id.clone())),
-                        view.current_mode.clone(),
                         view.usage,
                         view.banner.as_ref().map(|banner| banner.version.clone()),
                     )
                 })
-                .unwrap_or((
-                    PiSessionState::Starting,
-                    true,
-                    false,
-                    0,
-                    None,
-                    None,
-                    None,
-                    None,
-                ));
+                .unwrap_or((PiSessionState::Starting, true, false, 0, None, None));
             (
-                title, error, rows, state, loading, streaming, queued, model, mode, usage, version,
+                title, error, rows, state, loading, streaming, queued, usage, version,
             )
         };
 
@@ -132,6 +378,8 @@ impl Render for PiSessionView {
             .into_iter()
             .map(|entry| render_entry(entry, cx, &theme))
             .collect::<Vec<_>>();
+        let selectors = self.selector_chips(&theme, cx);
+        let slash = self.slash_candidates(&theme, cx);
         let cards = self.pending_cards(cx, &theme);
         let percent = usage.and_then(|usage| usage.percent());
         let store = self.store.clone();
@@ -159,8 +407,7 @@ impl Render for PiSessionView {
                             .gap_2()
                             .text_sm()
                             .child(title)
-                            .children(model.map(|model| muted_text(model, &theme)))
-                            .children(mode.map(|mode| muted_text(mode, &theme)))
+                            .children(selectors)
                             .children(percent.map(|pct| {
                                 muted_text(
                                     t_str("pi-context-used", &[("pct", &pct.to_string())]),
@@ -205,6 +452,7 @@ impl Render for PiSessionView {
                     .children(
                         error.map(|error| div().text_xs().text_color(theme.danger).child(error)),
                     )
+                    .children(slash)
                     .child(
                         div()
                             .flex()
@@ -799,6 +1047,18 @@ fn request_key(id: &RequestId) -> String {
     }
 }
 
+/// The slash candidates for `query` (the text after the trigger): the
+/// harness's commands whose name starts with it, capped at the popover's row
+/// count. Prefix-only keeps a half-typed command stable (a substring match
+/// would reorder rows mid-word).
+fn slash_matches<'a>(commands: &'a [PiCommand], query: &str) -> Vec<&'a PiCommand> {
+    commands
+        .iter()
+        .filter(|command| command.name.to_lowercase().starts_with(query))
+        .take(SLASH_ROWS)
+        .collect()
+}
+
 fn muted_text(text: impl Into<SharedString>, theme: &gpui_component::Theme) -> AnyElement {
     div()
         .text_xs()
@@ -844,4 +1104,35 @@ fn choice_button(
         .child(label.into())
         .on_click(on_click)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(name: &str) -> PiCommand {
+        PiCommand {
+            name: name.to_owned(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn slash_matches_prefix_filters_and_caps() {
+        let commands = vec![
+            command("compact"),
+            command("commit"),
+            command("skill:review"),
+        ];
+        let names = |query: &str| {
+            slash_matches(&commands, query)
+                .into_iter()
+                .map(|command| command.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("co"), vec!["compact", "commit"]);
+        assert_eq!(names("skill:"), vec!["skill:review"]);
+        assert!(names("review").is_empty(), "substring only is not a match");
+        assert_eq!(names("").len(), 3);
+    }
 }
