@@ -208,8 +208,6 @@ async fn switching_containers_parks_and_restores_the_layout(cx: &mut TestAppCont
 // mounted canvas; the drop is `projection::drop_target`'s verdict, committed
 // once, through the host's single write path.
 
-use gpui::{Modifiers, MouseButton};
-
 /// A drag as a real pointer sequence: press, a nudge (the drag promotes while
 /// the pointer is still over the source), then travel, then drop.
 fn drag(
