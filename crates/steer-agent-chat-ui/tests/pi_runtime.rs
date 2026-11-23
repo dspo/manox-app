@@ -47,6 +47,9 @@ fn open_book(root: &Path, session: &str) -> PiBook {
 
 #[tokio::test]
 async fn a_new_session_streams_a_turn_through_the_book() {
+    // The exit-reason assertion below matches the English wording; the UI
+    // language is process-global, so pin it for this test.
+    steer_i18n::set_ui_language(steer_i18n::Language::En);
     let root = state_root();
     let (events, receiver) = async_channel::unbounded();
     let runtime = PiRuntime::new(stub(), &root, &root);

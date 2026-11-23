@@ -1,7 +1,6 @@
 //! The pi transcript: ACP `session/update` payloads in, conversation rows out.
 //!
-//! Ported one-to-one from nsh-pi's pure reducer (`app/modules/pi/transcript.ts`):
-//! live deltas and a `session/load` replay feed the same fold, so a rebuilt
+//! Live deltas and a `session/load` replay feed the same fold, so a rebuilt
 //! transcript and a streamed one agree row for row. There is no second
 //! translation layer — tool states stay ACP `ToolCallStatus`, message identity
 //! is the ACP id (`messageId`, `toolCallId`, or the settle marker's
@@ -360,9 +359,13 @@ impl Transcript {
             .and_then(|meta| meta.entry_id.clone())
             .or_else(|| id_of(update.get("messageId")))
         else {
+            // Benign shapes land here too (non-text content blocks, harness
+            // quirks), so this is diagnosability at debug level, not a warning.
+            tracing::debug!("dropping a user chunk without an id");
             return;
         };
         if text.is_empty() {
+            tracing::debug!(id = %id, "dropping an empty user chunk");
             return;
         }
         self.flush_draft(None);
@@ -374,6 +377,17 @@ impl Transcript {
             if user.text != text {
                 user.text.push_str(&text);
             }
+            return;
+        }
+        // One chunk per user entry: the same id arriving again (a repeated
+        // frame) changes nothing. This runs before the optimistic scan, so a
+        // duplicate cannot re-key a same-text queued row onto an id that is
+        // already in the transcript.
+        if self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::User(user) if user.id == id))
+        {
             return;
         }
         // The optimistic row is ours: when the real chunk arrives with the
@@ -391,15 +405,6 @@ impl Transcript {
                 }
                 return;
             }
-        }
-        // One chunk per user entry: the same id arriving again (a repeated
-        // frame) changes nothing, and must not consume another optimistic row.
-        if self
-            .entries
-            .iter()
-            .any(|entry| matches!(entry, Entry::User(user) if user.id == id))
-        {
-            return;
         }
         // The words can differ: pi expands `/` input before persisting (a
         // skill becomes a `<skill …>` block, a template its body). The oldest
@@ -551,9 +556,11 @@ impl Transcript {
         let card = ToolEntry {
             id: tool_call_id.clone(),
             tool_call_id: tool_call_id.clone(),
+            // Empty when the frame named nothing; the view localizes the
+            // fallback at render time, so the reducer stays gpui-free.
             title: string(update.get("title"))
                 .or_else(|| string(update.get("name")))
-                .unwrap_or("tool")
+                .unwrap_or_default()
                 .to_owned(),
             name: string(update.get("name")).map(str::to_owned),
             tool_kind: string(update.get("kind")).map(str::to_owned),
@@ -599,7 +606,8 @@ impl Transcript {
             let card = ToolEntry {
                 id: tool_call_id.clone(),
                 tool_call_id,
-                title: string(update.get("title")).unwrap_or("tool").to_owned(),
+                // Same render-time fallback as `reduce_tool_call`.
+                title: string(update.get("title")).unwrap_or_default().to_owned(),
                 name: None,
                 tool_kind: None,
                 status: ToolStatus::from_wire(update.get("status"))
@@ -1192,6 +1200,33 @@ mod tests {
         transcript.push_optimistic_user("queued");
         // The re-keyed row is not last anymore: the duplicate must no-op, not
         // consume the queued row.
+        transcript.apply(&json!({
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "expanded"},
+            "messageId": "e9",
+            "_meta": {"pi": {"entryId": "e9"}},
+        }));
+        let ids: Vec<_> = transcript
+            .settled()
+            .iter()
+            .map(|entry| entry.id().to_owned())
+            .collect();
+        assert_eq!(ids, ["e9", "pending:2"]);
+    }
+
+    #[test]
+    fn a_repeated_frame_does_not_rekey_a_same_text_pending_row_at_the_tail() {
+        let mut transcript = Transcript::new();
+        transcript.push_optimistic_user("expanded");
+        transcript.apply(&json!({
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "expanded"},
+            "messageId": "e9",
+            "_meta": {"pi": {"entryId": "e9"}},
+        }));
+        // The queued row happens to carry the same words as the settled entry
+        // and sits last: the duplicate must no-op, not re-key it onto `e9`.
+        transcript.push_optimistic_user("expanded");
         transcript.apply(&json!({
             "sessionUpdate": "user_message_chunk",
             "content": {"type": "text", "text": "expanded"},

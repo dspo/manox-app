@@ -292,21 +292,26 @@ fn spawn_pumps(
 }
 
 /// A human sentence for a dead process, with the stderr tail when it left one.
+/// The sentence is app chrome (localized through the shared bundles); the
+/// tail is harness output and rides verbatim.
 fn describe_exit(exit: Option<AcpExit>, tail: String) -> String {
-    let mut reason = match exit {
+    use steer_i18n::{t, t_str};
+    let reason = match exit {
         Some(AcpExit {
             code: Some(code), ..
-        }) => format!("the harness exited (exit {code})"),
+        }) => t_str("pi-harness-exited-code", &[("code", &code.to_string())]),
         Some(AcpExit {
             signal: Some(signal),
             ..
-        }) => format!("the harness exited ({signal})"),
-        _ => "the harness exited".to_owned(),
+        }) => t_str("pi-harness-exited-signal", &[("signal", &signal)]),
+        _ => t("pi-harness-exited"),
     };
     let tail = tail.trim();
-    if !tail.is_empty() {
-        reason.push_str(" — stderr tail: ");
-        reason.push_str(tail);
+    if tail.is_empty() {
+        return reason;
     }
-    reason
+    t_str(
+        "pi-harness-exited-tail",
+        &[("reason", &reason), ("tail", tail)],
+    )
 }

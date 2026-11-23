@@ -19,6 +19,7 @@ use super::runtime::{OpenMode, PiConnection, PiRuntime, StoreEvent};
 use super::session::{
     parse_plan, parse_restored_asks, parse_subagent_runs, parse_subagent_transcript,
 };
+use crate::i18n::t;
 
 /// One window's pi sessions.
 pub struct AcpStore {
@@ -30,6 +31,10 @@ pub struct AcpStore {
     /// Follow-up texts queued behind the running turn, per session.
     queues: HashMap<String, VecDeque<String>>,
     opening: HashSet<String>,
+    /// The plan panel's generation per session: every plan write bumps it, so
+    /// a slow `_zu/todos/list` answer that raced the write is recognized as
+    /// stale and dropped instead of overwriting the write's fresh plan.
+    plan_generations: HashMap<String, u64>,
     /// The last store-level failure (a missing harness, a broken bind).
     error: Option<String>,
 }
@@ -43,6 +48,7 @@ impl AcpStore {
             connections: HashMap::new(),
             queues: HashMap::new(),
             opening: HashSet::new(),
+            plan_generations: HashMap::new(),
             error,
         }
     }
@@ -103,14 +109,16 @@ impl AcpStore {
         }
         let Some(runtime) = self.runtime.clone() else {
             self.book.open(session_id, &cwd);
-            self.book.apply(&StoreEvent::Exited {
-                session_id: session_id.to_owned(),
-                reason: self
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "the pi harness is not available".to_owned()),
-            });
-            cx.notify();
+            self.apply_event(
+                &StoreEvent::Exited {
+                    session_id: session_id.to_owned(),
+                    reason: self
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| t("pi-harness-unavailable").to_string()),
+                },
+                cx,
+            );
             return;
         };
         self.book.open(session_id, &cwd);
@@ -145,10 +153,13 @@ impl AcpStore {
                         store.refresh_panels(&session_id, cx);
                     }
                     Err(reason) => {
-                        store.book.apply(&StoreEvent::Exited {
-                            session_id: session_id.clone(),
-                            reason,
-                        });
+                        store.apply_event(
+                            &StoreEvent::Exited {
+                                session_id: session_id.clone(),
+                                reason,
+                            },
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -158,9 +169,7 @@ impl AcpStore {
             }
             while let Ok(event) = receiver.recv().await {
                 let updated = this.update(cx, |store, cx| {
-                    if store.book.apply(&event) {
-                        cx.notify();
-                    }
+                    store.apply_event(&event, cx);
                 });
                 if updated.is_err() {
                     return;
@@ -197,7 +206,7 @@ impl AcpStore {
         }
         let Some(connection) = self.connections.get(session_id).cloned() else {
             self.book
-                .note_error(session_id, "the pi harness is not connected");
+                .note_error(session_id, &t("pi-harness-not-connected"));
             cx.notify();
             return;
         };
@@ -251,7 +260,7 @@ impl AcpStore {
             .is_some_and(|connection| connection.respond(&pending.id, result).is_ok());
         if !written {
             self.book
-                .note_error(session_id, "the pi harness is not connected");
+                .note_error(session_id, &t("pi-harness-not-connected"));
         }
         cx.notify();
         written
@@ -275,7 +284,7 @@ impl AcpStore {
             .is_some_and(|connection| connection.respond_error(&pending.id, code, message).is_ok());
         if !written {
             self.book
-                .note_error(session_id, "the pi harness is not connected");
+                .note_error(session_id, &t("pi-harness-not-connected"));
         }
         cx.notify();
         written
@@ -291,6 +300,9 @@ impl AcpStore {
         cx: &mut Context<Self>,
     ) {
         let Some(connection) = self.connections.get(session_id).cloned() else {
+            self.book
+                .note_error(session_id, &t("pi-harness-not-connected"));
+            cx.notify();
             return;
         };
         let session_id = session_id.to_owned();
@@ -322,6 +334,9 @@ impl AcpStore {
     /// Switches the approval policy.
     pub fn set_mode(&mut self, session_id: &str, mode_id: String, cx: &mut Context<Self>) {
         let Some(connection) = self.connections.get(session_id).cloned() else {
+            self.book
+                .note_error(session_id, &t("pi-harness-not-connected"));
+            cx.notify();
             return;
         };
         let session_id = session_id.to_owned();
@@ -357,6 +372,7 @@ impl AcpStore {
         let Some(connection) = self.connections.get(session_id).cloned() else {
             return;
         };
+        let stamp = self.plan_generation(session_id);
         let session_id = session_id.to_owned();
         cx.spawn(async move |this, cx| {
             let call = {
@@ -382,7 +398,12 @@ impl AcpStore {
             };
             this.update(cx, |store, cx| {
                 let mut changed = false;
-                if let Ok(plan) = plan {
+                // The answer folds only while no plan write happened since the
+                // request went out; an older response must not overwrite the
+                // write's fresher plan.
+                if let Ok(plan) = plan
+                    && store.plan_answer_is_current(&session_id, stamp)
+                {
                     changed |= store.book.set_plan(&session_id, parse_plan(&plan));
                 }
                 // A session without the subagent surface answers
@@ -417,15 +438,15 @@ impl AcpStore {
     ) {
         let Some(connection) = self.connections.get(session_id).cloned() else {
             self.book
-                .note_error(session_id, "the pi harness is not connected");
+                .note_error(session_id, &t("pi-harness-not-connected"));
             cx.notify();
             return;
         };
-        // The card leaves the list before the wire write, so a double click
-        // cannot answer twice.
-        if let Some(view) = self.book.view_mut(session_id) {
-            view.restored_asks
-                .retain(|ask| ask.tool_call_id != tool_call_id);
+        // Take the card before the wire write: a second click finds nothing
+        // left to take and must not send a second `_zu/ask/answer` (the same
+        // take-first shape the live request path gets from `take_request`).
+        if !self.take_restored_ask(session_id, &tool_call_id) {
+            return;
         }
         cx.notify();
         let session_id = session_id.to_owned();
@@ -450,7 +471,7 @@ impl AcpStore {
                         if value.get("delivered").and_then(Value::as_str) == Some("none") {
                             store
                                 .book
-                                .note_error(&session_id, "the pi harness has no answerable ask");
+                                .note_error(&session_id, &t("pi-harness-no-answerable-ask"));
                         }
                         store.refresh_panels(&session_id, cx);
                     }
@@ -461,6 +482,18 @@ impl AcpStore {
             .ok();
         })
         .detach();
+    }
+
+    /// Removes the restored ask with `tool_call_id` (its answer is being
+    /// written); `false` means it was already answered or never pending.
+    fn take_restored_ask(&mut self, session_id: &str, tool_call_id: &str) -> bool {
+        let Some(view) = self.book.view_mut(session_id) else {
+            return false;
+        };
+        let before = view.restored_asks.len();
+        view.restored_asks
+            .retain(|ask| ask.tool_call_id != tool_call_id);
+        view.restored_asks.len() != before
     }
 
     /// Writes one plan edit (`_zu/todos/write`); the harness answers with the
@@ -474,10 +507,13 @@ impl AcpStore {
     ) {
         let Some(connection) = self.connections.get(session_id).cloned() else {
             self.book
-                .note_error(session_id, "the pi harness is not connected");
+                .note_error(session_id, &t("pi-harness-not-connected"));
             cx.notify();
             return;
         };
+        // The write invalidates any panel refresh that raced it: stamp this
+        // write with the newest generation before the request goes out.
+        let stamp = self.bump_plan_generation(session_id);
         let session_id = session_id.to_owned();
         cx.spawn(async move |this, cx| {
             let call = {
@@ -500,10 +536,14 @@ impl AcpStore {
                 match result {
                     Ok(value) => {
                         // The write answer is `{plan}` without `enabled`; a
-                        // successful write means the surface is on.
-                        let mut plan = parse_plan(&value);
-                        plan.enabled = true;
-                        store.book.set_plan(&session_id, plan);
+                        // successful write means the surface is on. A newer
+                        // write's answer wins, so only the current
+                        // generation's answer folds.
+                        if store.plan_answer_is_current(&session_id, stamp) {
+                            let mut plan = parse_plan(&value);
+                            plan.enabled = true;
+                            store.book.set_plan(&session_id, plan);
+                        }
                     }
                     Err(reason) => store.book.note_error(&session_id, &reason),
                 }
@@ -563,7 +603,7 @@ impl AcpStore {
         .detach();
     }
 
-    /// Reattaches a dead session: `session/resume` (with replay, so the sheet
+    /// Reattaches a dead session: `session/load` (with replay, so the sheet
     /// keeps its transcript) under the same id. A harness that no longer has
     /// the session re-mints a fresh one under that id — the same repair the
     /// bind path performs.
@@ -579,6 +619,7 @@ impl AcpStore {
     pub fn close_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let connection = self.connections.remove(session_id);
         self.queues.remove(session_id);
+        self.plan_generations.remove(session_id);
         self.book.remove(session_id);
         cx.notify();
         let Some(connection) = connection else {
@@ -589,6 +630,60 @@ impl AcpStore {
             connection.close().await;
         })
         .detach();
+    }
+
+    /// Applies one transport event to the book. A dead process also drops the
+    /// session's queued follow-ups: they were waiting on that process's turns,
+    /// and letting them ride into the next connection would auto-send
+    /// messages the user has long stopped waiting on.
+    fn apply_event(&mut self, event: &StoreEvent, cx: &mut Context<Self>) -> bool {
+        if let StoreEvent::Exited { session_id, .. } = event {
+            self.queues.remove(session_id);
+        }
+        let changed = self.book.apply(event);
+        if changed {
+            cx.notify();
+        }
+        changed
+    }
+
+    /// The session's current plan generation.
+    fn plan_generation(&self, session_id: &str) -> u64 {
+        self.plan_generations
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Bumps the plan generation (every plan write) and returns the new value.
+    fn bump_plan_generation(&mut self, session_id: &str) -> u64 {
+        let next = self.plan_generation(session_id) + 1;
+        self.plan_generations.insert(session_id.to_owned(), next);
+        next
+    }
+
+    /// Whether a plan answer stamped `stamp` still reflects the newest plan
+    /// write: responses can overtake or trail a racing write, and only the
+    /// newest generation's answer may fold.
+    fn plan_answer_is_current(&self, session_id: &str, stamp: u64) -> bool {
+        self.plan_generation(session_id) == stamp
+    }
+
+    /// Test seam: creates the store-side view a bind would create, so folded
+    /// events land on a session instead of being dropped.
+    #[cfg(feature = "test-support")]
+    pub fn open_for_test(&mut self, session_id: &str, cwd: &std::path::Path) {
+        self.book.open(session_id, cwd);
+    }
+
+    /// Test seam: folds one transport event exactly as a live connection's
+    /// pump would, so view tests can seed transcripts without a harness
+    /// process.
+    #[cfg(feature = "test-support")]
+    pub fn fold_event_for_test(&mut self, event: &StoreEvent, cx: &mut Context<Self>) {
+        if self.book.apply(event) {
+            cx.notify();
+        }
     }
 
     /// A turn settled: finish the face, then run the next queued follow-up.
@@ -623,9 +718,9 @@ impl AcpStore {
 
 /// The start-page notice for a store with no harness binary.
 fn runtime_notice(runtime: &Option<PiRuntime>) -> Option<String> {
-    runtime.is_none().then(|| {
-        "the pi harness binary was not found (build pi-harness or set STEER_PI_ACP)".to_owned()
-    })
+    runtime
+        .is_none()
+        .then(|| t("pi-harness-not-found").to_string())
 }
 
 /// Runs an async closure on the manox tokio runtime and awaits its result from
@@ -639,9 +734,7 @@ where
     manox_agent::runtime::handle().spawn(async move {
         let _ = tx.send(f().await).await;
     });
-    rx.recv()
-        .await
-        .map_err(|_| "the tokio runtime is gone".to_owned())?
+    rx.recv().await.map_err(|_| t("pi-tokio-runtime-gone"))?
 }
 
 /// The sheet title's source: the program title, else the session's short id.
@@ -654,4 +747,63 @@ pub fn fallback_title(store: &AcpStore, session_id: &str) -> SharedString {
 
 fn short_id(session_id: &str) -> String {
     session_id.chars().take(8).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use serde_json::json;
+
+    use super::super::session::PiRestoredAsk;
+    use super::*;
+
+    /// An entity-free store: the harness is missing and the book is empty.
+    /// These paths never touch gpui, so no app context is needed.
+    fn bare_store() -> AcpStore {
+        AcpStore {
+            runtime: None,
+            book: PiBook::new(),
+            connections: HashMap::new(),
+            queues: HashMap::new(),
+            opening: HashSet::new(),
+            plan_generations: HashMap::new(),
+            error: None,
+        }
+    }
+
+    fn store_with_restored_ask() -> AcpStore {
+        let mut store = bare_store();
+        store.book.open("s1", Path::new("/tmp"));
+        if let Some(view) = store.book.view_mut("s1") {
+            view.restored_asks.push(PiRestoredAsk {
+                tool_call_id: "call-1".to_owned(),
+                params: json!({}),
+            });
+        }
+        store
+    }
+
+    #[test]
+    fn a_restored_ask_is_taken_once() {
+        let mut store = store_with_restored_ask();
+        assert!(store.take_restored_ask("s1", "call-1"));
+        assert!(
+            !store.take_restored_ask("s1", "call-1"),
+            "the second take finds nothing: the repeat is a no-op"
+        );
+        assert!(!store.take_restored_ask("gone", "call-1"));
+    }
+
+    #[test]
+    fn only_the_newest_plan_generation_folds() {
+        let mut store = bare_store();
+        assert!(store.plan_answer_is_current("s1", 0));
+        assert_eq!(store.bump_plan_generation("s1"), 1);
+        assert!(
+            !store.plan_answer_is_current("s1", 0),
+            "a response stamped before the write is stale"
+        );
+        assert!(store.plan_answer_is_current("s1", 1));
+    }
 }

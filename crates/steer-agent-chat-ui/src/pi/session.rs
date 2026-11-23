@@ -303,7 +303,8 @@ pub struct PiSessionView {
     pub expanded_subagent: Option<String>,
     /// Fetched subagent transcripts, keyed by run id.
     pub subagent_transcripts: HashMap<String, Vec<PiSubagentMessage>>,
-    /// Question cards that survived a restart or a turn end (B2's mailbox).
+    /// Question cards that survived a restart or a turn end (pi's ask
+    /// mailbox).
     pub restored_asks: Vec<PiRestoredAsk>,
 }
 
@@ -458,8 +459,8 @@ impl PiSessionView {
                 self.commands = commands;
                 true
             }
-            // Compaction is a protocol event with no v1 surface (the plan's
-            // non-goals: the transcript keeps the messages, not the marker).
+            // Compaction has no surface: the transcript keeps the messages,
+            // not the marker.
             Some("compaction_update") => false,
             _ => {
                 let settled_before = self.transcript.draft().is_some();
@@ -475,8 +476,12 @@ impl PiSessionView {
     }
 
     /// Registers a server→client request. The card is the state; the answer
-    /// travels through the store.
+    /// travels through the store. A request already waiting is ignored — a
+    /// repeated frame must not double the card.
     pub fn apply_request(&mut self, request: &HostRequest) -> bool {
+        if self.holds_request(&request.id) {
+            return false;
+        }
         let pending = PendingRequest {
             id: request.id.clone(),
             params: request.params.clone(),
@@ -489,6 +494,16 @@ impl PiSessionView {
         }
         self.derive_state();
         true
+    }
+
+    /// Whether a request with `id` still waits in one of the pending queues.
+    fn holds_request(&self, id: &RequestId) -> bool {
+        self.pending_permissions
+            .iter()
+            .chain(&self.pending_elicitations)
+            .chain(&self.pending_asks)
+            .chain(&self.pending_other)
+            .any(|pending| &pending.id == id)
     }
 
     /// Removes the request with `id` (the answer was written) and returns it.
@@ -576,8 +591,16 @@ impl PiSessionView {
             + self.pending_other.len()
     }
 
-    /// A turn starts: the optimistic row is already in the transcript.
+    /// A turn starts: the optimistic row is already in the transcript. One
+    /// policy for the sticky faces: a new turn revives an interrupted session
+    /// (its failure was a settled turn, the connection is still alive), while
+    /// a dead one refuses — its reconnect flow owns the restart, and
+    /// `derive_state` is sticky, so a streaming flag there would never show.
     pub fn begin_turn(&mut self) {
+        if self.state == PiSessionState::Dead {
+            return;
+        }
+        self.state = PiSessionState::Ready;
         self.streaming = true;
         self.error = None;
         self.derive_state();
@@ -1108,6 +1131,37 @@ mod tests {
         assert!(!view.streaming);
         assert_eq!(view.error.as_deref(), Some("the harness exited (exit 7)"));
         assert_eq!(view.transcript.settled().len(), 1);
+    }
+
+    #[test]
+    fn a_dead_session_refuses_a_turn_and_an_interrupted_one_revives() {
+        let mut view = PiSessionView::new("s1", "/tmp");
+        view.mark_ready();
+        view.mark_interrupted("rate limited");
+        view.begin_turn();
+        assert_eq!(view.state, PiSessionState::Streaming);
+        assert_eq!(view.error, None, "the new turn clears the failure face");
+
+        let mut view = PiSessionView::new("s1", "/tmp");
+        view.mark_ready();
+        view.mark_dead("the harness exited");
+        view.begin_turn();
+        assert_eq!(view.state, PiSessionState::Dead);
+        assert!(!view.streaming);
+    }
+
+    #[test]
+    fn a_repeated_request_frame_does_not_double_the_card() {
+        let mut view = PiSessionView::new("s1", "/tmp");
+        view.mark_ready();
+        let request = HostRequest {
+            id: RequestId::Number(9),
+            method: "session/request_permission".to_owned(),
+            params: json!({"sessionId": "s1"}),
+        };
+        assert!(view.apply_request(&request));
+        assert!(!view.apply_request(&request));
+        assert_eq!(view.pending_count(), 1);
     }
 
     #[test]

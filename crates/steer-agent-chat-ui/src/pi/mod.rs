@@ -1,17 +1,18 @@
-//! The pi harness's host-side data plane (PLAN-ABSORB-06, segment 1).
+//! The pi harness's host-side data plane.
 //!
 //! | module | what it is | gpui |
 //! |---|---|---|
-//! | [`transcript`] | the pure ACP-update reducer (nsh-pi's `transcript.ts` port) | no |
+//! | [`transcript`] | the pure ACP-update reducer | no |
 //! | [`session`] | one session's protocol faces: selectors, usage, banner, pending requests | no |
 //! | [`book`] | every open session, folded synchronously from transport events | no |
 //! | [`runtime`] | spawn/handshake/bind + two channel pumps, over `steer-acp` | no |
 //!
 //! The layering mirrors [`crate::ahp_store`]: the transport reports events, a
 //! pure fold builds the state a view reads, and the gpui entity that owns the
-//! runtime lives in the assembly (segment 2's views consume [`PiBook`]).
+//! runtime lives in the assembly (the session sheet's views consume
+//! [`PiBook`]).
 //!
-//! Two facts the pi leg must not lose (nsh-pi's hard-won lessons):
+//! Two invariants the pi leg must not lose:
 //!
 //! - **The settle marker is the entry's identity.** Live text drafts under its
 //!   wire `messageId`; the marker re-keys the row onto pi's entry id in place,
