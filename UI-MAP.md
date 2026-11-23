@@ -186,8 +186,33 @@ The count on the macOS Dock icon (`NSDockTile.setBadgeLabel` via `objc2-app-kit`
 
 `agent-ui` 的会话列（`crates/agent-ui/src/workspace.rs`）：状态 + 装配层。持有
 multiplexer（单连接 demux）、`ChatColumn`（线程面/会话状态/composer/ask drawer/rail）、
-browser host 槽位、侧栏投影泵所需的全部状态；渲染只产出会话列本身（render 入口见
-`workspace/render.rs`），由 `chrome_assembly` 挂进壳的主区卡。
+browser host 槽位、侧栏投影泵所需的全部状态；会话列本体是独立实体（见 §2.0），
+`Workspace::render_column`（`workspace/render.rs`）每帧把画布页挂进壳的主区卡
+（装配在 `chrome_assembly`）。
+
+### 2.0 会话列实体（ChatColumnView / ChatEnv）
+
+「会话列实体化」后，一列会话有自己的视图实体（`crates/agent-ui/src/workspace/column_view.rs`）：
+
+- **`ChatColumnView`**：会话列实体。状态刻意不住在视图里——它持有
+  `Entity<ChatColumn>`（会话、草稿、ask、列表状态全部仍在 chat 实体上）、构造期注入的
+  `Entity<SpeechState>`（听写引擎；实体句柄是数据不是效果，不经端口）与
+  `Arc<dyn ChatEnv>`；每帧把 body facts 派生一次（`ColumnBodyState`：history gate
+  是否升起 / 是否有 turn 在跑 / 是否还在首屏），周边框架读这份派生、不走第二条路径重推。
+  整页渲染在 `render_page`（`workspace/column_composer.rs`）：hero（首屏）／history
+  gate 页／转录带／footer；转录带（`column_view.rs` 的 `transcript`）= 消息列表
+  （`gpui::list` + ScrollBounce + 按压/释放簿记）+ turn rail，history gate 的超时剪除
+  也在 `column_view.rs`。
+- **`ChatEnv`**：列视图访问 app 侧效果的端口（同文件）——submit / steer / interrupt /
+  stop、队列行操作、access mode 写、`reveal_message`（turn rail 跳转与 ⌘M 落点）、
+  子代理钻取、goal 编辑会话。列视图**不持自己的 `WeakEntity<Workspace>`**：app 侧
+  效果全走端口，宿主换人时只换端口实现、不改列。生产实现 `WorkspaceChatEnv`
+  （workspace 的 weak handle；`forward` = 升级-或-丢弃的死柄语义）。
+- **装配为画布 sheet body**：`Workspace::ensure_column_view`（`workspace.rs`）惰性铸
+  实体（chat + speech + env 三件，纯投影、构造零成本）；`Workspace::ensure_canvas_view`
+  经 `CanvasView::set_column` 把它交给画布；`CanvasView::render_sheet_body` 的
+  `"session"` 分支（`workspace/canvas_view.rs`）对活跃 sheet 调该实体的 `render_page`
+  产出 body——画布只摆位置，sheet 的内容由实体自己画。
 
 #### Workspace
 
@@ -592,7 +617,7 @@ persistent child-run roster (`x-manox-work/childRunsChanged`, `ahp_store::
 child_runs_of`), which is also the attach-time restore source for the rail's
 observation rows.
 
-> Source: `crates/agent-ui/src/workspace/render.rs` (`render_captain_strip`), `crates/steer-agent-chat-ui/src/conversation.rs` (`live_activity`), `crates/agent-ui/src/workspace/subagent_stream.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_captain_strip`), `crates/steer-agent-chat-ui/src/conversation.rs` (`live_activity`), `crates/agent-ui/src/workspace/subagent_stream.rs`
 
 > Source: `crates/agent-ui/src/workspace/render.rs`
 
@@ -639,9 +664,9 @@ Full-width danger strip painted directly above the input, and only while the sto
 
 > Source: `crates/steer-agent-chat-ui/src/ahp_store.rs` (`LinkState`, `DeliveryFailure`, `delivery_failure`,
 > `link_state`, `retry_handshake`, `absorb_delivery_signal`, `spawn_delivery_failure_pump`, the handshake failure latch);
-> render in `crates/agent-ui/src/workspace/composer_render.rs` (`render_delivery_error_strip`)
+> render in `crates/agent-ui/src/workspace/column_composer.rs` (`render_delivery_error_strip`)
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs`
 
 #### QueuedFollowUps
 
@@ -657,13 +682,13 @@ The **drag reorder** is the sidebar group gesture whole-cloth: the entire `Queue
 
 On a thread (re)attach, the same sync runs: the parked session's accumulated receipts drain from the table and retire their cards; the running edge (a settle while parked) settles the queue exactly as the live edge would. Only positive signals strand a card; a remaining 待引导 card is genuinely still parked on the wire.
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_queued_follow_ups`, `render_queue_row`, `DraggedQueueRow` + ghost pill, `insertion_line`, `QueueRowDrag`/`QueueDragEdge`); `crates/agent-ui/src/workspace/composer.rs` (`send_user_turn` behavior routing, `steer_follow_up`, `requeue_follow_up`, `interrupt_from_card`, `withdraw_steer`, `edit_follow_up`, `delete_follow_up`, `retire_steer_card`, `settle_follow_ups`, `flush_batch`, `sync_conversation`); `crates/steer-agent-chat-ui/src/column.rs` (`SubmissionState`, `drain_queued_follow_ups`, `steer_group_insert_index`, the `interrupt_outbox` pair); steer consumption receipts in `crates/steer-agent-chat-ui/src/ahp_store.rs` (`SteerReceipt`, `steering_receipt_of`, `drain_steer_receipts`); steered badge render in `crates/steer-agent-chat-ui/src/views/message.rs` (`render_user`).
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_queued_follow_ups`, `render_queue_row`, `DraggedQueueRow` + ghost pill, `insertion_line`; the `QueueRowDrag`/`QueueDragEdge` types live on `crates/steer-agent-chat-ui/src/column.rs` and are re-exported here); `crates/agent-ui/src/workspace/composer.rs` (`send_user_turn` behavior routing, `steer_follow_up`, `requeue_follow_up`, `interrupt_from_card`, `withdraw_steer`, `edit_follow_up`, `delete_follow_up`, `retire_steer_card`, `settle_follow_ups`, `flush_batch`; the `sync_conversation` funnel is on `crates/agent-ui/src/workspace.rs`); `crates/steer-agent-chat-ui/src/column.rs` (`SubmissionState`, `drain_queued_follow_ups`, `steer_group_insert_index`, the `interrupt_outbox` pair); steer consumption receipts in `crates/steer-agent-chat-ui/src/ahp_store.rs` (`SteerReceipt`, `steering_receipt_of`, `drain_steer_receipts`); steered badge render in `crates/steer-agent-chat-ui/src/views/message.rs` (`render_user`).
 
 #### ComposerDivider
 
 1px horizontal border above the composer.
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (the footer's top hairline in `render_page`)
 
 #### AttachmentChips
 
@@ -673,7 +698,7 @@ rendered by `Workspace::render_attachments`): a file/image attachment row
 (`render_browser_chips`, persists across submits; removing a chip deactivates
 the WebExplore tool suite).
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs` + `crates/agent-ui/src/views/composer_menu.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_attachments`) + `crates/agent-ui/src/views/composer_menu.rs` (`render_attachment_chips` / `render_browser_chips`)
 
 #### AttachmentChip
 
@@ -692,43 +717,43 @@ remove btn. Removing it calls `deactivate_browser_tool_suite`.
 
 Horizontal flex: [InputField](#inputfield) + [SendCluster](#sendcluster) + chips.
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_composer`)
 
 #### InputField
 
 Multi-line auto-grow text input, placeholder text. Paste rides the input's own gpui-component 0.8 `Textarea::on_paste` hook (the composer no longer capture-intercepts the `Paste` action itself): a clipboard image stages as a pending attachment chip ([AttachmentChips](#attachmentchips)) and nothing reaches the rope, copied files (`ExternalPaths`) stage through the same pending-attachment pipeline instead of pasting their path string, and plain text falls through to the engine's own insert — the `InputEvent::Change` it emits drives the [CompletionPopover](#completionpopover) re-sync. An `@`-mention chip inside the value hints its full registry key on hover: a small popover card (`mention-hover-tip`, deferred overlay beside the [CompletionPopover](#completionpopover)'s mount) pinned right under the hovered chip's laid-out rect via gpui-kit 0.8 `Textarea::on_token_hover` — shown only when the key differs from the chip's short name, since a matching pair would repeat the chip verbatim. Slash `/` tokens get no tooltip.
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs` (via `gpui_component::Input`; hover state on `ChatColumn.mention_hover`, `crates/steer-agent-chat-ui/src/column.rs`)
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (via `gpui_component::Input`; hover tip in `render_mention_hover_tip`, hover state on `ChatColumn.mention_hover`, `crates/steer-agent-chat-ui/src/column.rs`)
 
 #### SendCluster
 
 The composer's action cluster (footer right, `render_send_cluster`), following thinkrail's split-send design and dressed exactly like the footer's other chips (`send_cluster_chip`: px_2/py_1, `text_xs` label, xsmall icon — the old 24px pill buttons towered over the chip row). **Idle**: one accent 发送 chip (`send-pill-send`, `arrow-up`) — inert on an empty composer. **Running**: an icon-only danger `pause` **停止** chip (`send-pill-stop` tooltip; click = `Workspace::stop_container` — plan D7 的**容器 stop-all**：前台容器的 `x-manox/teardown {mode: stop-all}` 一条命令杀干净容器全部活跃 run 与后台任务，**有意覆盖**运行时「后台 run 活到交报告」的默认（该默认只辖轮次级打断）；无并行客户端清扫，命令即路径，回执与 fold echo 驱动 UI；顺带收起子代理观察面板、按 B2-PR-3 撤下挂起的 ask 卡；绝对优先，不被草稿或卡片门控), then the default face — an accent `list-plus` **排队** chip (`send-pill-queue`; click/Enter parks the draft for the settle flush) — and the `chevron-down` chip opening the **send menu**: three ACTION rows, most-passive first, keys escalating with the lane's assertiveness — `send-menu-queue` (排队, ↩ — 本轮结束后自动发送), `send-menu-steer` (引导, ⌘↩ / Ctrl↩ — 伺机注入当前回合), `send-menu-interrupt` (打断, ⇧⌘↩ / Ctrl⇧↩ — 停止当前回复并立即发送；**轮次级 cancel**——保留运行时默认，与停止 chip 的容器级 stop-all 分工；the hint glyphs follow the platform's secondary modifier, pins to the row's right edge in `secondary_foreground`) — each fires the current draft with that behavior on click; the chevron stays enabled on an empty draft so the shortcuts stay discoverable. The menu is the **project chip's `PopupMenu`, whole-cloth**: built open-time (`open_send_menu`), mounted in the cluster's deferred slot (`bottom_full/right_0/occlude`), dismissed by outside click / `Escape` / row click through its own `DismissEvent` (`send_menu` + `send_menu_sub` on the column). The keyboard mirrors it on the Input (`subscribe_input`): `Enter` sends/queues, `⌘↩` steers, `⇧⌘↩` interrupts (the last is a dedicated `ComposerSubmitInterrupt` action bound at `composer > Input` — overloading `Enter` would newline AND submit). There is no 「待打断」 card state: interrupting is an action — the running turn's cancel fires now and the message rides the settle outbox（composer 为空时打断只取消：cancel 照发、无消息可泊——空输入不再是静默 no-op） ([`ChatColumn::interrupt_outbox`], stashed per thread like the queue).
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_send_cluster`, `send_menu_rows`, `send_cluster_chip`); `crates/agent-ui/src/workspace/composer.rs` (`SubmitBehavior`, `submit_input`/`submit_steer`/`submit_interrupt` → `submit_composer`); `crates/agent-ui/src/lib.rs` (`composer_send_key_bindings`)
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_send_cluster`, `send_menu_row`, `open_send_menu`, `send_cluster_chip`); `crates/agent-ui/src/workspace/composer.rs` (`SubmitBehavior`, `submit_input`/`submit_steer`/`submit_interrupt` → `submit_composer`); `crates/agent-ui/src/lib.rs` (`composer_send_key_bindings`)
 
 #### ModelChip
 
 Dropdown chip showing `provider · model · effort` (the reasoning-effort wire value, `high`/`max`) → [ModelMenu](#modelmenu) popup.
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_model_selector_pi` / `build_model_popup_menu_pi`)
 
 #### ContextUsagePill
 
 Compact context-occupancy pill in the footer's right control cluster, between [ModelChip](#modelchip) and [SendCluster](#sendcluster) (the dsh ContextMeter port): a 14px stroke ring + the integer percent, and the [ConversationInfoBubble](#conversationinfobubble)'s toggle — click opens/closes the bubble above it, hover only tints (never opens). The tooltip carries the absolute figures, `composer-context-usage-tooltip`. Data: the foreground leaf's `last_token_usage` — the latest request's input-side tokens (`input + cache_creation + cache_read`, the same active-token formula as the rail's budget row) — against the foreground model's `context_window` resolved through the shared provider registry. Renders nothing until a usage row has landed AND the window resolves (no capacity → no meter); fill + percent flip to `warning` at ≥90% (the rail's near-full threshold). The ring is a GPUI `canvas`: a `border`-tone full-circle stroke plus a `muted_foreground` arc sweeping clockwise from 12 o'clock, replicating the reference SVG verbatim (r 5.5, 2px round-capped stroke, `r + stroke/2 = 6.5` filling the 7px half-box); a full turn redraws the closed circle, 0% strokes nothing. Live updates ride the leaf's `TokenUsageUpdated` notify.
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_context_usage_ring`, `context_usage_ring`, `occupancy_arc_end`, the `CONTEXT_RING_*` constants)
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_context_usage_ring`, `context_usage_ring`, `occupancy_arc_end`, the `CONTEXT_RING_*` constants)
 
 #### DictationButton
 
 Push-to-talk dictation entry in the footer's right control cluster, between [ContextUsagePill](#contextusagepill) and [SendCluster](#sendcluster): the upstream `SpeechButton` (gpui-component `speech` feature) over the workspace's `Entity<SpeechState>`. A click starts a recognition session (mic glyph; the platform's recognizer — macOS `SFSpeechRecognizer`, on-device only, audio never leaves the machine), the next click stops it and the final transcript lands at the composer's caret via the public `insert` edit path (so the input's `Change` fires and the completion popover re-syncs), and the composer takes focus back; while the final result is pending the button shows a spinner and ignores clicks, and the tooltip follows the app's ui language through `gpui_component::set_locale` (语音输入 / 停止语音输入). Renders as **nothing** wherever dictation cannot work — no system recognizer (Linux placeholder), or a process whose Info.plist lacks `NSSpeechRecognitionUsageDescription` — so unsupported platforms reserve no space and never see a dead button (`render_dictation_button` gates on `has_recognizer()`; the button itself would also self-hide). Session errors surface as `tracing::warn` only in v1. First use triggers the macOS microphone + speech-recognition permission prompts (usage keys: `script/bundle-mac`'s generated Info.plist, and `crates/steer-app/resources/macos-info.plist` embedded into the dev binary's `__TEXT,__info_plist` by `build.rs` so `cargo run` can prompt too).
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs` (`render_dictation_button`); state + landing: `crates/agent-ui/src/workspace.rs` (`speech`, `land_dictation`, the `SpeechEvent` subscription in `Workspace::new`)
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_dictation_button`); state + landing: `crates/agent-ui/src/workspace.rs` (`speech`, `land_dictation`, the `SpeechEvent` subscription in `Workspace::new`; the entity is handed to the column view at construction — `ChatColumnView.speech`)
 
 #### AccessSwitch
 
 Inline two-segment [AccessMode](#access-modes) switch in the footer's left control group — the segmented variant of gpui-component `TabBar`: the two tiers (`access-mode-sandbox-title` / `access-mode-full-access-title`, plain-text labels, no icons) sit on a muted track and the sliding indicator pill animates between segments (the component's own animation), so either tier is one click away — no popover, no second step. The selected segment IS the current mode, read from the fold (§J11 `access_mode_or_default`) into `selected_index` — a pure projection with no local open state. Clicks on the inactive segment route through `Workspace::apply_access_mode` (write-ahead config write + object-row mirror + localized notice; optimistic flip, echo confirms / refusal rolls back); clicking the already-active segment is a no-op — the guard reads the fold at click time, so a click landing before the optimistic flip repaints stays silent (the notice announces a transition, not an echo). The left control group keeps its intrinsic width and the switch never shrinks (`flex_shrink_0`); at narrow widths the footer's right cluster yields through the model face (the model name ellipsizes) so the chips never paint under the pinned ring/dictation/send controls.
 
-> Source: `crates/agent-ui/src/workspace.rs` (`build_access_switch`), `crates/agent-ui/src/workspace/composer_render.rs` (`render_access_switch`)
+> Source: `crates/agent-ui/src/workspace.rs` (`build_access_switch`), `crates/agent-ui/src/workspace/column_composer.rs` (`render_access_switch`)
 
 #### ProjectChip
 
@@ -741,7 +766,7 @@ picker ([ProjectMenu](#projectmenu), the blank-project flow, the folder
 pick) retired with the `session/workingDirectorySet` dispatch it fed — a
 started conversation offers no target-change gesture (A1-D1/D5).
 
-> Source: `crates/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/agent-ui/src/workspace/column_composer.rs` (`render_project_chip_pi`)
 
 ##### ConfirmationCard
 
@@ -849,7 +874,7 @@ itself.
 
 Trigger: typing `/` (slash commands) or `@` (skills + subagents) at the caret in [InputField](#inputfield). A typeahead list anchored on the caret (`prepaint_caret_geometry`, one line below, flipping above when the window's bottom runs out, x clamped to the window): filters live on every keystroke, navigated with up/down, confirmed with Tab or Enter, dismissed with Escape. While open the composer wrapper sets a `completion = open` key context so the `completion == open > Input` keybindings shadow the Input's own navigation bindings. A pure render overlay — [InputField](#inputfield) keeps focus throughout, so the query keeps filtering as the user types.
 
-> Source: `crates/steer-agent-chat-ui/src/views/completion.rs` (state + detection + rendering), wired in `crates/agent-ui/src/workspace/composer_render.rs`
+> Source: `crates/steer-agent-chat-ui/src/views/completion.rs` (state + detection + rendering), wired in `crates/agent-ui/src/workspace/column_composer.rs` (`render_completion_overlay`)
 
 #### ModelMenu
 
@@ -916,7 +941,7 @@ Composer 圆圈上方的会话信息气泡（dsh ContextMeter 弹层的对位实
 
 > Source: `crates/steer-agent-chat-ui/src/views/context_rail.rs`（`render_bubble` 及各段 builder、
 > `fold_window` / `subagent_display_order` / `sort_todo_steps` / `todo_visual`）；挂载与开关：
-> `crates/agent-ui/src/workspace/composer_render.rs`（`render_context_usage_ring`，
+> `crates/agent-ui/src/workspace/column_composer.rs`（`render_context_usage_ring`，
 > 相对/绝对普通挂载 + 尾巴 `icons/context-bubble-tail.svg`）；验收图：
 > `design/conversation-info-bubble/acceptance/`（`BUBBLE_SHOT=… cargo test -p agent-ui --test
 > visual_bubble`，`BUBBLE_STATE=open|closed`）。
