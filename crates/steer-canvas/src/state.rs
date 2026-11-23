@@ -4,8 +4,9 @@
 //! This is the only writer of a stored layout ([`CanvasState::set_layout`]) —
 //! the geometry-layer counterpart of the chrome boundary's "one writer, one
 //! queue" rule. Every commit carries a ticket taken *before* the intent was
-//! formed; a commit that finds its ticket superseded is dropped silently
-//! instead of rolling a newer intent back.
+//! formed, and a ticket commits at most once: a commit that finds its ticket
+//! superseded or already spent is dropped silently instead of rolling a newer
+//! intent back.
 //!
 //! Two derived facts live here as projections, never as stored truth:
 //!
@@ -106,8 +107,8 @@ impl HeldLayouts {
 pub enum SetLayoutOutcome {
     /// The layout landed.
     Applied,
-    /// The ticket was superseded (or the canvas is no longer shown): the edit
-    /// was dropped, not merged.
+    /// The ticket was superseded or already spent (or the canvas is no longer
+    /// shown): the edit was dropped, not merged.
     Stale,
     /// The layout landed and left the container with no sheet at all. The
     /// caller archives the container through the workspace's teardown face —
@@ -222,13 +223,15 @@ impl CanvasState {
     }
 
     /// Takes the next canvas-intent ticket. Every gesture takes one before it
-    /// forms its edit and commits with it.
+    /// forms its edit and commits with it. A ticket is single-use: its one
+    /// successful commit spends it (see [`CanvasState::set_layout`]).
     pub fn take_ticket(&mut self) -> u64 {
         self.ticket += 1;
         self.ticket
     }
 
-    /// Whether `ticket` is still the newest intent.
+    /// Whether `ticket` is still the newest intent and unspent — a successful
+    /// commit spends the current one, so the same ticket cannot land twice.
     pub fn ticket_current(&self, ticket: u64) -> bool {
         ticket == self.ticket
     }
@@ -237,8 +240,11 @@ impl CanvasState {
     ///
     /// Applies `next` to `container_id`'s canvas when the ticket is current
     /// and that canvas is the one shown; otherwise the edit is dropped as
-    /// stale. The sheet creation order is pruned to the new layout first, so
-    /// the title projection never names a closed sheet.
+    /// stale. A successful commit ([`SetLayoutOutcome::Applied`] and
+    /// [`SetLayoutOutcome::AutoArchive`] alike) spends the ticket: committing
+    /// the same ticket again — even with a different layout — is stale, so one
+    /// intent lands at most once. The sheet creation order is pruned to the
+    /// new layout first, so the title projection never names a closed sheet.
     pub fn set_layout(
         &mut self,
         container_id: &str,
@@ -248,6 +254,9 @@ impl CanvasState {
         if !self.ticket_current(ticket) || container_id != self.canvas_key() {
             return SetLayoutOutcome::Stale;
         }
+        // Spending the ticket here makes a second commit with it stale
+        // instead of letting one intent land twice.
+        self.ticket += 1;
         let alive: HashSet<String> = layout::panel_ids(&next)
             .into_iter()
             .map(str::to_string)
@@ -621,6 +630,40 @@ mod tests {
             SetLayoutOutcome::Stale
         );
         assert_eq!(layout::panel_ids(state.layout()), ["home:b"]);
+    }
+
+    #[test]
+    fn a_ticket_commits_once() {
+        let mut state = CanvasState::new();
+        let ticket = state.take_ticket();
+        let next = sheets(&["home:scratch", "session:s1"]);
+        assert_eq!(
+            state.set_layout(SCRATCH_CONTAINER, next, ticket),
+            SetLayoutOutcome::Applied
+        );
+        // The spent ticket cannot land a second time — not even a different
+        // layout on the same canvas.
+        assert_eq!(
+            state.set_layout(SCRATCH_CONTAINER, sheets(&["home:scratch"]), ticket),
+            SetLayoutOutcome::Stale
+        );
+        assert_eq!(
+            layout::panel_ids(state.layout()),
+            ["home:scratch", "session:s1"]
+        );
+        assert!(!state.ticket_current(ticket));
+    }
+
+    #[test]
+    fn an_auto_archive_commit_spends_the_ticket_too() {
+        let mut state = CanvasState::new();
+        switch(&mut state, "a");
+        let ticket = state.take_ticket();
+        assert_eq!(
+            state.set_layout("a", DockLayout::default(), ticket),
+            SetLayoutOutcome::AutoArchive("a".to_string())
+        );
+        assert!(!state.ticket_current(ticket));
     }
 
     #[test]
