@@ -1025,3 +1025,20 @@ workspace-unsent-draft-marker = 〔未送达〕
 composer-delivery-handshake = 宿主连接失败（握手未完成），消息可能没有送达。
 composer-delivery-dispatch = 消息发送失败：与宿主的传输已断开。
 composer-delivery-stalled = 消息仍在排队（超过投递预算），请检查宿主。
+
+### pi 会话（PLAN-ABSORB-06）
+pi-composer-placeholder = 给 pi 发消息…
+pi-send = 发送
+pi-stop = 停止
+pi-loading = 正在恢复会话…
+pi-empty = 还没有消息
+pi-streaming = 正在生成…
+pi-queued = { $count } 条排队
+pi-session-dead = 会话已结束
+pi-permission-title = 工具需要授权
+pi-accept = 接受
+pi-decline = 拒绝
+pi-ask-title = 问题
+pi-ask-note-placeholder = 补充说明（可选）
+pi-context-used = 上下文 { $pct }%
+pi-banner-version = pi { $version }

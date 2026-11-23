@@ -1051,3 +1051,20 @@ workspace-unsent-draft-marker = [unsent]
 composer-delivery-handshake = The host handshake failed; messages may not be delivered.
 composer-delivery-dispatch = Sending failed: the transport to the host is gone.
 composer-delivery-stalled = Messages are still queued past the delivery budget; check the host.
+
+### pi session (PLAN-ABSORB-06)
+pi-composer-placeholder = Message pi…
+pi-send = Send
+pi-stop = Stop
+pi-loading = Restoring the conversation…
+pi-empty = No messages yet
+pi-streaming = Writing…
+pi-queued = { $count } queued
+pi-session-dead = The session ended
+pi-permission-title = A tool needs your approval
+pi-accept = Accept
+pi-decline = Decline
+pi-ask-title = Question
+pi-ask-note-placeholder = Add a note (optional)
+pi-context-used = Context { $pct }%
+pi-banner-version = pi { $version }
