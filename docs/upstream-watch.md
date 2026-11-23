@@ -1,6 +1,6 @@
-# Upstream watch — 三条外部依赖线的台账
+# Upstream watch — 四条外部依赖线的台账
 
-本仓的外部依赖线只有三条；每条线的最新 pin、open 项与核对证据都在这里。**任何 pin
+本仓的外部依赖线只有四条；每条线的最新 pin、open 项与核对证据都在这里。**任何 pin
 变更（manox tag、gpui-kit、rust channel、Ghostty rev、pi distro、lock 级 pin）都必须
 先读本文件、对每个 open 项在新版本里实测核对（不能只读文档），并在下面补一行核对
 记录**——没有核对的 bump 视为 bump 未完成（见 AGENTS.md「依赖 pin 纪律」）。
@@ -30,10 +30,14 @@
   - 需求：AHP 面提供「重启后仍可回答的 ask」——例如 `chat/inputRequested` 在
     `session/restore` 后重放仍在等待的请求，并提供一个「写回答案」的通道（live 解开
     或 late 注入）。
-  - 立项与核对：PLAN-ABSORB-07 子项 5（2026-11-23，manox `v0.13.0`）。
+  - 立项与核对：2026-11-23 建本台账时立项并核对（manox `v0.13.0`）。
   - 状态：**open**（等待 dspo/manox 侧实现；本仓不硬造）。
 
 ### gpui-kit
+
+- 无 open 项。
+
+### rust channel
 
 - 无 open 项。
 
