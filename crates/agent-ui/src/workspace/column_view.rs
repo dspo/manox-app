@@ -1,30 +1,29 @@
-//! The conversation column as its own entity — the step that lets a session be
-//! a sheet body.
+//! The conversation column as its own entity — the page every `session:` sheet
+//! renders.
 //!
 //! The canvas model's invariant is "a sheet exists because its kind is
 //! registered, and the layout only says where it is placed". For that to hold
-//! for the dominant kind (`manox-session`), the column must be a view the
-//! registry can hand out — not a stretch of `Workspace::render`. This module is
-//! where that view lives while the migration lands:
+//! for the dominant kind (`session:`), the column is a view the canvas can
+//! hand out — not a stretch of `Workspace::render`. This module holds that
+//! view: the message band and its turn rail, the history gate, and the body
+//! facts ([`ColumnBodyState`]) the frame around them reads.
 //!
-//! 1. **the entity and the transcript** (here): the message band, its turn
-//!    rail, the history gate and the body facts the rest of the frame reads;
-//! 2. the composer and its attachments (moves next);
-//! 3. the captain strip and the column frame (then `Workspace::render` mounts
-//!    the whole view as its main column);
-//! 4. the canvas (`steer-canvas` layouts + `SheetKindSpec`) mounts one view per
-//!    session sheet.
+//! Assembly: `Workspace::ensure_column_view` creates the view once;
+//! `ensure_canvas_view` hands it to the canvas (`CanvasView::set_column`), and
+//! `render_sheet_body`'s `"session"` branch renders the page for every
+//! `session:` sheet. One column entity — the foreground conversation — so a
+//! switch of sheets or containers never rebuilds it.
 //!
-//! Two rules keep the stages honest:
+//! Two rules keep the entity honest:
 //!
 //! - **State stays in the column.** `ChatColumn` (the chat crate's entity) owns
 //!   the conversation, drafts, asks, the list state and the body flags; this
 //!   view owns presentation and derives per-frame facts ([`ColumnBodyState`])
 //!   once, so the frame around it never re-derives them from a second path.
 //! - **Effects cross through a port.** Anything that belongs to the app —
-//!   scrolling a row into view today; right-pane tabs, navigation and settings
-//!   as they migrate — goes through [`ChatEnv`]. The view never holds a
-//!   `WeakEntity<Workspace>` of its own, so a later canvas host swaps the port
+//!   scrolling a row into view, composer submits and queue writes, goal
+//!   editing — goes through [`ChatEnv`]. The view never holds a
+//!   `WeakEntity<Workspace>` of its own, so a different host can swap the port
 //!   instead of rewriting the column.
 
 use std::sync::Arc;
@@ -468,9 +467,11 @@ impl ChatColumnView {
 
 impl Render for ChatColumnView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        // Stage 1: the transcript. The composer, the captain strip and the
-        // column frame join it next; the frame around it is still the
-        // workspace's, and reads its facts through `body_state`.
+        // The standard entity mount. Production hosts the page through the
+        // canvas instead — `render_sheet_body`'s "session" branch calls
+        // `render_page` inside the canvas's own update, because a nested
+        // entity element would measure its contents and collapse the
+        // percentage-sized page to zero.
         self.render_page(window, cx)
     }
 }
