@@ -267,7 +267,11 @@ impl ChatColumnView {
     /// A reopened thread whose snapshot has not landed keeps the loading page
     /// only while the wait is young: past the timeout the gate is pruned and
     /// the page degrades to the hero screen instead of pinning forever.
-    fn prune_history_gate(&self, cx: &mut App) {
+    ///
+    /// Runs at the top of the page render ([`ChatColumnView::render_page`]),
+    /// before any body fact is derived, so an expired gate reads as degraded
+    /// in the same frame.
+    pub(crate) fn prune_history_gate(&self, cx: &mut App) {
         prune_history_gate(&self.chat, cx);
     }
 
@@ -276,13 +280,14 @@ impl ChatColumnView {
     ///
     /// The band owns nothing — every piece of state it reads or writes lives on
     /// the chat entity, so a switch of tabs or containers never rebuilds it.
+    /// The history gate is pruned by the page render before this runs, so the
+    /// `body_state` read below sees the frame's settled facts.
     pub(super) fn transcript(
         &self,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        self.prune_history_gate(cx);
         let state = self.body_state(cx);
         if state.first_screen || state.history_loading {
             return gpui::div().into_any_element();

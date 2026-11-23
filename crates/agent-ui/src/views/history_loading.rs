@@ -4,6 +4,7 @@
 //! `ai_elements::Meerkat`; this page is the heading, the thread id, and the
 //! 10-second self-clearing gate's timeout constant.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ai_elements::Meerkat;
@@ -18,9 +19,27 @@ use crate::i18n;
 /// self-clears and the hero screen returns.
 pub(crate) const HISTORY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many times the loading page has been built into a frame since the last
+/// reset. The gate timeout regression reads this to pin the same-frame
+/// degrade invariant: past the gate's expiry the same render pass must prune
+/// the gate and render the degraded page, so a build after the expiry means
+/// the prune ran after the body facts and the loading page painted an extra
+/// frame.
+#[cfg(feature = "test-support")]
+static PAGE_BUILDS: AtomicUsize = AtomicUsize::new(0);
+
+/// Reads and resets [`PAGE_BUILDS`]; the integration regression is the only
+/// reader.
+#[cfg(feature = "test-support")]
+pub fn take_history_loading_page_builds() -> usize {
+    PAGE_BUILDS.swap(0, Ordering::Relaxed)
+}
+
 /// The full loading page: the animated meerkat, the heading, and the thread
 /// id. No composer — the thread is not ready.
 pub(crate) fn render_history_loading(theme: &Theme, thread_id: &str) -> AnyElement {
+    #[cfg(feature = "test-support")]
+    PAGE_BUILDS.fetch_add(1, Ordering::Relaxed);
     v_flex()
         .flex_1()
         .w_full()

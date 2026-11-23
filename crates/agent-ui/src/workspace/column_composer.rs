@@ -2407,9 +2407,10 @@ impl ChatColumnView {
     }
 
     /// The whole column page: hero (first screen), the history gate, the
-    /// transcript and the footer. The frame around it (navigator overlay, card
-    /// width, action glue) still belongs to the workspace until the canvas
-    /// mounts this view directly.
+    /// transcript and the footer. The canvas mounts this page as every
+    /// `session:` sheet's body; the workspace frames it one level up (the
+    /// navigator overlay and the card-width measurement live around the
+    /// canvas).
     pub(crate) fn render_page(
         &mut self,
         window: &mut Window,
@@ -2417,6 +2418,11 @@ impl ChatColumnView {
     ) -> AnyElement {
         use gpui_component::v_flex;
 
+        // The gate's expiry must read as a degraded page in the same frame:
+        // prune before any body fact is derived, never after (a prune after
+        // the derivation builds the loading page once more and costs an extra
+        // notify cycle to replace it).
+        self.prune_history_gate(cx);
         let theme = cx.theme().clone();
         let body = self.body_state(cx);
         let running = body.running;
