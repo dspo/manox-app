@@ -57,5 +57,11 @@ manox-session-core.workspace = true
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 
+# The windowed pi-session tests seed a transcript through the test-support
+# fold seam; without the feature they have nothing to drive.
+[[test]]
+name = "pi_session_view"
+required-features = ["test-support"]
+
 [lints.clippy]
 dbg_macro = "deny"

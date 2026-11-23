@@ -6,7 +6,7 @@
 //! reuse `ai-elements`; this module owns the pi layout, not the conversation
 //! vocabulary.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ai_elements::{
     AskBlock, AskOption, AskState, AskUserQuestion, Reasoning, ReasoningState, Tool, ToolState,
@@ -350,30 +350,31 @@ impl Render for PiSessionView {
         let theme = cx.theme().clone();
         let (title, error, rows, state, loading, streaming, queued, usage) = {
             let store = self.store.read(cx);
-            let view = store.book().view(&self.session_id);
+            let Some(view) = store.book().view(&self.session_id) else {
+                let title = fallback_title(store, &self.session_id);
+                return closed_face(&theme, title);
+            };
             let title = fallback_title(store, &self.session_id);
-            let error = store.error().map(SharedString::from).or_else(|| {
-                view.and_then(|view| view.error.clone())
-                    .map(SharedString::from)
-            });
+            let error = store
+                .error()
+                .map(SharedString::from)
+                .or_else(|| view.error.clone().map(SharedString::from));
             let rows = store.book().rows(&self.session_id);
-            let (state, loading, streaming, queued, usage) = view
-                .map(|view| {
-                    (
-                        view.state,
-                        view.loading,
-                        view.streaming,
-                        view.queued,
-                        view.usage,
-                    )
-                })
-                .unwrap_or((PiSessionState::Starting, true, false, 0, None));
-            (title, error, rows, state, loading, streaming, queued, usage)
+            (
+                title,
+                error,
+                rows,
+                view.state,
+                view.loading,
+                view.streaming,
+                view.queued,
+                view.usage,
+            )
         };
 
         let rows = rows
             .into_iter()
-            .map(|entry| render_entry(entry, cx, &theme))
+            .map(|entry| self.render_entry(entry, &theme, cx))
             .collect::<Vec<_>>();
         let selectors = self.selector_chips(&theme, cx);
         let slash = self.slash_candidates(&theme, cx);
@@ -524,6 +525,7 @@ impl Render for PiSessionView {
                         )
                     }),
             )
+            .into_any_element()
     }
 }
 
@@ -785,6 +787,19 @@ impl PiSessionView {
             )
         };
         let mut cards = Vec::new();
+        // Answered cards leave the store's pending lists; their per-card view
+        // state must leave with them, or it would outlive the request forever.
+        let live_ask_keys: HashSet<String> = asks
+            .iter()
+            .map(|request| request_key(&request.id))
+            .chain(restored.iter().map(|ask| ask.tool_call_id.clone()))
+            .collect();
+        self.asks.retain(|key, _| live_ask_keys.contains(key));
+        self.elicitation_choices.retain(|key, _| {
+            elicitations
+                .iter()
+                .any(|request| &request_key(&request.id) == key)
+        });
         for request in permissions {
             cards.push(self.permission_card(&request, theme));
         }
@@ -884,7 +899,14 @@ impl PiSessionView {
             .flex_col()
             .gap_2()
             .child(div().text_sm().child(SharedString::from(message)));
-        let chosen = self.elicitation_choices.remove(&key).unwrap_or_default();
+        // A read, not a remove-and-reinsert: the entry is created by the
+        // choice click and removed by the store-side answer (the card leaves
+        // the pending list, and `pending_cards` prunes what is left over).
+        let chosen = self
+            .elicitation_choices
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         let mut complete = true;
         for (name, schema) in &properties {
             let values = schema
@@ -913,7 +935,6 @@ impl PiSessionView {
                     continue;
                 };
                 let selected = chosen.get(name).is_some_and(|current| current == value);
-                let this = cx.entity();
                 let property = name.clone();
                 let picked = value.to_owned();
                 let choice_key = key.clone();
@@ -925,20 +946,17 @@ impl PiSessionView {
                     } else {
                         theme.border
                     },
-                    move |_, _, cx| {
-                        this.update(cx, |view, cx| {
-                            view.elicitation_choices
-                                .entry(choice_key.clone())
-                                .or_default()
-                                .insert(property.clone(), picked.clone());
-                            cx.notify();
-                        });
-                    },
+                    cx.listener(move |view, _, _, cx| {
+                        view.elicitation_choices
+                            .entry(choice_key.clone())
+                            .or_default()
+                            .insert(property.clone(), picked.clone());
+                        cx.notify();
+                    }),
                 ));
             }
             card = card.child(row);
         }
-        self.elicitation_choices.insert(key, chosen.clone());
         let mut actions = div().flex().gap_2().child(self.answer_button(
             SharedString::from(format!("pi-elicit-decline:{}", request_key(&request.id))),
             t("pi-decline"),
@@ -963,19 +981,16 @@ impl PiSessionView {
     }
 
     fn ask_card(&mut self, request: &PendingRequest, cx: &mut Context<Self>) -> AnyElement {
-        let tool_call_id = request.tool_call_id().unwrap_or_default().to_owned();
         let questions = request
             .params
             .get("questions")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        self.build_ask(
-            tool_call_id.clone(),
-            questions,
-            AskTarget::Request(request.id.clone()),
-            cx,
-        )
+        // Ask state is keyed by the request's own id: two live asks without a
+        // `toolCallId` must not share one answer state.
+        let key = request_key(&request.id);
+        self.build_ask(key, questions, AskTarget::Request(request.id.clone()), cx)
     }
 
     /// A question card that outlived its turn (`_zu/ask/pending`): answered
@@ -997,10 +1012,11 @@ impl PiSessionView {
     }
 
     /// One ask card, whatever its answer route: the live wire request or the
-    /// mailbox entry that survived a restart.
+    /// mailbox entry that survived a restart. `key` names the card's answer
+    /// state (the request's id, or the mailbox's tool call id).
     fn build_ask(
         &mut self,
-        tool_call_id: String,
+        key: String,
         questions: Vec<Value>,
         target: AskTarget,
         cx: &mut Context<Self>,
@@ -1016,7 +1032,7 @@ impl PiSessionView {
             .collect::<Vec<_>>();
         let state = self
             .asks
-            .entry(tool_call_id.clone())
+            .entry(key.clone())
             .or_insert_with(|| cx.new(|cx| AskState::new(multi, t("pi-ask-note-placeholder"), cx)))
             .clone();
         let mut blocks = Vec::new();
@@ -1060,7 +1076,7 @@ impl PiSessionView {
         let submit_questions = questions;
         let submit_target = target.clone();
 
-        AskUserQuestion::new(tool_call_id, &state)
+        AskUserQuestion::new(key, &state)
             .name(t("pi-ask-title"))
             .blocks(blocks)
             .on_submit(move |_, cx| {
@@ -1115,96 +1131,163 @@ impl PiSessionView {
             });
         })
     }
-}
 
-/// One transcript row. Tool and reasoning cards keep an entity per entry id, so
-/// their folds and status chips survive re-renders.
-fn render_entry(
-    entry: Entry,
-    cx: &mut Context<PiSessionView>,
-    theme: &gpui_component::Theme,
-) -> AnyElement {
-    match entry {
-        Entry::User(user) => div()
-            .flex()
-            .justify_end()
-            .child(
-                div()
-                    .max_w(px(640.))
-                    .rounded(theme.radius)
-                    .bg(theme.secondary)
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .child(SharedString::from(user.text)),
-            )
-            .into_any_element(),
-        Entry::Assistant(reply) => {
-            let mut column = div().flex().flex_col().gap_1().text_sm();
-            if let Some(thoughts) = reply
-                .thoughts
-                .clone()
-                .filter(|text| !text.trim().is_empty())
-            {
-                let state = ensure_reasoning(cx, &reply.id);
-                column = column.child(
-                    Reasoning::new(
-                        SharedString::from(format!("pi-reasoning:{}", reply.id)),
-                        &state,
-                    )
-                    .content(
+    /// One transcript row. Tool and reasoning cards keep an entity per entry
+    /// id, so their folds and status chips survive re-renders. The row cache
+    /// lives on `self`: the render pass already holds this view's lease, so
+    /// any `cx.entity()` round trip here would be a double lease.
+    fn render_entry(
+        &mut self,
+        entry: Entry,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match entry {
+            Entry::User(user) => div()
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .max_w(px(640.))
+                        .rounded(theme.radius)
+                        .bg(theme.secondary)
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .child(SharedString::from(user.text)),
+                )
+                .into_any_element(),
+            Entry::Assistant(reply) => {
+                let mut column = div().flex().flex_col().gap_1().text_sm();
+                if let Some(thoughts) = reply
+                    .thoughts
+                    .clone()
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    let state = self.ensure_reasoning(&reply.id, cx);
+                    column = column.child(
+                        Reasoning::new(
+                            SharedString::from(format!("pi-reasoning:{}", reply.id)),
+                            &state,
+                        )
+                        .content(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(thoughts),
+                        ),
+                    );
+                }
+                if !reply.text.is_empty() {
+                    column = column.child(SharedString::from(reply.text.clone()));
+                }
+                if let Some(error) = reply
+                    .pi
+                    .as_ref()
+                    .and_then(|pi| pi.error.clone())
+                    .filter(|error| !error.is_empty())
+                {
+                    column = column.child(div().text_xs().text_color(theme.danger).child(error));
+                }
+                column.into_any_element()
+            }
+            Entry::Tool(tool) => {
+                let state = self.ensure_tool(&tool.tool_call_id, cx);
+                state.update(cx, |state, cx| {
+                    state.set_status(element_status(tool.status), cx);
+                });
+                let mut card =
+                    Tool::new(SharedString::from(format!("pi-tool:{}", tool.id)), &state)
+                        .name(tool_name(&tool));
+                if let Some(input) = summarize_input(&tool) {
+                    card = card.args(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(thoughts),
-                    ),
-                );
+                            .child(input),
+                    );
+                }
+                if let Some(body) = tool_body(&tool, theme) {
+                    card = card.content(body);
+                }
+                card.into_any_element()
             }
-            if !reply.text.is_empty() {
-                column = column.child(SharedString::from(reply.text.clone()));
-            }
-            if let Some(error) = reply
-                .pi
-                .as_ref()
-                .and_then(|pi| pi.error.clone())
-                .filter(|error| !error.is_empty())
-            {
-                column = column.child(div().text_xs().text_color(theme.danger).child(error));
-            }
-            column.into_any_element()
+            Entry::Note(note) => div()
+                .text_xs()
+                .text_color(match note.severity.as_deref() {
+                    Some("error") => theme.danger,
+                    Some("warning") => theme.warning,
+                    _ => theme.muted_foreground,
+                })
+                .child(SharedString::from(note.text))
+                .into_any_element(),
         }
-        Entry::Tool(tool) => {
-            let state = ensure_tool(cx, &tool.tool_call_id);
-            state.update(cx, |state, cx| {
-                state.set_status(element_status(tool.status), cx);
-            });
-            let mut card = Tool::new(SharedString::from(format!("pi-tool:{}", tool.id)), &state)
-                .name(SharedString::from(
-                    tool.name.clone().unwrap_or_else(|| tool.title.clone()),
-                ));
-            if let Some(input) = summarize_input(&tool) {
-                card = card.args(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(input),
-                );
-            }
-            if let Some(body) = tool_body(&tool, theme) {
-                card = card.content(body);
-            }
-            card.into_any_element()
-        }
-        Entry::Note(note) => div()
-            .text_xs()
-            .text_color(match note.severity.as_deref() {
-                Some("error") => theme.danger,
-                Some("warning") => theme.warning,
-                _ => theme.muted_foreground,
-            })
-            .child(SharedString::from(note.text))
-            .into_any_element(),
     }
+
+    /// The reasoning card's state entity for `id`, minted on first sight.
+    fn ensure_reasoning(&mut self, id: &str, cx: &mut Context<Self>) -> Entity<ReasoningState> {
+        if let Some(entity) = self.reasoning.get(id).cloned() {
+            return entity;
+        }
+        let entity = cx.new(ReasoningState::new);
+        self.reasoning.insert(id.to_owned(), entity.clone());
+        entity
+    }
+
+    /// The tool card's state entity for `id`, minted on first sight.
+    fn ensure_tool(&mut self, id: &str, cx: &mut Context<Self>) -> Entity<ToolState> {
+        if let Some(entity) = self.tools.get(id).cloned() {
+            return entity;
+        }
+        let entity = cx.new(|cx| ToolState::new(cx).no_auto_fold());
+        self.tools.insert(id.to_owned(), entity.clone());
+        entity
+    }
+}
+
+/// The face a sheet shows once the store no longer holds its session (the
+/// session was closed while a sheet kept this view alive): no transcript and
+/// no composer — a prompt would be a no-op, and the reconnect affordance is
+/// meaningless without the store's view (its cwd went with it).
+fn closed_face(theme: &gpui_component::Theme, title: SharedString) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .bg(theme.background)
+        .text_color(theme.foreground)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .text_sm()
+                .child(title),
+        )
+        .child(
+            div().flex_1().flex().items_center().justify_center().child(
+                div()
+                    .debug_selector(|| "pi-closed".to_owned())
+                    .child(muted_text(t("pi-session-closed"), theme)),
+            ),
+        )
+        .into_any_element()
+}
+
+/// The tool card's label: the harness's tool name, else its title, else the
+/// app's word for an unnamed tool (the reducer leaves the fallback empty so
+/// the label localizes at render time).
+fn tool_name(tool: &ToolEntry) -> SharedString {
+    if let Some(name) = tool.name.clone().filter(|name| !name.is_empty()) {
+        return SharedString::from(name);
+    }
+    if !tool.title.is_empty() {
+        return SharedString::from(tool.title.clone());
+    }
+    t("pi-tool-unnamed")
 }
 
 fn tool_body(tool: &ToolEntry, theme: &gpui_component::Theme) -> Option<AnyElement> {
@@ -1229,12 +1312,12 @@ fn tool_body(tool: &ToolEntry, theme: &gpui_component::Theme) -> Option<AnyEleme
     if let Some(meta) = &tool.meta {
         let mut facts = Vec::new();
         if let Some(code) = meta.exit_code {
-            facts.push(format!("exit {code}"));
+            facts.push(t_str("pi-tool-exit-code", &[("code", &code.to_string())]));
         }
         if meta.truncated == Some(true) {
-            facts.push(format!(
-                "truncated ({} lines)",
-                meta.total_lines.unwrap_or(0)
+            facts.push(t_str(
+                "pi-tool-truncated",
+                &[("lines", &meta.total_lines.unwrap_or(0).to_string())],
             ));
         }
         if !facts.is_empty() {
@@ -1292,28 +1375,6 @@ fn element_status(status: ToolStatus) -> ElementToolStatus {
         ToolStatus::Completed => ElementToolStatus::Succeeded,
         ToolStatus::Failed => ElementToolStatus::Failed,
     }
-}
-
-fn ensure_reasoning(cx: &mut Context<PiSessionView>, id: &str) -> Entity<ReasoningState> {
-    if let Some(entity) = cx.entity().read(cx).reasoning.get(id).cloned() {
-        return entity;
-    }
-    let entity = cx.new(ReasoningState::new);
-    cx.entity().update(cx, |view, _| {
-        view.reasoning.insert(id.to_owned(), entity.clone());
-    });
-    entity
-}
-
-fn ensure_tool(cx: &mut Context<PiSessionView>, id: &str) -> Entity<ToolState> {
-    if let Some(entity) = cx.entity().read(cx).tools.get(id).cloned() {
-        return entity;
-    }
-    let entity = cx.new(|cx| ToolState::new(cx).no_auto_fold());
-    cx.entity().update(cx, |view, _| {
-        view.tools.insert(id.to_owned(), entity.clone());
-    });
-    entity
 }
 
 /// The ask card's answers as the harness's `AskResponse` envelope.
@@ -1402,12 +1463,13 @@ fn todo_row(
     let detail = todo
         .summary
         .clone()
+        .map(SharedString::from)
         .or_else(|| {
             todo.verification
                 .clone()
-                .map(|verified| format!("verified: {verified}"))
+                .map(|verified| t_str("pi-todo-verified", &[("verified", &verified)]))
         })
-        .or_else(|| todo.note.clone());
+        .or_else(|| todo.note.clone().map(SharedString::from));
     let store = store.clone();
     let session_id = session_id.to_owned();
     let id = todo.id.clone();
