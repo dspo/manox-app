@@ -1082,3 +1082,4 @@ pi-subagents-title = subagents
 pi-banner-skills = skills
 pi-banner-extensions = extensions
 pi-subagent-transcript-empty = No messages yet
+pi-reconnect = Reconnect
