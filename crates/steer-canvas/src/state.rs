@@ -130,10 +130,15 @@ pub enum SwitchOutcome {
 pub struct CanvasState {
     /// The shown container; `None` is the scratch canvas.
     active_container: Option<String>,
-    /// The shown canvas plus the scratch canvas. A container's entry exists
-    /// only while it is shown — a canvas that is not shown lives in `held`
-    /// (or nowhere).
-    layouts: HashMap<String, DockLayout>,
+    /// The shown canvas's layout while a container is shown; `None` exactly
+    /// when `active_container` is. The pair moves together — it is set by the
+    /// paths that show a container and cleared by the ones that leave one — so
+    /// the shown canvas always has a layout to read ([`CanvasState::layout`]
+    /// falls back to the scratch canvas while this is `None`).
+    shown: Option<DockLayout>,
+    /// The scratch canvas's layout, kept in memory whether it is shown or not
+    /// (it is never parked and never persisted).
+    scratch: DockLayout,
     /// The canvases put aside, bounded.
     held: HeldLayouts,
     /// The zoomed panel id, if any (the zoom state sits outside the layout).
@@ -149,10 +154,8 @@ impl Default for CanvasState {
     fn default() -> Self {
         Self {
             active_container: None,
-            layouts: HashMap::from([(
-                SCRATCH_CONTAINER.to_string(),
-                DockLayout::for_sheets([home_sheet_id(SCRATCH_CONTAINER)]),
-            )]),
+            shown: None,
+            scratch: DockLayout::for_sheets([home_sheet_id(SCRATCH_CONTAINER)]),
             held: HeldLayouts::default(),
             zoomed: None,
             ticket: 0,
@@ -172,19 +175,22 @@ impl CanvasState {
         self.active_container.as_deref()
     }
 
-    /// The key the shown canvas's layout lives under: its container id, or
-    /// [`SCRATCH_CONTAINER`].
+    /// The shown canvas's identity: its container id, or
+    /// [`SCRATCH_CONTAINER`] for the scratch canvas.
     pub fn canvas_key(&self) -> &str {
         self.active_container
             .as_deref()
             .unwrap_or(SCRATCH_CONTAINER)
     }
 
-    /// The shown canvas's layout.
+    /// The shown canvas's layout. Total by construction: a container's canvas
+    /// is held in [`CanvasState::shown`] exactly while it is shown, and the
+    /// scratch canvas's layout never leaves [`CanvasState::scratch`].
     pub fn layout(&self) -> &DockLayout {
-        self.layouts
-            .get(self.canvas_key())
-            .expect("the shown canvas always has a layout")
+        match &self.shown {
+            Some(layout) => layout,
+            None => &self.scratch,
+        }
     }
 
     /// The zoomed panel, if any.
@@ -275,7 +281,11 @@ impl CanvasState {
             self.zoomed = None;
         }
         let empty = layout::sheet_count(&next) == 0;
-        self.layouts.insert(container_id.to_string(), next);
+        if container_id == SCRATCH_CONTAINER {
+            self.scratch = next;
+        } else {
+            self.shown = Some(next);
+        }
         // The last sheet gone leaves no place to work — the start page's own
         // close counts, which is why `home` is closable at all.
         if empty && container_id != SCRATCH_CONTAINER {
@@ -292,12 +302,19 @@ impl CanvasState {
     /// and the file may lag behind the save pump's debounce. `alive` answers
     /// whether a sheet's resource still exists — the layout is pruned against
     /// it *before* activation, so a dead id is never shown even for a frame.
+    ///
+    /// The scratch id is not a container: it routes to
+    /// [`CanvasState::show_scratch`], ignoring `saved` and `alive` — the
+    /// scratch canvas lives in memory and is never restored from disk.
     pub fn switch_container(
         &mut self,
         container_id: &str,
         saved: Option<CanvasSnapshot>,
         alive: impl Fn(&str) -> bool,
     ) -> SwitchOutcome {
+        if container_id == SCRATCH_CONTAINER {
+            return self.show_scratch();
+        }
         if self.active_container.as_deref() == Some(container_id) {
             return SwitchOutcome::AlreadyShown;
         }
@@ -321,7 +338,7 @@ impl CanvasState {
         };
         self.active_container = Some(container_id.to_string());
         self.zoomed = zoom.filter(|zoomed| layout::has_sheet(&next, zoomed));
-        self.layouts.insert(container_id.to_string(), next);
+        self.shown = Some(next);
         self.prune_sheet_order(container_id);
         SwitchOutcome::Switched
     }
@@ -332,8 +349,9 @@ impl CanvasState {
         if self.active_container.is_none() {
             return SwitchOutcome::AlreadyShown;
         }
+        // Parking the outgoing container clears it as the shown one; the
+        // scratch canvas's own layout is already in place (it never left).
         self.stash_current();
-        self.active_container = None;
         SwitchOutcome::Switched
     }
 
@@ -379,14 +397,17 @@ impl CanvasState {
     /// Turns the scratch canvas into `container_id`'s canvas: its sheets move
     /// over (the scratch start page becomes the container's), the new
     /// container becomes the shown canvas, and the scratch canvas restarts
-    /// with its own start page.
+    /// with its own start page. Migrating onto the scratch id itself is a
+    /// no-op — the scratch canvas is not a container.
     pub fn migrate_scratch(&mut self, container_id: &str) {
-        let scratch = self
-            .layouts
-            .remove(SCRATCH_CONTAINER)
-            .unwrap_or_else(|| DockLayout::for_sheets([home_sheet_id(SCRATCH_CONTAINER)]));
+        if container_id == SCRATCH_CONTAINER {
+            return;
+        }
         let from = home_sheet_id(SCRATCH_CONTAINER);
         let to = home_sheet_id(container_id);
+        // The scratch canvas restarts with its own start page; its sheets move
+        // into the new container.
+        let scratch = std::mem::replace(&mut self.scratch, DockLayout::for_sheets([from.clone()]));
         let next = layout::replace_sheet(&scratch, &from, &to);
         if let Some(mut order) = self.sheet_order.remove(SCRATCH_CONTAINER) {
             for id in &mut order {
@@ -401,38 +422,40 @@ impl CanvasState {
         }
         self.active_container = Some(container_id.to_string());
         self.zoomed = None;
-        self.layouts.insert(container_id.to_string(), next);
-        self.layouts.insert(
-            SCRATCH_CONTAINER.to_string(),
-            DockLayout::for_sheets([from]),
-        );
+        self.shown = Some(next);
     }
 
     /// Drops everything the state keeps for a container that is gone: its
     /// parked canvas, its creation order, and — when it is the shown one —
-    /// its layout (the caller then switches somewhere else). Answers whether
-    /// the container was the shown canvas.
+    /// its shown layout (the caller then switches somewhere else). Answers
+    /// whether the container was the shown canvas.
+    ///
+    /// The scratch id is not a container: forgetting it does nothing.
     pub fn forget_container(&mut self, container_id: &str) -> bool {
+        if container_id == SCRATCH_CONTAINER {
+            return false;
+        }
         self.sheet_order.remove(container_id);
         self.held.remove(container_id);
         if self.active_container.as_deref() != Some(container_id) {
             return false;
         }
-        self.layouts.remove(container_id);
         self.active_container = None;
         self.zoomed = None;
+        // The shown canvas is gone; `layout()` now reads the scratch canvas.
+        self.shown = None;
         true
     }
 
-    /// Parks the shown canvas (or leaves the scratch canvas in place).
+    /// Parks the shown container's canvas and clears it as the shown one. The
+    /// scratch canvas has nothing to stash: its layout never leaves
+    /// [`CanvasState::scratch`].
     fn stash_current(&mut self) {
-        let Some(container_id) = self.active_container.clone() else {
-            // The scratch canvas is neither parked nor persisted; its layout
-            // stays under its own key.
+        let Some(container_id) = self.active_container.take() else {
             return;
         };
         let zoom = self.zoomed.take();
-        if let Some(layout) = self.layouts.remove(&container_id) {
+        if let Some(layout) = self.shown.take() {
             let snapshot = CanvasSnapshot { layout, zoom };
             self.held.park(&container_id, snapshot);
         }
@@ -455,7 +478,7 @@ impl CanvasState {
 
     /// Drops creation-order entries the shown layout no longer holds.
     fn prune_sheet_order(&mut self, container_id: &str) {
-        let alive: Option<HashSet<String>> = self.layouts.get(container_id).map(|layout| {
+        let alive: Option<HashSet<String>> = self.shown.as_ref().map(|layout| {
             layout::panel_ids(layout)
                 .into_iter()
                 .map(str::to_string)
@@ -806,5 +829,47 @@ mod tests {
         // A panel the layout does not hold cannot be zoomed.
         state.set_zoom(Some("session:ghost".to_string()));
         assert_eq!(state.zoomed(), None);
+    }
+
+    #[test]
+    fn switching_through_the_scratch_id_matches_show_scratch() {
+        let mut state = CanvasState::new();
+        switch(&mut state, "a");
+        // The generic switch path must not treat `scratch` as a container: no
+        // parked copy under that key, no `saved` snapshot honored, and the
+        // scratch canvas stays the keyless one.
+        let saved = CanvasSnapshot {
+            layout: sheets(&["home:a"]),
+            zoom: None,
+        };
+        assert_eq!(
+            state.switch_container(SCRATCH_CONTAINER, Some(saved), |_| true),
+            SwitchOutcome::Switched
+        );
+        assert_eq!(state.active_container(), None);
+        assert_eq!(state.canvas_key(), SCRATCH_CONTAINER);
+        assert_eq!(layout::panel_ids(state.layout()), ["home:scratch"]);
+        assert_eq!(state.held().ids(), ["a"]);
+        assert!(!state.held().contains(SCRATCH_CONTAINER));
+        // Both entry points agree on what "already shown" means.
+        assert_eq!(
+            state.switch_container(SCRATCH_CONTAINER, None, |_| true),
+            SwitchOutcome::AlreadyShown
+        );
+        assert_eq!(state.show_scratch(), SwitchOutcome::AlreadyShown);
+    }
+
+    #[test]
+    fn forgetting_the_scratch_id_leaves_the_shown_canvas_intact() {
+        let mut state = CanvasState::new();
+        open(&mut state, &session_sheet_id("s1"));
+        // The scratch canvas is shown here; forgetting it must not clear the
+        // shown layout (the panic this once reached).
+        assert!(!state.forget_container(SCRATCH_CONTAINER));
+        assert_eq!(state.active_container(), None);
+        assert_eq!(
+            layout::panel_ids(state.layout()),
+            ["home:scratch", "session:s1"]
+        );
     }
 }
