@@ -72,7 +72,6 @@ impl CanvasHost {
     }
 
     /// The parked canvases (the LRU the shell's park gesture fills).
-    #[cfg(test)]
     pub fn held(&self) -> &steer_canvas::state::HeldLayouts {
         self.state.held()
     }

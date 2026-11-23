@@ -3376,6 +3376,25 @@ impl Workspace {
             .unwrap_or_default()
     }
 
+    /// The canvas's terminal gesture (the strip's terminal ＋), for the
+    /// gesture matrix.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_open_terminal(&mut self, cx: &mut Context<Self>) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| canvas.open_terminal(cx));
+        }
+    }
+
+    /// The canvas's activate gesture (a tab click), for the gesture matrix.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_activate(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, _| {
+                canvas.host.activate_sheet(sheet);
+            });
+        }
+    }
+
     /// The canvas's own close gesture (the tab ×'s path), for the gesture
     /// matrix.
     #[cfg(feature = "test-support")]
@@ -3394,8 +3413,12 @@ impl Workspace {
         let container = self.foreground_container_id(cx);
         let session = self.chat_store(cx).map(|(_, sid)| sid);
         let view = self.ensure_canvas_view(cx);
+        let cwd = container
+            .as_deref()
+            .map(|container| self.container_attrs(container, cx).cwd)
+            .unwrap_or_else(|| self.cwd.clone());
         view.update(cx, |view, cx| match container.as_deref() {
-            Some(container) => view.open_container(container, session.as_deref(), cx),
+            Some(container) => view.open_container(container, session.as_deref(), cwd, cx),
             None => view.show_scratch(cx),
         });
         self.view_mode = ViewMode::Canvas;

@@ -12,6 +12,7 @@
 //! `home:`. The canvas never builds another entity's page, so it can never take
 //! a second lease on the workspace while the shell is rendering.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -19,7 +20,7 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::{ElementExt as _, Icon, Sizable as _, h_flex, v_flex};
 
-use steer_canvas::id::{home_sheet_id, sheet_kind};
+use steer_canvas::id::{home_sheet_id, sheet_kind, terminal_resource, terminal_sheet_id};
 use steer_canvas::projection::{self, GroupFrame};
 
 use crate::Workspace;
@@ -37,6 +38,15 @@ pub struct CanvasView {
     /// The conversation column, when the shell has one: the `session:` sheets'
     /// content.
     pub(crate) column: Option<Entity<ChatColumnView>>,
+    /// The terminal sheets' PTY-backed views, keyed by sheet id. The entity is
+    /// the resource: dropping it ends the shell, so the map is pruned against
+    /// the sheets any canvas still holds.
+    terminals: HashMap<String, Entity<steer_ghostty::GhosttyView>>,
+    /// The shown container's working directory: a terminal sheet spawns there.
+    /// Injected by the workspace when the canvas opens a container (the canvas
+    /// never reads the workspace itself — that would take a second lease while
+    /// the shell is updating it).
+    cwd: std::path::PathBuf,
     workspace: WeakEntity<Workspace>,
     /// The card's interior size, measured at prepaint (the first frame of a
     /// fresh window falls back to the window's).
@@ -78,6 +88,18 @@ fn v1_registry() -> steer_canvas::SheetRegistry {
     steer_canvas::SheetRegistry::new()
         .with(kind("home", "home", false, None))
         .with(kind(
+            "terminal",
+            "terminal",
+            false,
+            Some(Arc::new(|id| {
+                let resource = terminal_resource(id);
+                ParsedSheet {
+                    container_id: resource.as_ref().map(|r| r.container_id.clone()),
+                    instance: resource.map(|r| r.index.to_string()).unwrap_or_default(),
+                }
+            })),
+        ))
+        .with(kind(
             "session",
             "chat",
             true,
@@ -90,6 +112,8 @@ impl CanvasView {
         Self {
             host,
             column: None,
+            terminals: HashMap::new(),
+            cwd: std::env::current_dir().unwrap_or_default(),
             workspace,
             size: Rc::new(std::cell::Cell::new(None)),
         }
@@ -106,8 +130,10 @@ impl CanvasView {
         &mut self,
         container_id: &str,
         session_id: Option<&str>,
+        cwd: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) {
+        self.cwd = cwd;
         let saved = persist::read_canvas(container_id).map(|file| file.snapshot());
         let alive = |_sheet: &str| true;
         self.host.switch_container(container_id, saved, alive);
@@ -117,6 +143,66 @@ impl CanvasView {
             self.host.open_sheet(&sheet, None);
         }
         cx.notify();
+    }
+
+    /// Opens the container's next terminal sheet (its PTY spawns on first
+    /// show, so a restored layout re-attaches to a fresh shell).
+    pub(crate) fn open_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(container) = self.host.active_container().map(str::to_string) else {
+            return;
+        };
+        let sheet = terminal_sheet_id(&container, self.next_terminal_index(&container));
+        self.ensure_terminal(&sheet, cx);
+        if self.host.open_sheet(&sheet, None) == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
+    fn next_terminal_index(&self, container: &str) -> u32 {
+        let mut index = 1;
+        while self
+            .terminals
+            .contains_key(&terminal_sheet_id(container, index))
+            || steer_canvas::layout::has_sheet(
+                self.host.layout(),
+                &terminal_sheet_id(container, index),
+            )
+        {
+            index += 1;
+        }
+        index
+    }
+
+    /// Makes sure a terminal sheet's PTY view exists (spawned once per sheet).
+    fn ensure_terminal(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        if self.terminals.contains_key(sheet) {
+            return;
+        }
+        if terminal_resource(sheet).is_none() {
+            return;
+        }
+        let cwd = self.cwd.clone();
+        match steer_ghostty::spawn_ghostty_view(&cwd, steer_ghostty::Theme::LIGHT, cx) {
+            Ok(view) => {
+                self.terminals.insert(sheet.to_string(), view);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "canvas terminal spawn failed");
+            }
+        }
+    }
+
+    /// Drops the PTY views of sheets no canvas holds any more (closed here, or
+    /// on a parked canvas that was evicted). The union is the only judge — a
+    /// layout edit that closes a tab while a parked canvas keeps it must not
+    /// end the shell.
+    fn prune_terminals(&mut self) {
+        let alive: std::collections::HashSet<String> =
+            steer_canvas::projection::open_sheet_ids(self.host.layout(), self.host.held())
+                .into_iter()
+                .collect();
+        self.terminals.retain(|sheet, _| alive.contains(sheet));
     }
 
     /// Shows the scratch canvas (the shell's pre-container surface).
@@ -306,6 +392,23 @@ impl CanvasView {
             strip = strip.child(tab);
         }
 
+        // The group's terminal "+": opens the container's next terminal sheet.
+        if self.host.active_container().is_some() {
+            strip = strip.child(
+                gpui::div()
+                    .id(ElementId::Name(
+                        format!("canvas-open-terminal-{}", group.key).into(),
+                    ))
+                    .debug_selector(|| "canvas-open-terminal".to_string())
+                    .px_1()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .hover(|this| this.bg(theme.muted))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_terminal(cx)))
+                    .child(Icon::from(gpui_kit_assets::IconName::SquareTerminal).xsmall()),
+            );
+        }
+
         // The group's own "+": the container's start page.
         if let Some(container) = self.host.active_container().map(str::to_string) {
             let home = home_sheet_id(&container);
@@ -360,6 +463,11 @@ impl CanvasView {
                 Some(column) => column.update(cx, |view, cx| view.render_page(window, cx)),
                 None => gpui::div().into_any_element(),
             },
+            "terminal" => self
+                .terminals
+                .get(sheet)
+                .map(|view| view.clone().into_any_element())
+                .unwrap_or_else(|| gpui::div().into_any_element()),
             _ => {
                 // The start page (and any kind the shell has no live body for
                 // yet) renders the container's own hint, never another
@@ -382,6 +490,7 @@ impl CanvasView {
     fn close_sheet(&mut self, sheet: &str, window: &mut Window, cx: &mut Context<Self>) {
         match self.host.close_sheet(sheet) {
             CanvasAction::Applied => {
+                self.prune_terminals();
                 self.after_edit(cx);
                 cx.notify();
             }
