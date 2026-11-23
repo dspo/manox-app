@@ -5,8 +5,8 @@
 //! from these boxes and its content from the frames; a layout edit changes
 //! where a sheet is *placed*, never whether it exists.
 //!
-//! The rules follow the nsh-pi experiment's `projection.ts`, which the sheet
-//! host consumed verbatim:
+//! The placement rules are total: any layout and any area width resolve to
+//! exactly one set of boxes, so the renderer never re-derives geometry:
 //!
 //! - a split's slots are its recorded sizes (the last one takes whatever is
 //!   left; unsized slots share what the sized ones leave);
@@ -22,7 +22,7 @@ use crate::state::HeldLayouts;
 /// The width of a hidden split handle between two slots.
 pub const SPLIT_HANDLE: f32 = 1.0;
 
-/// Below this width the canvas shows one group at a time (nsh's compact
+/// Below this width the canvas shows one group at a time (the compact
 /// threshold).
 pub const COMPACT_WIDTH: f32 = 600.0;
 

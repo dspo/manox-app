@@ -5,8 +5,8 @@
 //! across restarts, so a parked or persisted layout can be read back without
 //! asking a view anything.
 //!
-//! The three v1 constructors agree with the nsh-pi experiment's vocabulary
-//! (`dock.ts`, `domains/pty.ts`, `modules/pi/sheets.ts`) on the wire:
+//! The constructors fix the id vocabulary — three kinds, one string shape
+//! each, so a layout never needs a side table to name its sheets:
 //!
 //! - `home:{container_id}` — the container's start page;
 //! - `session:{session_id}` — a conversation; the id is container-neutral,

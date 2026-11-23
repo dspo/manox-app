@@ -1,11 +1,9 @@
 //! The canvas layout: a pure, serializable tree of tab groups and splits.
 //!
-//! The shape and the semantics follow the nsh-pi experiment's `dock.ts`
-//! (`DockAreaLayout`): a split's slots are its recorded sizes (the last one
+//! The semantics: a split's slots are its recorded sizes (the last one
 //! takes what is left), and a tab group shows one of its panels. The JSON is
-//! `{"center":{"type":"tabs","panels":["…"],"activeIndex":0}}` — the file is
-//! ours, but the structure matches so the sheet host and the experiment's
-//! reasoning carry over field for field.
+//! `{"center":{"type":"tabs","panels":["…"],"activeIndex":0}}` — this shape
+//! is the persisted layout file's body, so it is frozen field for field.
 //!
 //! Two properties the whole model rests on:
 //!
