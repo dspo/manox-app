@@ -610,16 +610,6 @@ impl CanvasView {
         }
     }
 
-    /// Opens (or displays) a sheet — the host's own command, used by the
-    /// visual harness's scene.
-    #[cfg(feature = "test-support")]
-    pub(crate) fn open_sheet(&mut self, sheet: &str, cx: &mut Context<Self>) {
-        if self.host.open_sheet(sheet, None) == CanvasAction::Applied {
-            self.after_edit(cx);
-            cx.notify();
-        }
-    }
-
     fn close_sheet(&mut self, sheet: &str, window: &mut Window, cx: &mut Context<Self>) {
         match self.host.close_sheet(sheet) {
             CanvasAction::Applied => {

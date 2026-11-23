@@ -3473,15 +3473,6 @@ impl Workspace {
         }
     }
 
-    /// The canvas's open-sheet command, for the visual scene (the offscreen
-    /// harness has no host to open a second session tab on its own).
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_canvas_open_sheet(&mut self, sheet: &str, cx: &mut Context<Self>) {
-        if let Some(canvas) = &self.canvas_view {
-            canvas.update(cx, |canvas, cx| canvas.open_sheet(sheet, cx));
-        }
-    }
-
     /// The canvas's own close gesture (the tab ×'s path), for the gesture
     /// matrix.
     #[cfg(feature = "test-support")]
