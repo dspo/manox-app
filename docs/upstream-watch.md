@@ -10,8 +10,8 @@
 | 线 | 当前 pin | 声明位置 | 归属仓 |
 |---|---|---|---|
 | manox runtime | `v0.13.0`（8 个 crate 共用同一 tag） | `Cargo.toml` `[workspace.dependencies]` + `Cargo.lock` | dspo/manox |
-| gpui-kit | `gpui-pre* =0.3.9`、`gpui-component =0.8.0`、`gpui-kit-assets =0.8.0`、`gpui-base =0.8.0` | `Cargo.toml` + `Cargo.lock` | longbridge/gpui-kit |
-| rust channel | `1.97.1` | `rust-toolchain.toml` | rust-lang |
+| gpui-kit | `gpui-pre* =0.3.12`、`gpui-component =0.9.1`、`gpui-kit-assets =0.9.1`、`gpui-base =0.9.1` | `Cargo.toml` + `Cargo.lock` | longbridge/gpui-kit |
+| rust channel | `1.100.0` | `rust-toolchain.toml` | rust-lang |
 | pi distro | `@earendil-works/pi-coding-agent 1.5.0` | `pi-harness/package.json`（+ `src/version.ts` 同值） | earendil-works/pi |
 
 （Ghostty rev / zig 与 lock 级 pin 同属第二条与第四条纪律的管辖面；它们没有独立
@@ -58,3 +58,4 @@
 | 日期 | 线 | 旧 → 新 | 逐条结果 | PR |
 |---|---|---|---|---|
 | 2026-11-23 | manox runtime | `v0.13.0`（建立台账，无变更） | O1 missing；已核对四项 satisfied | — |
+| 2026-11-23 | gpui-kit + rust channel | `0.8.0`/`0.3.9` + `1.97.1` → `0.9.1`/`0.3.12` + `1.100.0` | open 项 0 条；三版 release notes 逐条对照消费面（Theme non_exhaustive / KeyBinding 静态化 / scroll 改名等，迁移清单见 PR）；两处行为性变更（动画 executor 时钟、on_prepaint probe 锚点 zed#3689）实测四张壳图 0 字节差异；0.8.0 轮吸收 API 全部存活（0.9.1 源码核验）；`with_runs` 台账复核未修、缓解维持，CJK fuzz battery 转绿作金丝雀 | #315 |

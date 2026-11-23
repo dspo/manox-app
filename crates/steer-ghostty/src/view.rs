@@ -11,7 +11,7 @@ use gpui::{
     App, AppContext as _, BorderStyle, Bounds, Element, ElementId, Entity, EventEmitter,
     FocusHandle, Focusable, GlobalElementId, InputHandler, InspectorElementId, InteractiveElement,
     IntoElement, KeyDownEvent, LayoutId, MouseButton, ParentElement, Pixels, Point, Render,
-    ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, Styled, TextAlign, TextRun,
+    ScrollEvent, ShapedLine, SharedString, StrikethroughStyle, Styled, TextAlign, TextRun,
     UTF16Selection, UnderlineStyle, Window, fill, outline, point, px, relative, rgba, size,
 };
 use unicode_width::UnicodeWidthStr;
@@ -473,12 +473,7 @@ impl GhosttyView {
         true
     }
 
-    fn on_wheel(
-        &mut self,
-        ev: &ScrollWheelEvent,
-        _window: &mut Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
+    fn on_wheel(&mut self, ev: &ScrollEvent, _window: &mut Window, cx: &mut gpui::Context<Self>) {
         let lh = FONT_SIZE * LINE_HEIGHT;
         let dy = ev.delta.pixel_delta(px(lh)).y;
         let lines = (dy / px(lh)).round();
@@ -507,7 +502,7 @@ impl Render for GhosttyView {
                 }),
             )
             .on_key_down(cx.listener(Self::on_key))
-            .on_scroll_wheel(cx.listener(Self::on_wheel))
+            .on_scroll(cx.listener(Self::on_wheel))
             .bg(gpui_color(self.theme.bg))
             .child(GhosttyElement { view: cx.entity() })
     }

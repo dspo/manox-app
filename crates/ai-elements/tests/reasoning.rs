@@ -369,7 +369,7 @@ fn clicking_the_trigger_opens_the_block(cx: &mut TestAppContext) {
 /// [`Window::dispatch_keystroke`] builds its half. The platform pairs the two,
 /// and a focused element's activation click is synthesized from the pair, so
 /// `simulate_keystrokes` (key-down only) cannot exercise that path.
-fn press(visual: &mut VisualTestContext, key: &str) {
+fn press(visual: &mut VisualTestContext, key: &'static str) {
     let keystroke = Keystroke::parse(key)
         .expect("valid keystroke")
         .with_simulated_ime();

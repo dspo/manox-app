@@ -110,7 +110,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.100.0"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -199,7 +199,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.100.0"
 
       # Same key namespace as the ci workflow: on release builds this
       # restores the registry warm from main-branch CI runs.
@@ -292,7 +292,7 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.100.0
           echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
 
       - name: Cache cargo registry

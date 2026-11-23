@@ -11,12 +11,20 @@
 //! - narrow and mid-stream-resized columns, byte-level chunking, and
 //!   mid-stream wholesale replacements (the Retry shape).
 //!
-//! # Status: reproduces
+//! # Status: green on gpui-pre 0.3.12 / gpui-base 0.9.1 (reproduced on 0.3.9)
 //!
-//! `fuzz_deep_push_bytes` crashes at case 0 (seed `0xDEE0_0001`); the other
-//! streaming batteries crash within their first ~25 cases. Minimized, the
-//! crash needs only a reference whose definition arrives while streaming —
-//! `minimal_repro` (set `CJK_FUZZ_REPRO=1`) fails with:
+//! On the 0.3.9 snapshot every streaming battery crashed (`with_runs` abort,
+//! see `upstream-bugs.md` in the gpui-kit-follow skill); on 0.3.12 the full
+//! battery passes. The `with_runs` panic and the un-clamped
+//! `highlighted_styles` are still verbatim upstream, so the exact fix point
+//! is unlocated — treat a red run after a bump as the upstream regression
+//! alarm, not as a flake.
+//!
+//! What the 0.3.9 crash looked like: `fuzz_deep_push_bytes` died at case 0
+//! (seed `0xDEE0_0001`), the other streaming batteries within their first
+//! ~25 cases. Minimized, the crash needed only a reference whose definition
+//! arrives while streaming — `minimal_repro` (set `CJK_FUZZ_REPRO=1`) failed
+//! with:
 //!
 //! ```text
 //! invalid text run. Text: '续', run: TextRun { len: 1, .. alpha ~0.0 }
@@ -33,11 +41,12 @@
 //! Without the streaming fade the same documents stream cleanly
 //! (`trace_minimal_stream`, `CJK_FUZZ_TRACE=1`, shows the flip).
 //!
-//! The batteries are env-gated (`CJK_FUZZ_RUN=1`) because they find this
-//! crash and would hold the suite red until the upstream fix lands. Every
-//! case prints its full input to stderr before drawing, so the last
-//! `=== CASE` block before a panic is the culprit. A debug-build panic
-//! prints the offending text and run payload.
+//! The batteries stay env-gated (`CJK_FUZZ_RUN=1`): they run minutes of real
+//! fuzz even when green, and if the crash ever returns they should hold a
+//! dedicated run red rather than gate every `cargo test` on it. Every case
+//! prints its full input to stderr before drawing, so the last `=== CASE`
+//! block before a panic is the culprit. A debug-build panic prints the
+//! offending text and run payload.
 
 use std::time::Duration;
 

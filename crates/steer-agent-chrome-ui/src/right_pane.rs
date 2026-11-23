@@ -828,14 +828,16 @@ fn tab_pill(
         .id(SharedString::from(format!("tool-tab-{id}")))
         .on_click(move |e, w, cx| activate(e, w, cx))
         .on_prepaint(move |b, _w, _cx| {
-            // `on_prepaint` hangs a `canvas().absolute().size_full()` child on
-            // this element, so the reported origin is the CONTENT box (the
-            // padding is already applied) while the width is the border box.
-            // Subtract the left padding to recover the tab's own left edge.
+            // `on_prepaint` hangs a `canvas().absolute().top_0().left_0().size_full()`
+            // child on this element, so the reported origin is this element's
+            // padding-box corner — the tab's own left edge, which is what the
+            // indicator records. (Before gpui-pre 0.3.10 / zed#3689 the probe
+            // had no inset and reported the CONTENT origin, one `TAB_PL` to the
+            // right; that subtraction is obsolete on the current line.)
             bounds.borrow_mut().insert(
                 bounds_id.clone(),
                 TabBounds {
-                    left: b.origin.x - px(TAB_PL),
+                    left: b.origin.x,
                     width: b.size.width,
                 },
             );

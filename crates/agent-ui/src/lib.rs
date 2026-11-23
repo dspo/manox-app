@@ -91,10 +91,17 @@ pub fn composer_recall_key_bindings() -> Vec<gpui::KeyBinding> {
 /// has no upstream binding — gpui-base binds only `enter` / `shift-enter` /
 /// `secondary-enter`, and overloading `Enter` for the chord would newline
 /// AND submit. A dedicated action on the composer's own context keeps the
-/// keystroke out of the textarea entirely.
+/// keystroke out of the textarea entirely. `Keystroke::parse` no longer
+/// resolves the `secondary` alias without an `&App` (gpui-pre 0.3.10+), so
+/// the platform-primary chord is spelled out per target — exactly the split
+/// `secondary-shift-enter` used to encode: ⌘⇧↩ on macOS, ctrl⇧↩ elsewhere.
 pub fn composer_send_key_bindings() -> Vec<gpui::KeyBinding> {
+    #[cfg(target_os = "macos")]
+    let chord = "cmd-shift-enter";
+    #[cfg(not(target_os = "macos"))]
+    let chord = "ctrl-shift-enter";
     vec![gpui::KeyBinding::new(
-        "secondary-shift-enter",
+        chord,
         steer_agent_chat_ui::ComposerSubmitInterrupt,
         Some("composer > Input"),
     )]

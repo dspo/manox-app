@@ -208,6 +208,14 @@ impl Workspace {
             .update(cx, |state, cx| state.set_value("", window, cx));
     }
 
+    /// Focus the composer's real input, so keystroke-dispatch tests exercise
+    /// the live `composer > Input` binding context instead of calling the
+    /// action handlers directly.
+    pub fn gallery_focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.chat_input(cx);
+        window.focus(&gpui::Focusable::focus_handle(input.read(cx), cx), cx);
+    }
+
     /// Settle with (or without) the cancelled bit — the pump's
     /// `TurnFinished` arm, minus the sidebar refresh.
     pub fn gallery_settle(&mut self, cancelled: bool, cx: &mut Context<Self>) {

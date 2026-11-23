@@ -260,15 +260,33 @@ mod macos {
         // loop, so a component that asks for one more frame (the tab
         // indicator does, to read its prepaint bounds) would otherwise never
         // get it and the capture would show a half-resolved first frame.
-        for i in 0..5 {
+        for i in 0..8 {
             if i > 0 {
                 let _ = cx.update_window(handle.into(), |_view, window, cx| {
                     window.simulate_next_frame(cx);
                 });
             }
             cx.run_until_parked();
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Animations read the executor clock, which wall-clock sleeps no
+            // longer advance (gpui-pre 0.3.10+); `advance_clock` is what
+            // carries them toward the settled terminal state. The generous
+            // per-iteration step keeps the FINAL presented frame past every
+            // animation's last sample, so the capture is deterministic.
+            cx.advance_clock(std::time::Duration::from_millis(200));
         }
+        // The readback reflects the last PRESENTED frame, which is one paint
+        // behind the final animation sample. Force one more repaint at the
+        // fully advanced clock and let it present, so the capture shows the
+        // settled terminal state.
+        let settled = shell_slot.clone().expect("shell");
+        cx.update(|cx| {
+            settled.update(cx, |_, cx| cx.notify());
+        });
+        cx.run_until_parked();
+        let _ = cx.update_window(handle.into(), |_view, window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
 
         if std::env::var("CHROME_SWITCH").is_ok() {
             // Now that the layout has settled, switch back to the FIRST tab —
@@ -284,15 +302,26 @@ mod macos {
             });
             // Tests have no platform frame loop: `request_animation_frame`
             // schedules via on_next_frame, which only fires through
-            // `simulate_next_frame`. Sleeping alone advances no animation.
+            // `simulate_next_frame`; the slide duration elapses on the
+            // executor clock via `advance_clock`.
             for _ in 0..40 {
                 cx.update_window(handle.into(), |_view, window, cx| {
                     window.simulate_next_frame(cx);
                 })
                 .expect("window");
                 cx.run_until_parked();
-                std::thread::sleep(std::time::Duration::from_millis(12));
+                cx.advance_clock(std::time::Duration::from_millis(12));
             }
+            // Same presented-frame catch-up as above, for the slide back.
+            let settled = shell_slot.clone().expect("shell");
+            cx.update(|cx| {
+                settled.update(cx, |_, cx| cx.notify());
+            });
+            cx.run_until_parked();
+            let _ = cx.update_window(handle.into(), |_view, window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
         }
 
         let shot = cx
