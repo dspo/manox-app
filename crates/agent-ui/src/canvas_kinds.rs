@@ -178,7 +178,10 @@ impl CanvasPaneStore {
     }
 
     /// Records the displayed sheet set: the webviews' OS windows follow it —
-    /// a hidden tab's window would float above everything otherwise.
+    /// a hidden tab's window would float above everything otherwise. (The
+    /// OS-window faces ride the browser platform; on Linux/FreeBSD the
+    /// webview kind is not registered, so this loop never has slots.)
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub fn note_shown(&mut self, shown: HashSet<String>, cx: &mut App) {
         for (sheet, slot) in &self.webviews {
             let visible = shown.contains(sheet);
@@ -205,10 +208,14 @@ impl CanvasPaneStore {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn note_shown(&mut self, _shown: HashSet<String>, _cx: &mut App) {}
+
     /// The webview ticker for a sheet (the page `<title>` / URL mirror):
     /// started when the sheet's body is first built; it dies with the slot.
     /// The tab id it polls is the slot's own — re-read each tick, because
     /// the first build may have minted it after the ticker started.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     fn start_webview_ticker(&mut self, sheet: &str, cx: &mut App) {
         let Some(slot) = self.webviews.get(sheet) else {
             return;
@@ -340,12 +347,7 @@ impl CanvasPaneStore {
         if let Some(slot) = self.webviews.remove(sheet) {
             slot.ticker_alive
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            if let (Some(tab_id), Some(ws)) = (
-                slot.tab_id.lock().expect("webview tab id lock").take(),
-                self.ws.upgrade(),
-            ) {
-                ws.update(cx, |ws, cx| ws.close_browser_tab(tab_id, cx));
-            }
+            self.close_webview_tab(&slot, cx);
         }
         if self.agents.remove(sheet).is_some() {
             // The picker may have spawned: the kill handle rides the
@@ -485,6 +487,22 @@ impl CanvasPaneStore {
         }
     }
 
+    /// Drops a webview slot's browser tab (the platform-gated half of
+    /// [`Self::reclaim`] — the browser face compiles out on
+    /// Linux/FreeBSD, where no webview slot can exist).
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    fn close_webview_tab(&self, slot: &WebviewSheet, cx: &mut App) {
+        if let (Some(tab_id), Some(ws)) = (
+            slot.tab_id.lock().expect("webview tab id lock").take(),
+            self.ws.upgrade(),
+        ) {
+            ws.update(cx, |ws, cx| ws.close_browser_tab(tab_id, cx));
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn close_webview_tab(&self, _slot: &WebviewSheet, _cx: &mut App) {}
+
     /// The agent picker a sheet rides (minted on first show): the picker IS
     /// the CLI sheet's record — the spawn's view and kill handle live
     /// inside it.
@@ -504,38 +522,41 @@ impl CanvasPaneStore {
 /// The five right-dock kinds' specs. The store owns every body's state (the
 /// diff's parsed patch rides the open gesture into its sheet's view).
 pub fn pane_kinds(store: Entity<CanvasPaneStore>) -> Vec<SheetKindSpec> {
-    // The specs borrow the store and the workspace for their whole life:
-    // the Arc'd closures outlive the function call, so they take their own
-    // handles.
+    // The specs borrow the store for their whole life: the Arc'd closures
+    // outlive the function call, so they take their own handles.
     let webview_title_store = store.clone();
-    let webview_body_store = webview_title_store.clone();
-    let webview = SheetKindSpec {
-        kind: "webview",
-        // The page's `<title>` (the ticker mirrors it); the i18n fallback
-        // names a not-yet-titled page.
-        title: Arc::new(move |sheet, cx| {
-            webview_title_store
-                .read(cx)
-                .webview_page_title(sheet)
-                .map(SharedString::from)
-                .unwrap_or_else(|| crate::i18n::t("chrome-tab-browser"))
-        }),
-        tab_title: None,
-        glyph: "frame",
-        closable: true,
-        names_container: false,
-        // The layout is the fact: a webview sheet re-opens at its URL.
-        restore: None,
-        parse: Some(Arc::new(|id| {
-            let resource = webview_resource(id);
-            ParsedSheet {
-                container_id: resource.as_ref().map(|r| r.container_id.clone()),
-                instance: resource.map(|r| r.index.to_string()).unwrap_or_default(),
-            }
-        })),
-        body: Some(Arc::new(move |sheet, window, cx| {
-            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-            {
+    // The webview kind is browser-platform-only: the embedded browser
+    // compiles out on Linux/FreeBSD with the rest of the browser face, so
+    // the kind is NOT REGISTERED there at all (no entry — the same
+    // clean-refusal shape the capability face keeps).
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let webview = Some({
+        let webview_body_store = webview_title_store.clone();
+        SheetKindSpec {
+            kind: "webview",
+            // The page's `<title>` (the ticker mirrors it); the i18n
+            // fallback names a not-yet-titled page.
+            title: Arc::new(move |sheet, cx| {
+                webview_title_store
+                    .read(cx)
+                    .webview_page_title(sheet)
+                    .map(SharedString::from)
+                    .unwrap_or_else(|| crate::i18n::t("chrome-tab-browser"))
+            }),
+            tab_title: None,
+            glyph: "frame",
+            closable: true,
+            names_container: false,
+            // The layout is the fact: a webview sheet re-opens at its URL.
+            restore: None,
+            parse: Some(Arc::new(|id| {
+                let resource = webview_resource(id);
+                ParsedSheet {
+                    container_id: resource.as_ref().map(|r| r.container_id.clone()),
+                    instance: resource.map(|r| r.index.to_string()).unwrap_or_default(),
+                }
+            })),
+            body: Some(Arc::new(move |sheet, window, cx| {
                 // One update: the URL read and the body build share it.
                 let url = crate::views::browser_view::DEFAULT_URL.to_string();
                 match webview_body_store.update(cx, |store, cx| {
@@ -545,14 +566,11 @@ pub fn pane_kinds(store: Entity<CanvasPaneStore>) -> Vec<SheetKindSpec> {
                     Some(view) => view,
                     None => empty_body(cx),
                 }
-            }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            {
-                let _ = (sheet, window, cx, webview_body_store);
-                empty_body(cx)
-            }
-        })),
-    };
+            })),
+        }
+    });
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    let webview = Option::<SheetKindSpec>::None;
 
     let editor_store = store.clone();
     let editor = SheetKindSpec {
@@ -687,7 +705,13 @@ pub fn pane_kinds(store: Entity<CanvasPaneStore>) -> Vec<SheetKindSpec> {
         })),
     };
 
-    vec![webview, editor, diff, agent, subagent]
+    // The webview kind joins only where the embedded browser compiles in
+    // (the other four are platform-neutral).
+    let mut kinds = vec![editor, diff, agent, subagent];
+    if let Some(webview) = webview {
+        kinds.insert(0, webview);
+    }
+    kinds
 }
 
 impl CanvasPaneStore {
@@ -726,16 +750,6 @@ impl gpui::Render for EmptyPane {
 pub(crate) struct DiffPaneView {
     title: SharedString,
     state: Result<Entity<gpui_component::diff::DiffState>, SharedString>,
-}
-
-impl DiffPaneView {
-    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
-    fn diff_files(&self, cx: &App) -> Option<usize> {
-        self.state
-            .as_ref()
-            .ok()
-            .map(|state| state.read(cx).files().len())
-    }
 }
 
 impl gpui::Render for DiffPaneView {
