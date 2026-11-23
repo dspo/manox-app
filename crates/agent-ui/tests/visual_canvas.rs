@@ -1,4 +1,4 @@
-//! Visual acceptance for the canvas surface (PLAN-ABSORB-04 §6): the real
+//! Visual acceptance for the canvas surface: the real
 //! chrome assembly mounted in an offscreen window, its main column showing one
 //! container's canvas — two tabs (start page + session) and, with
 //! `CANVAS_SPLIT=1`, the split gesture's two groups.
