@@ -5,11 +5,13 @@
 //!
 //! The file is shared with `manox_agent::settings` (which ignores the
 //! `[terminal]` table — no `deny_unknown_fields`), so the two readers
-//! coexist; the path honors `MANOX_HOME` the same way `manox_agent::paths`
-//! does. Absent file / section / parse failure is non-fatal: defaults are
-//! returned.
+//! coexist; the path resolves through `steer_paths::manox_root()`, the same
+//! root the runtime resolves. Absent file / section / parse failure is
+//! non-fatal: defaults are returned.
 
 use std::path::PathBuf;
+
+use steer_paths::manox_root;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TerminalSettings {
@@ -31,16 +33,11 @@ pub fn load() -> TerminalSettings {
     parse(&text)
 }
 
-/// `MANOX_HOME/settings.toml`, falling back to `$HOME/.manox/settings.toml`
-/// — the same resolution `manox_agent::paths` performs (an empty
-/// `MANOX_HOME` falls through too), so embedders that redirect the state
-/// root get the redirected settings.
+/// `<manox_root>/settings.toml`, resolved by the path authority: a non-empty
+/// `MANOX_HOME` wins, otherwise the layered root's `.manox` — so embedders
+/// that redirect the state root get the redirected settings.
 fn settings_path() -> Option<PathBuf> {
-    let root = std::env::var_os("MANOX_HOME")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".manox")))?;
-    Some(root.join("settings.toml"))
+    manox_root().map(|root| root.join("settings.toml"))
 }
 
 fn parse(text: &str) -> TerminalSettings {

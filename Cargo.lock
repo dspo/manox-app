@@ -10180,6 +10180,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "serde",
+ "steer-paths",
  "steer-term-process",
  "sysinfo 0.39.6",
  "toml 0.8.23",
