@@ -3344,10 +3344,14 @@ impl Workspace {
         }
         let column = self.ensure_column_view(cx);
         let workspace = cx.weak_entity();
+        // Titles come from the conversation entity, not from this workspace:
+        // the canvas paints inside the workspace's own update, so a title
+        // read through `self` would take a second lease.
+        let titles = crate::workspace::canvas_view::sheet_titles(self.chat.clone());
         let view = cx.new(|_| {
             crate::workspace::canvas_view::CanvasView::new(
                 crate::workspace::canvas_host::CanvasHost::new(
-                    crate::workspace::canvas_view::registry(),
+                    crate::workspace::canvas_view::registry(titles),
                 ),
                 workspace,
             )
@@ -3441,6 +3445,25 @@ impl Workspace {
             canvas.update(cx, |canvas, _| {
                 canvas.host.activate_sheet(sheet);
             });
+        }
+    }
+
+    /// The canvas's split gesture (a tab double-click: the container's start
+    /// page opens beside that tab), for the gesture matrix and the visual
+    /// scene.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_split_home(&mut self, beside: &str, cx: &mut Context<Self>) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| canvas.split_home(beside, cx));
+        }
+    }
+
+    /// The canvas's open-sheet command, for the visual scene (the offscreen
+    /// harness has no host to open a second session tab on its own).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_open_sheet(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| canvas.open_sheet(sheet, cx));
         }
     }
 

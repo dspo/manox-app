@@ -329,19 +329,26 @@ pub fn replace_sheet(layout: &DockLayout, from: &str, to: &str) -> DockLayout {
     DockLayout { center }
 }
 
-/// Opens `id` in a new group split to the right of the group showing
+/// Puts `id` in a new group split to the right of the group showing
 /// `beside`. The neighbor keeps its tabs; the new group holds only `id`.
 ///
-/// A layout that already carries `id` only activates it (one instance per
-/// sheet); a `beside` nobody shows falls back to appending.
+/// A sheet is one instance: a layout that already carries `id` **moves** it
+/// into the new group (its old group collapses when that was its last tab)
+/// rather than duplicating the tab — the same rule a tab dragged to an edge
+/// obeys. A `beside` nobody shows falls back to appending.
 pub fn split_right(layout: &DockLayout, beside: &str, id: &str) -> DockLayout {
-    if beside == id || has_sheet(layout, id) {
+    if beside == id {
         return activate_sheet(layout, id);
     }
-    let mut center = layout.center.clone();
+    let base = if has_sheet(layout, id) {
+        remove_sheet(layout, id)
+    } else {
+        layout.clone()
+    };
+    let mut center = base.center.clone();
     let mut contains = |panels: &[String]| panels.iter().any(|panel| panel == beside);
     let Some(path) = find_tabs(&center, &mut contains) else {
-        return append_sheet(layout, id, None);
+        return append_sheet(&base, id, None);
     };
     with_node(&mut center, &path, &mut |node| {
         let group = std::mem::replace(node, DockNode::empty_tabs());
@@ -528,11 +535,17 @@ mod tests {
     }
 
     #[test]
-    fn split_right_of_a_sheet_already_open_only_activates_it() {
+    fn split_right_of_a_sheet_already_open_moves_it_into_the_new_group() {
         let layout = DockLayout::for_sheets(["a".to_string(), "b".to_string()]);
         let layout = split_right(&layout, "a", "b");
-        assert!(matches!(layout.center, DockNode::Tabs { .. }));
-        assert_eq!(active_panel_ids(&layout, None), ["b"]);
+        let DockNode::Split { children, .. } = &layout.center else {
+            panic!("splitting an open sheet grafts it instead of doing nothing");
+        };
+        // One instance: the tab left its old group instead of duplicating.
+        assert!(matches!(&children[0], DockNode::Tabs { panels, .. } if panels == &["a"]));
+        assert!(matches!(&children[1], DockNode::Tabs { panels, .. } if panels == &["b"]));
+        assert_eq!(ids(&layout), ["a", "b"]);
+        assert_eq!(active_panel_ids(&layout, None), ["a", "b"]);
     }
 
     #[test]

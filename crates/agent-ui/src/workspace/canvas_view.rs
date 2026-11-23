@@ -26,6 +26,7 @@ use steer_canvas::projection::{self, GroupFrame};
 use crate::Workspace;
 use crate::views::centered;
 use crate::workspace::canvas_host::{CanvasAction, CanvasHost};
+use crate::workspace::chat_column::ChatColumn;
 use crate::workspace::column_view::ChatColumnView;
 use steer_canvas::persist;
 
@@ -53,6 +54,45 @@ pub struct CanvasView {
     size: Rc<std::cell::Cell<Option<Size<Pixels>>>>,
 }
 
+/// Resolves a sheet's display title from the host's data face.
+///
+/// Injected at assembly because the canvas paints inside the workspace's own
+/// update — reading the workspace here would take a second lease. The
+/// conversation entity is a sibling of the canvas, so titles come through it
+/// instead (session titles are the fold's, the same string the sidebar shows).
+pub(crate) type SheetTitles =
+    std::sync::Arc<dyn Fn(&str, &App) -> Option<SharedString> + Send + Sync>;
+
+/// The v1 title source: a session sheet is titled by its session's fold title
+/// (live state first, then the catalogue summary); every other kind is named
+/// statically by its registry entry.
+pub(crate) fn sheet_titles(chat: Entity<ChatColumn>) -> SheetTitles {
+    std::sync::Arc::new(move |sheet: &str, cx: &App| {
+        let session = steer_canvas::id::session_of_sheet(sheet)?;
+        let chat = chat.read(cx);
+        let (store, _) = chat.store.as_ref()?;
+        let store = store.read(cx);
+        let book = &store.book;
+        if let Some(title) = crate::ahp_store::leaf(book, session)
+            .display_title()
+            .filter(|title| !title.is_empty())
+        {
+            return Some(SharedString::from(title));
+        }
+        book.summaries
+            .get(session)
+            .map(|summary| summary.title.as_str())
+            .filter(|title| !title.is_empty())
+            .map(SharedString::from)
+    })
+}
+
+/// A kind's static title (the home page and terminals have no data-face name
+/// of their own in v1).
+fn static_title(key: &'static str) -> steer_canvas::registry::TitleFn {
+    std::sync::Arc::new(move |_, _| crate::i18n::t(key))
+}
+
 /// The v1 sheet kinds. `home` is the container's start page; `session` is a
 /// conversation, named by its tab title and never by the container (the
 /// container's own name is the projection over the earliest surviving sheet
@@ -62,19 +102,21 @@ pub struct CanvasView {
 /// `AnyView`s directly; this canvas renders its bodies inline from the
 /// entities it holds (see [`CanvasView::render_sheet_body`]), so a factory's
 /// result is only used by such hosts.
-fn v1_registry() -> steer_canvas::SheetRegistry {
+fn v1_registry(titles: SheetTitles) -> steer_canvas::SheetRegistry {
     use std::sync::Arc;
     use steer_canvas::{ParsedSheet, SheetKindSpec};
 
     let kind = |kind: &'static str,
                 glyph: &'static str,
                 names_container: bool,
+                title: steer_canvas::registry::TitleFn,
+                tab_title: Option<steer_canvas::registry::TabTitleFn>,
                 parse: Option<steer_canvas::registry::ParseFn>|
      -> SheetKindSpec {
         SheetKindSpec {
             kind,
-            title: Arc::new(|id, _| SharedString::from(id.to_string())),
-            tab_title: None,
+            title,
+            tab_title,
             glyph,
             closable: true,
             names_container,
@@ -85,12 +127,22 @@ fn v1_registry() -> steer_canvas::SheetRegistry {
             body: None,
         }
     };
+    let session_title = titles;
     steer_canvas::SheetRegistry::new()
-        .with(kind("home", "home", false, None))
+        .with(kind(
+            "home",
+            "home",
+            false,
+            static_title("canvas-tab-home"),
+            None,
+            None,
+        ))
         .with(kind(
             "terminal",
             "terminal",
             false,
+            static_title("canvas-tab-terminal"),
+            None,
             Some(Arc::new(|id| {
                 let resource = terminal_resource(id);
                 ParsedSheet {
@@ -103,8 +155,31 @@ fn v1_registry() -> steer_canvas::SheetRegistry {
             "session",
             "chat",
             true,
+            Arc::new(move |id, cx| {
+                session_title(id, cx).unwrap_or_else(|| crate::i18n::t("canvas-tab-new-chat"))
+            }),
+            // The tab-only projection (PLAN-ABSORB-02): a program's OSC title
+            // renames its tab, never the container.
+            Some(Arc::new(|id, _| {
+                let session = steer_canvas::id::session_of_sheet(id)?;
+                crate::title_store::TitleStore::global()
+                    .program_title(session)
+                    .map(SharedString::from)
+            })),
             Some(Arc::new(|id| ParsedSheet::workspace_wide(id))),
         ))
+}
+
+/// The tab glyph for a registered glyph name; unknown names keep the
+/// document fallback.
+fn glyph_icon(glyph: &str) -> gpui_kit_assets::IconName {
+    use gpui_kit_assets::IconName;
+    match glyph {
+        "home" => IconName::House,
+        "terminal" => IconName::SquareTerminal,
+        "chat" => IconName::MessageCircle,
+        _ => IconName::File,
+    }
 }
 
 impl CanvasView {
@@ -332,6 +407,8 @@ impl CanvasView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let rect = group.rect;
+        // The strip is positioned inside the group's own box (which is itself
+        // absolute), so its origin is the group's, not the canvas's.
         let mut strip = h_flex()
             .id(ElementId::Name(
                 format!("canvas-strip-{}", group.key).into(),
@@ -341,9 +418,9 @@ impl CanvasView {
                 move || format!("canvas-strip-{key}")
             })
             .absolute()
-            .left(px(box_.rect.x))
-            .top(px(box_.rect.y))
-            .w(px(box_.rect.width))
+            .left_0()
+            .top_0()
+            .w_full()
             .h(px(TAB_STRIP_H))
             .items_center()
             .gap_1()
@@ -354,10 +431,14 @@ impl CanvasView {
 
         for (index, sheet) in box_.panels.iter().enumerate() {
             let active = index == box_.active;
-            // The tab's label is the registry's tab title, falling back to the
-            // sheet's title; an unowned id shows its raw id (the shell never
-            // strands a tab it cannot name).
-            let label = sheet.clone();
+            // The tab's label is the kind's tab title (a program-renamed tab,
+            // else the sheet's title); an unowned id shows its raw id (the
+            // shell never strands a tab it cannot name).
+            let label = self
+                .host
+                .registry()
+                .tab_title(sheet, cx)
+                .unwrap_or_else(|| SharedString::from(sheet.clone()));
             let id = sheet.clone();
             let glyph = self.host.registry().glyph(sheet);
             let closable = self.host.registry().closable(sheet);
@@ -381,14 +462,8 @@ impl CanvasView {
                 .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                     // A double-click opens the start page in a new group
                     // beside this tab (the v1 split entry).
-                    if event.click_count() >= 2
-                        && let Some(container) = this.host.active_container().map(str::to_string)
-                    {
-                        let home = home_sheet_id(&container);
-                        if this.host.split_right(&id, &home) == CanvasAction::Applied {
-                            this.after_edit(cx);
-                            cx.notify();
-                        }
+                    if event.click_count() >= 2 {
+                        this.split_home(&id, cx);
                         return;
                     }
                     if this.host.activate_sheet(&id) == CanvasAction::Applied {
@@ -398,11 +473,7 @@ impl CanvasView {
                 }));
 
             if let Some(glyph) = glyph {
-                tab =
-                    tab.child(gpui_component::Icon::from(gpui_kit_assets::IconName::File).small());
-                // The glyph constant is the kind's; the icon theme maps names,
-                // so an unknown name falls back to the document glyph above.
-                let _ = glyph;
+                tab = tab.child(Icon::from(glyph_icon(glyph)).small());
             }
             tab = tab.child(gpui::div().text_sm().child(label));
 
@@ -526,6 +597,29 @@ impl CanvasView {
         }
     }
 
+    /// The v1 split gesture: the container's start page opens in a new group
+    /// beside `beside`.
+    pub(crate) fn split_home(&mut self, beside: &str, cx: &mut Context<Self>) {
+        let Some(container) = self.host.active_container().map(str::to_string) else {
+            return;
+        };
+        let home = home_sheet_id(&container);
+        if self.host.split_right(beside, &home) == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
+    /// Opens (or displays) a sheet — the host's own command, used by the
+    /// visual harness's scene.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn open_sheet(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        if self.host.open_sheet(sheet, None) == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
     fn close_sheet(&mut self, sheet: &str, window: &mut Window, cx: &mut Context<Self>) {
         match self.host.close_sheet(sheet) {
             CanvasAction::Applied => {
@@ -553,7 +647,7 @@ impl Render for CanvasView {
     }
 }
 
-/// The sheet frames of the shown canvas, for tests and the chrome projection.
-pub(crate) fn registry() -> steer_canvas::SheetRegistry {
-    v1_registry()
+/// The v1 sheet registry, wired with the host's title source.
+pub(crate) fn registry(titles: SheetTitles) -> steer_canvas::SheetRegistry {
+    v1_registry(titles)
 }
