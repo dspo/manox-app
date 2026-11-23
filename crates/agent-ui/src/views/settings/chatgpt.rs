@@ -109,8 +109,12 @@ impl ChatGptPanelState {
     /// so opening Settings must not block).
     pub fn load(window: &mut Window, cx: &mut Context<SettingsView>) -> Self {
         let codex_home = steer_ext_agents::chatgpt_codex_home()
+            .ok()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "~/.steer/.manox/.codex".to_string());
+            .or_else(|| {
+                steer_paths::manox_root().map(|root| root.join(".codex").display().to_string())
+            })
+            .unwrap_or_default();
         let mut state = Self {
             load_error: None,
             codex_home,
