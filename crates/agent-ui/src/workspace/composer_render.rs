@@ -775,7 +775,16 @@ impl Workspace {
         // network switch is not read here: both tiers run with the network
         // on (seeded at attach), so the control carries no network segment.
         let mode = self.foreground_access_mode(cx);
-        build_access_switch(cx.entity().downgrade(), mode).into_any_element()
+        let workspace = cx.entity().downgrade();
+        build_access_switch(mode, move |mode, cx| {
+            let _ = workspace.update(cx, |this, cx| {
+                if this.foreground_access_mode(cx) == mode {
+                    return;
+                }
+                this.apply_access_mode(mode, cx);
+            });
+        })
+        .into_any_element()
     }
 
     /// Deactivate a browser tool suite on the bound thread. The chip is

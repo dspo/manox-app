@@ -141,7 +141,10 @@ fn thread_cwd(
 /// re-apply the same mode and announce it twice. The bar hugs its intrinsic
 /// width and refuses to shrink (`flex_shrink_0`), so the footer's left chip
 /// group can never squash it.
-fn build_access_switch(workspace: WeakEntity<Workspace>, current: AccessMode) -> gpui::Div {
+fn build_access_switch(
+    current: AccessMode,
+    apply: impl Fn(AccessMode, &mut App) + 'static,
+) -> gpui::Div {
     let selected_ix = usize::from(current == AccessMode::FullAccess);
     h_flex()
         .flex_shrink_0()
@@ -157,12 +160,7 @@ fn build_access_switch(workspace: WeakEntity<Workspace>, current: AccessMode) ->
                     } else {
                         AccessMode::Sandbox
                     };
-                    let _ = workspace.update(cx, |this, cx| {
-                        if this.foreground_access_mode(cx) == mode {
-                            return;
-                        }
-                        this.apply_access_mode(mode, cx);
-                    });
+                    apply(mode, cx);
                 })
                 .child(
                     Tab::new()
