@@ -26,6 +26,13 @@ harness = false
 name = "visual_settings"
 harness = false
 
+# Visual acceptance for the canvas surface (same offscreen-render
+# constraints as visual_bubble; needs the diagnostic store binding).
+[[test]]
+name = "visual_canvas"
+harness = false
+required-features = ["test-support"]
+
 [features]
 default = []
 # Exposes the `Workspace::diagnostic_*` hooks and the full-workspace overlap
@@ -65,6 +72,7 @@ rust-embed.workspace = true
 manox-agent.workspace = true
 steer-i18n.workspace = true
 steer-paths.workspace = true
+steer-canvas.workspace = true
 steer-agent-chat-ui.workspace = true
 steer-agent-chrome-ui.workspace = true
 steer-ghostty.workspace = true

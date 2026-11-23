@@ -405,6 +405,7 @@ fn load_rows() -> Vec<SessionRow> {
             rank: 0,
             pinned: t.pinned,
             archived: t.archived,
+            sheet_count: None,
         })
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at));

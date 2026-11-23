@@ -10,9 +10,11 @@
 //! open, `CHROME_PROJECT_DIALOG=1` the modal project dialog over the shell,
 //! `CHROME_LAUNCHER=1` the launcher as the main card's content,
 //! `CHROME_PROJECT_GROUPS=1` the sidebar's project groups (two deterministic
-//! heads, the first multi-root). macOS-only: the readback is a Metal texture
-//! and the harness's imports (`VisualTestAppContext`) exist only on that
-//! platform.
+//! heads, the first multi-root), `CHROME_CANVAS=1` the sidebar's canvas face
+//! (a deterministic row set carrying container titles and sheet counts, the
+//! first one selected so its brand edge shows). macOS-only: the readback is a
+//! Metal texture and the harness's imports (`VisualTestAppContext`) exist only
+//! on that platform.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -121,6 +123,7 @@ mod macos {
                             tag: None,
                             team_leader: false,
                             last_message_at: Some(1_700_000_000 + rank * 60),
+                            sheet_count: None,
                         }
                     };
                     shell.update(cx, |shell, _cx| {
@@ -161,6 +164,40 @@ mod macos {
                                 "lib".to_string(),
                                 vec!["/Users/dev/projects/lib".to_string()],
                             ),
+                        ]);
+                    });
+                }
+                // CHROME_CANVAS=1: the sidebar's canvas face. A deterministic
+                // row set whose titles are the container-title projection and
+                // whose third line carries the canvas's sheet count; the first
+                // row is the host's active row, so the brand edge and the
+                // selected card paint (the canvas surface itself is agent-ui's
+                // shot — this crate cannot render it).
+                if std::env::var("CHROME_CANVAS").is_ok() {
+                    let loose = steer_i18n::t("chrome-sidebar-chats").to_string();
+                    let row = |(id, title): (&str, &str), sheets: usize, rank: i64| SessionRow {
+                        id: id.to_string(),
+                        short_id: "abcd1234".into(),
+                        title: title.to_string(),
+                        workspace: loose.clone(),
+                        project: None,
+                        status: SessionStatus::Idle,
+                        kind: steer_agent_chrome_ui::session_list::SessionRowKind::Thread,
+                        updated_at: 1_700_000_000 + rank * 60,
+                        sort_stamp: 1_700_000_000 + rank * 60,
+                        rank,
+                        pinned: false,
+                        archived: false,
+                        tag: None,
+                        team_leader: false,
+                        last_message_at: Some(1_700_000_000 + rank * 60),
+                        sheet_count: Some(sheets),
+                    };
+                    shell.update(cx, |shell, _cx| {
+                        shell.set_sessions(vec![
+                            row(("row-canvas", "修复登录跳转"), 3, 0),
+                            row(("row-canvas-2", "画布渲染面"), 2, 1),
+                            row(("row-canvas-3", "共享行模型的度量对齐"), 1, 2),
                         ]);
                     });
                 }
@@ -327,6 +364,11 @@ mod macos {
                     Box::new(|_w: &mut gpui::Window, _cx: &mut gpui::App| {})
                         as steer_agent_chrome_ui::shell::HookOnUnit
                 }),
+                // The canvas shot's selected row: the host's active container.
+                active_row: std::env::var("CHROME_CANVAS").is_ok().then(|| {
+                    Box::new(|_: &gpui::App| Some("row-canvas".to_string()))
+                        as steer_agent_chrome_ui::shell::HookQuery<Option<String>>
+                }),
                 ..Default::default()
             },
         }
@@ -375,6 +417,7 @@ mod macos {
                     // The picker shot needs rankable rows: a None stamp reads
                     // "no messages" and drops the row from the panel.
                     last_message_at: Some(t.updated_at),
+                    sheet_count: None,
                     updated_at: t.updated_at,
                     sort_stamp: t.updated_at,
                     rank: ix as i64,

@@ -178,7 +178,11 @@ CHROME_SHOT=/tmp/shell.png cargo test -p steer-agent-chrome-ui --test visual
 CHROME_SHOT=/tmp/right.png CHROME_RIGHT=1 cargo test -p steer-agent-chrome-ui --test visual   # 展开右栏 + 一个 dummy 页签
 CHROME_SHOT=/tmp/panel.png CHROME_PANEL=1 cargo test -p steer-agent-chrome-ui --test visual   # 展开底部 dock
 CHROME_SHOT=/tmp/sw.png CHROME_RIGHT=1 CHROME_SWITCH=1 cargo test -p steer-agent-chrome-ui --test visual  # 两个不同宽度的页签 + 切回第一个
+CHROME_SHOT=/tmp/sidebar-canvas.png CHROME_CANVAS=1 cargo test -p steer-agent-chrome-ui --test visual  # 侧栏画布面：容器标题 + sheet 数 + 选中竖条
+CHROME_SHOT=/tmp/canvas.png CHROME_CANVAS=1 cargo test -p agent-ui --features test-support --test visual_canvas  # 真装配的画布（两 tab），CANVAS_SPLIT=1 加分屏
 ```
+
+- 画布出图在 **agent-ui** 侧（`tests/visual_canvas.rs`）：chrome 的 harness 装不进真 Workspace，所以那里挂的是真 `chrome_assembly::mount`；场景经生产手势落地（`focus_conversation` + `diagnostic_bind_store` + 分屏），标题由 seed 的 catalogue 行解析，不重画任何视图。
 
 - 诊断开关 `CHROME_SWITCH=1`：开第二个（更宽的）页签、等布局稳定后切回第一个——**这是唯一能触达页签指示器滑动动画的路径**，单页签出图看不到「从哪来」。
 - **动画类改动注意**：离屏测试**没有平台帧循环**，`request_animation_frame` 排的回调只有经 `Window::simulate_next_frame` 才会送达；只 `run_until_parked` 的话动画永远停在第一帧（`delta=0`）。settle 循环已补一帧，但**要看中间帧必须自己 pump**；出图只反映终态。

@@ -60,6 +60,7 @@ fn project_row(id: &str, workspace: &str, project: &str) -> SessionRow {
         tag: None,
         team_leader: false,
         last_message_at: None,
+        sheet_count: None,
     }
 }
 
@@ -80,6 +81,7 @@ fn chats_row(id: &str) -> SessionRow {
         tag: None,
         team_leader: false,
         last_message_at: None,
+        sheet_count: None,
     }
 }
 
@@ -416,6 +418,7 @@ fn external_row_menu_closes_the_session(cx: &mut TestAppContext) {
                 tag: None,
                 team_leader: false,
                 last_message_at: None,
+                sheet_count: None,
             }])
         });
         *slot_for_build.borrow_mut() = Some(shell.clone());

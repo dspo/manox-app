@@ -86,7 +86,13 @@ pub struct SheetKindSpec {
     /// The kind's own id interpretation, when the body needs a payload.
     pub parse: Option<ParseFn>,
     /// The body — a view factory over state the kind's store owns.
-    pub body: BodyFn,
+    ///
+    /// `None` means the **host renders this kind's body itself** (a view the
+    /// shell already owns, like the conversation column). The kind still owns
+    /// its existence, title, restore and closability — the registry is the
+    /// single source for "does this sheet exist and are you allowed to show
+    /// it"; only the last mile of painting is the host's.
+    pub body: Option<BodyFn>,
 }
 
 /// Every registered kind, by id prefix.
@@ -198,9 +204,10 @@ impl SheetRegistry {
         Some(parse(sheet_id))
     }
 
-    /// The sheet's body, when a kind owns it.
+    /// The sheet's body, when a kind owns it *and* the host asked the registry
+    /// to build it (`None` = the host paints this kind itself).
     pub fn body(&self, sheet_id: &str, window: &mut Window, cx: &mut App) -> Option<AnyView> {
-        let body = &self.spec(sheet_id)?.body;
+        let body = self.spec(sheet_id)?.body.as_ref()?;
         Some(body(sheet_id, window, cx))
     }
 }
@@ -219,7 +226,7 @@ mod tests {
             names_container: true,
             restore: None,
             parse: None,
-            body: Arc::new(|_, _, _| unreachable!("no view in a unit test")),
+            body: Some(Arc::new(|_, _, _| unreachable!("no view in a unit test"))),
         }
     }
 

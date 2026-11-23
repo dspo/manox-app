@@ -70,6 +70,8 @@ pub struct SessionRow {
     /// The host's recency stamp (see [`SessionRowData::last_message_at`])
     /// — the session picker's rank key. External rows carry none.
     pub last_message_at: Option<i64>,
+    /// Sheets on the container's canvas (see `SessionRowData::sheet_count`).
+    pub sheet_count: Option<usize>,
 }
 
 impl SessionRow {
@@ -97,6 +99,7 @@ impl SessionRow {
                 tag: r.tag,
                 team_leader: r.team_leader,
                 last_message_at: r.last_message_at,
+                sheet_count: r.sheet_count,
             })
             .collect()
     }
@@ -116,6 +119,7 @@ impl SessionRow {
             tag: self.tag.clone(),
             team_leader: self.team_leader,
             last_message_at: self.last_message_at,
+            sheet_count: self.sheet_count,
         }
     }
 }

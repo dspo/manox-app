@@ -683,6 +683,7 @@ mod tests {
             tag: None,
             team_leader: false,
             last_message_at: stamp,
+            sheet_count: None,
         }
     }
 
