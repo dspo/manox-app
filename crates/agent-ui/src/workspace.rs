@@ -176,18 +176,8 @@ fn build_access_switch(
 }
 
 impl Workspace {
-    /// The foreground session's effective [`AccessMode`] read from the fold
-    /// (§J11): the seated value, the host-declared schema default, or the enum
-    /// default — never a local guess. `Sandbox` when no store is bound.
     fn foreground_access_mode(&self, cx: &gpui::App) -> AccessMode {
-        self.chat
-            .read(cx)
-            .store
-            .as_ref()
-            .map(|(store, sid)| {
-                crate::ahp_store::leaf(&store.read(cx).book, sid).access_mode_or_default()
-            })
-            .unwrap_or_default()
+        chat_access::access_mode(&self.chat, cx)
     }
 
     /// The FOREGROUND CONTAINER id (the container model's routing face): the
@@ -2612,50 +2602,8 @@ impl Workspace {
         });
     }
 
-    /// Confirm the selected (or clicked) completion item: replace the trigger
-    /// token with `trigger + name + " "` and place the caret after the space.
     fn completion_confirm(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(state) = self.chat.update(cx, |chat, cc| {
-            let v = chat.completion.take();
-            cc.notify();
-            v
-        }) else {
-            return;
-        };
-        let Some(item) = state.items.get(ix) else {
-            self.chat.update(cx, |chat, cx| {
-                chat.completion = Some(state);
-                cx.notify();
-            });
-            return;
-        };
-        let name = item.name.to_string();
-        let trigger = state.trigger;
-        let token_start = state.token_start;
-        let (value, cursor) = {
-            let s = self.chat_input(cx).read(cx);
-            (s.value().to_string(), s.selected_range().end)
-        };
-        if cursor > value.len() || token_start > cursor {
-            return;
-        }
-        // The inserted name rides as an atomic inline token (chip render, whole
-        // unit delete); a rejected token op degrades to the plain-text insert.
-        let (new_value, caret): (InputContent, usize) =
-            match build_replacement_content(trigger, &name, &name, &value, token_start, cursor) {
-                Ok((content, caret)) => (content, caret),
-                Err(_) => {
-                    let (text, caret) =
-                        build_replacement(trigger, &name, &value, token_start, cursor);
-                    (InputContent::from(text), caret)
-                }
-            };
-        self.chat_input(cx).update(cx, |s, cx| {
-            s.set_value(new_value, window, cx);
-            let pos = RopeExt::offset_to_position(s.text(), caret.min(s.text().len()));
-            s.set_cursor_position(pos, window, cx);
-        });
-        cx.notify();
+        chat_access::completion_confirm(&self.chat, ix, window, cx);
     }
 
     fn completion_up(&mut self, _window: &mut Window, cx: &mut Context<Self>) {

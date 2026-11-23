@@ -583,21 +583,7 @@ impl Workspace {
     }
 
     pub(super) fn composer_can_submit(&self, running: bool, cx: &App) -> bool {
-        // T10c: the v1 `history_phase` loading gate retired with the fold
-        // (the restore boundary is now the §D.1 snapshot; a pending-snapshot
-        // gate lands with the §K.5 closeout).
-        if running {
-            return true;
-        }
-        let input_empty = self.chat_input(cx).read(cx).value().trim().is_empty();
-        if self.chat.read(cx).pending_ask.is_some() {
-            // The card is answerable without typing anything: its pager's
-            // check settles whatever is selected, and an untouched question
-            // settles as an explicit skip.
-            true
-        } else {
-            !input_empty || !self.chat.read(cx).pending_attachments.is_empty()
-        }
+        chat_access::composer_can_submit(&self.chat, running, cx)
     }
 
     /// Settle the pending ask: fold each question's answer (its selected
@@ -652,53 +638,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The foreground session's model identity from the `model` projection:
-    /// the canonical `{provider, modelId}` wire identity (L8) — never a full
-    /// `Model` blob. Deserializing the projection into `Model` (an earlier
-    /// iteration) always failed on the missing display fields, so the chip
-    /// rendered "no model" no matter what the journal said.
-    ///
-    /// A freshly created session's config seat is empty until its first
-    /// journaled pick, while the engine already runs the registry default —
-    /// the fallback shows THAT (the honest "what would run"), so "no model"
-    /// is reserved for a registry with nothing registered at all.
     pub(crate) fn foreground_model_identity(&self, cx: &App) -> Option<(String, String)> {
-        let identity = self
-            .chat
-            .read(cx)
-            .store
-            .as_ref()
-            .and_then(|(store, sid)| {
-                let view = store.read(cx);
-                crate::ahp_store::leaf(&view.book, sid)
-                    .model_id()
-                    .map(str::to_string)
-            })
-            .or_else(|| {
-                manox_agent::provider_glue::default_model()
-                    .map(|m| format!("{}/{}", m.provider, m.id))
-            });
-        let identity = identity?;
-        let (provider, id) = identity.split_once('/')?;
-        (!provider.is_empty() && !id.is_empty()).then(|| (provider.to_string(), id.to_string()))
+        chat_access::model_identity(&self.chat, cx)
     }
 
-    /// Exact registration match of a canonical model identity against the
-    /// gateway's model-registry snapshot (U2 display resolution): the chip
-    /// and the picker menu read the wire `ModelInfo` the server projects, so
-    /// a remote server's registry drives the desktop display. A stale id
-    /// resolves to `None` and the caller renders the raw identity, never a
-    /// fuzzy look-alike.
     pub(crate) fn resolve_model_display(
         &self,
         provider: &str,
         id: &str,
         _cx: &App,
     ) -> Option<(String, crate::model_catalog::ModelRow)> {
-        // Display resolution rides the in-process provider registry (the
-        // same source the streaming side matches against); the AHP root
-        // catalogue serves remote clients.
-        crate::model_catalog::resolve(provider, id).map(|row| (row.provider_display.clone(), row))
+        chat_access::model_display(provider, id)
     }
 
     /// The pi-harness model selector. Reads the gateway's model-registry
