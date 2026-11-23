@@ -186,6 +186,10 @@ fn ledger_path(home: &Path) -> PathBuf {
 /// path authority so an isolated (`STEER_HOME`) instance never reaches into
 /// the real root. A failure logs and starts from an empty ledger — recovery
 /// drafts are never worth a startup blocker.
+///
+/// Compiled only where its caller is: tests and `test-support` builds start
+/// on a temp-file ledger and never carry anything over.
+#[cfg(not(any(test, feature = "test-support")))]
 fn carry_over_from_manox_layer(new_path: &Path) {
     let Some(old_path) =
         steer_paths::manox_root().map(|root| root.join("steer").join("unsent.jsonl"))

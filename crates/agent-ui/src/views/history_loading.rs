@@ -4,6 +4,7 @@
 //! `ai_elements::Meerkat`; this page is the heading, the thread id, and the
 //! 10-second self-clearing gate's timeout constant.
 
+#[cfg(feature = "test-support")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
