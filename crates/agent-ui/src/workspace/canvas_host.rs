@@ -131,6 +131,14 @@ impl CanvasHost {
         self.state.show_scratch()
     }
 
+    /// Turns the scratch canvas into `container_id`'s canvas: its sheets move
+    /// over (the scratch start page becomes the container's own), so minting a
+    /// container from the launcher never loses the tab the user was on.
+    pub fn migrate_scratch(&mut self, container_id: &str) {
+        self.state.migrate_scratch(container_id);
+        self.save_generation += 1;
+    }
+
     /// Drops everything kept for a gone container. Answers whether it was shown
     /// (the caller then switches somewhere else).
     pub fn forget_container(&mut self, container_id: &str) -> bool {

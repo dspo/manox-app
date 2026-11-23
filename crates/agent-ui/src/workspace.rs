@@ -3385,6 +3385,18 @@ impl Workspace {
         }
     }
 
+    /// A container was minted: when the canvas is still on the scratch
+    /// surface, its sheets move into the new container.
+    pub(crate) fn mint_canvas_from_scratch(&mut self, container_id: &str, cx: &mut Context<Self>) {
+        let Some(canvas) = &self.canvas_view else {
+            return;
+        };
+        let cwd = self.container_attrs(container_id, cx).cwd;
+        canvas.update(cx, |canvas, cx| {
+            canvas.mint_container(container_id, cwd, cx)
+        });
+    }
+
     /// The canvas's activate gesture (a tab click), for the gesture matrix.
     #[cfg(feature = "test-support")]
     pub fn diagnostic_canvas_activate(&mut self, sheet: &str, cx: &mut Context<Self>) {

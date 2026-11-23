@@ -205,6 +205,24 @@ impl CanvasView {
         self.terminals.retain(|sheet, _| alive.contains(sheet));
     }
 
+    /// A container was just minted: when the canvas is still the scratch one,
+    /// its sheets move into the new container.
+    pub(crate) fn mint_container(
+        &mut self,
+        container_id: &str,
+        cwd: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host.active_container().is_some() {
+            return;
+        }
+        self.cwd = cwd;
+        self.host.migrate_scratch(container_id);
+        self.prune_terminals();
+        self.after_edit(cx);
+        cx.notify();
+    }
+
     /// Shows the scratch canvas (the shell's pre-container surface).
     pub(crate) fn show_scratch(&mut self, cx: &mut Context<Self>) {
         self.host.show_scratch();
