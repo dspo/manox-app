@@ -18,22 +18,28 @@
 //! picker or a diff can sit on a `near` page harmlessly.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+use std::sync::Mutex;
 
 use gpui::prelude::*;
 use gpui::{App, Entity, SharedString, WeakEntity, Window};
-use steer_canvas::id::{agent_resource, diff_resource, editor_resource, webview_resource};
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+use steer_canvas::id::webview_resource;
+use steer_canvas::id::{agent_resource, diff_resource, editor_resource};
 use steer_canvas::registry::{ParsedSheet, SheetKindSpec};
 
 use crate::Workspace;
 
 /// The right dock's per-sheet state. One entity the canvas holds; every
 /// body factory mints-or-reuses through it, so a body rebuild is never a
-/// state reset. `notify` is the canvas view: the faces that change what a
-/// tab strip reads (a page title) repaint through it.
+/// state reset.
 pub struct CanvasPaneStore {
     ws: WeakEntity<Workspace>,
     mux: Entity<crate::multiplexer::SessionMultiplexer>,
+    /// The canvas view: the webview ticker's repaint target (its page
+    /// `<title>` lands on a tab strip; browser-platform-only).
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     notify: Option<WeakEntity<super::workspace::canvas_view::CanvasView>>,
     webviews: HashMap<String, WebviewSheet>,
     editors: HashMap<String, Entity<gpui_component::input::EditorState>>,
@@ -42,6 +48,10 @@ pub struct CanvasPaneStore {
     agents: HashMap<String, Entity<super::tool_tabs::AgentPicker>>,
 }
 
+/// The webview slot's state — browser-platform-only (the embedded browser
+/// compiles out on Linux/FreeBSD with the kind, so the twin there is the
+/// unit type and the slot map stays empty by construction).
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 struct WebviewSheet {
     /// The app-side browser tab id, minted at the body's first build (the
     /// host routes IPC by it); `None` until then.
@@ -54,6 +64,9 @@ struct WebviewSheet {
     ticker_alive: Arc<std::sync::atomic::AtomicBool>,
     ticker_visible: Arc<std::sync::atomic::AtomicBool>,
 }
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+struct WebviewSheet;
 
 struct SubagentPane {
     panel: Entity<crate::views::subagent_panel::SubagentPanel>,
@@ -79,6 +92,7 @@ impl CanvasPaneStore {
 
     /// The repaint target for the faces that change what a tab strip reads
     /// (a page title). Set by the canvas at mount.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub(crate) fn set_notify(
         &mut self,
         notify: WeakEntity<super::workspace::canvas_view::CanvasView>,
@@ -86,7 +100,16 @@ impl CanvasPaneStore {
         self.notify = Some(notify);
     }
 
-    /// The webview slot for `sheet`, minted at `url` when absent.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub(crate) fn set_notify(
+        &mut self,
+        _notify: WeakEntity<super::workspace::canvas_view::CanvasView>,
+    ) {
+    }
+
+    /// The webview slot for `sheet`, minted at `url` when absent (the
+    /// browser-platform faces' helper; the Linux twin has no slots).
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     fn webview_slot(&mut self, sheet: &str, url: &str) -> &mut WebviewSheet {
         self.webviews
             .entry(sheet.to_string())
@@ -164,6 +187,7 @@ impl CanvasPaneStore {
 
     /// A webview sheet's URL (the open face names the next sheet's start
     /// page from it).
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub fn webview_url(&self, sheet: &str) -> Option<String> {
         self.webviews
             .get(sheet)
@@ -171,6 +195,7 @@ impl CanvasPaneStore {
     }
 
     /// A webview sheet's live page title (the ticker's write).
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     pub(crate) fn webview_page_title(&self, sheet: &str) -> Option<String> {
         let slot = self.webviews.get(sheet)?;
         let title = slot.title.lock().expect("webview title lock").clone();
@@ -352,7 +377,7 @@ impl CanvasPaneStore {
         if self.agents.remove(sheet).is_some() {
             // The picker may have spawned: the kill handle rides the
             // registry under the sheet id either way.
-            if let Some(ws) = crate::dispatch::workspace_global() {
+            if let Some(ws) = self.ws.upgrade() {
                 ws.update(cx, |ws, _| {
                     ws.kill_handle_for_tab(sheet);
                 });
@@ -524,13 +549,13 @@ impl CanvasPaneStore {
 pub fn pane_kinds(store: Entity<CanvasPaneStore>) -> Vec<SheetKindSpec> {
     // The specs borrow the store for their whole life: the Arc'd closures
     // outlive the function call, so they take their own handles.
-    let webview_title_store = store.clone();
     // The webview kind is browser-platform-only: the embedded browser
     // compiles out on Linux/FreeBSD with the rest of the browser face, so
     // the kind is NOT REGISTERED there at all (no entry — the same
     // clean-refusal shape the capability face keeps).
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     let webview = Some({
+        let webview_title_store = store.clone();
         let webview_body_store = webview_title_store.clone();
         SheetKindSpec {
             kind: "webview",
