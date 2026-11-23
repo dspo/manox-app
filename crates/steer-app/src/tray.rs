@@ -313,7 +313,7 @@ mod backend {
         let rgba = tray_icon_rgba(ICON_PX)?;
         // RGBA -> ARGB32, network byte order (A R G B per pixel).
         let mut data = Vec::with_capacity(rgba.len());
-        for chunk in rgba.chunks_exact(4) {
+        for chunk in rgba.as_chunks::<4>().0 {
             data.extend_from_slice(&[chunk[3], chunk[0], chunk[1], chunk[2]]);
         }
         Ok(ksni::Icon {

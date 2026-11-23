@@ -103,7 +103,7 @@ mod macos {
                 window.simulate_mouse_move(position, cx);
                 for _ in 0..20 {
                     window.dispatch_event(
-                        gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                        gpui::PlatformInput::Scroll(gpui::ScrollEvent {
                             position,
                             delta: gpui::ScrollDelta::Pixels(gpui::point(
                                 px(0.),
@@ -111,6 +111,7 @@ mod macos {
                             )),
                             modifiers: Default::default(),
                             touch_phase: gpui::TouchPhase::Moved,
+                            source: gpui::ScrollSource::Pointer,
                         }),
                         cx,
                     );

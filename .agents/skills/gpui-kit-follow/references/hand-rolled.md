@@ -5,6 +5,8 @@
 **维护规则**：adoption PR 合入时同步更新本表；「已知上游映射」标注所评估的版本，只是线索——每轮评估须对新版本重新核对（重评估原则见 SKILL.md）。
 
 > 0.8.0 轮（2026-10-23）记录：整列 bump 已合入 main（#209，gpui-pre 0.3.9 / gpui-component 0.8.0；唯一强制迁移是 gpui-base 0.8 标题阶梯上游化——`with_heading` 覆盖在 Linux 度量下守不住节奏不变量，`text_view.rs` 退役 pinned ladder 改乘上游相对阶梯）。吸收轮排期见 `PLAN-GPUKIT-0.8-ADOPTION.md`。
+>
+> 0.9.1 轮（2026-11-23）记录：整列 bump 0.8.0 → 0.9.1（gpui-pre 0.3.12，zed@93d7456→d2a4fb6；工具链随上游 1.97.1→1.100.0，因 gpui-pre-macos 0.3.12 用了 1.98 stable 的 `result_option_map_or_default`）。强制迁移面小：`ScrollWheelEvent`→`ScrollEvent` + `PlatformInput::Scroll` + `source` 字段（3 文件）、`Keystroke::parse` 静态字符串化（1 处）、`secondary-*` chord 拆显式 cmd/ctrl 对（composer 中断键）。行为性变更两处落地：动画改读 executor clock——离屏视觉测试的 wall-clock sleep 换 `advance_clock` + 补一个 notify 强制重绘（回读滞后一个 presented frame）；`on_prepaint` probe 改锚元素 padding-box 角（zed#3689）——right_pane 页签 bounds 退役 `−TAB_PL` 补偿、原样记录 origin（四张壳图 0 字节差异达阵）。0.8.0 轮吸收的全部 API 在 0.9.1 存活（源码核验）。`MessageScroller` 重评转 issue #311 跟踪。
 
 | 手搓点 | 位置 | 状态（0.8.0 轮已更新；历史轮次见各行） | 已知上游映射 |
 |---|---|---|---|
@@ -22,7 +24,7 @@
 | 聊天列滚动 | 聊天列装配（自绘 `list()` + stick-to-bottom） | **已落地（#216）**：`ScrollBounce` 包裹（与上游 MessageScroller 同范式：bounce 驱动 ListState、`on_scroll` 桥接 chat notify 供 turn rail 读取）；`FollowMode::Tail` 原生语义不受影响；探针钉 wheel 路由与两端 clamp（拉伸只动绘制） | `gpui_base::overscroll` / `ScrollBounce`（0.8.0 #3500） |
 | @-chip 悬停（新能力，无手搓前身） | composer `Textarea` 的 `InputContent` token chip | **已落地（#217）**：`on_token_hover`（弱实体桥接 notify）+ deferred/anchored 手搓小卡片（`Tooltip` 组件形态与 anchored 定位不匹配）；registry key ≠ chip 短名才弹；悬停中删除/清空 chip 由 Change 路径清理（无 exit 事件也不悬挂） | `InlineTokenHoverEvent`（0.8.0：token/range/bounds/进出） |
 | 分隔条 | `steer-agent-chrome-ui/src/divider.rs` | **已迁移（#218）**：手搓 handle 换 `gpui_base::resize_handle` band + 空外观（component 默认外观带常驻 hairline，破坏 2026-Light 隐形把手）；shell 根坐标数学与 per-side payload 原样；命中带 6→9px straddle（上游常量后置覆盖，6px 不可保持，取增宽不取变窄），光标等价核实；四张壳图 0 像素差；双击重置走 `.on_double_click` | 独立 `resize_handle`（0.8.0 #3302）；`ResizablePanel::fixed` 评估结论：现壳宽度是纯壳状态、天然跨窗口 resize 保持，无覆盖缺口 |
-| 聊天列 transcript 架构 | 聊天列渲染管线（自绘 stick-to-bottom） | **不跟进（0.8.0 轮，作者确认）**：与聊天管线重建计划（PLAN-SESSION-MODEL-REDESIGN 等）冲突，重建落地前是双倍工作；落地后优先重评 → 下期确认清单 | `MessageScroller`（0.8.0 加 `logical_scroll_top`、append/prepend/splice、follow mode） |
+| 聊天列 transcript 架构 | 聊天列渲染管线（自绘 stick-to-bottom） | **不跟进（0.8.0 轮作者确认；0.9.1 轮起转 [issue #311](https://github.com/dspo/manox-app/issues/311) 跟踪）**：与聊天管线重建计划冲突，重建落地前是双倍工作；落地后按 issue 重评，重建时优先以 `MessageScroller` 为基座 | `MessageScroller`（0.8.0 加 `logical_scroll_top`、append/prepend/splice、follow mode；0.9.1 修 scrollbar 到底） |
 | 语法高亮后端 | `gpui-component` feature `tree-sitter-languages`（全语言） | **0.8.0 本期不跟进（作者决定）**：syntect 三比（编译时间/二进制体积/高亮质量）→ 下期确认清单 | `syntect` feature（0.8.0 #3512：bat 语法集；同开时 tree-sitter 优先） |
 | 语音输入（新能力） | 无 | **已落地（#221，macOS 先行）**：`speech` feature；`SpeechState::has_recognizer()` 运行时探测（Linux placeholder 恒隐藏、无 plist 键也隐藏，不留坏按钮）；点击开关式（上游 toggle 模型，含 connecting 态）；识别文本 `insert` 落光标 + 焦点回收；steer-app 内嵌 `__TEXT,__info_plist`（dev 态可弹权限窗）+ bundle-mac 双权限键；CI Linux 补 ALSA 头（cpal） | `speech` 模块（0.8.0：objc2-speech/WinRT；电平/波形组件 v1 未用） |
 | webview 宿主 | `crates/steer-webview`（wry 直连 + Tauri 式 IPC） | **长期观察**：上游 `gpui-webview` 已三平台（Linux X11/XWayland）+ GPUI Fast 后端 overlay；每逢 minor 轮重新对位一次，评估替代可行性 | `gpui-webview`（0.8.0 #3395 改名自 gpui-wry） |
@@ -39,12 +41,17 @@
 - **内置补全菜单（`CompletionProvider`/`CompletionMenuOptions`/`ShowCompletions`）**：挂 `input/editor/lsp`，仅 EditorState；composer 是 TextareaState（0.8.0 实证）。
 - **`gpui_base::text::editor_host`**（0.8.0）：外部编辑器渲染边界，本仓无自有文档模型的编辑器，无场景。
 
-## 下期 minor 评估时须向作者确认的清单（0.8.0 轮沉淀，2026-10-23）
+## 下期 minor 评估时须向作者确认的清单（0.9.1 轮更新，2026-11-23）
 
-这些是上一轮**显式搁置**的项，不是永久否决。下期 gpui-kit minor 版本评估时逐项再次向 dspo/manox-app 作者确认是否跟进，不可静默续期；确认后销账（跟进 → 转上表立项行；再搁置 → 更新轮次留此）。0.8.0 轮第二轮问题经作者 2026-10-23 重新作答：divider、speech 翻案立项，粘贴图片/Combobox/Empty 转立项评估，均已从本清单移出。
+这些是**显式搁置**的项，不是永久否决。下期 gpui-kit minor 版本评估时逐项再次向 dspo/manox-app 作者确认是否跟进，不可静默续期；确认后销账（跟进 → 转上表立项行；再搁置 → 更新轮次留此）。`MessageScroller` 已于 0.9.1 轮（作者指示）转 issue #311 独立跟踪，移出本清单。
 
-| 项 | 搁置原因（0.8.0 轮） | 下期确认时附带的新信息 |
+| 项 | 搁置原因（0.9.1 轮，作者未答复重评征询，维持搁置） | 下期确认时附带的新信息 |
 |---|---|---|
-| syntect 三比（编译/体积/高亮质量） | 作者明确本期不做 | 上游 syntect 后端是否成熟（主题映射、语言覆盖） |
-| `MessageScroller` 替代聊天列 | 作者确认：与聊天管线重建计划冲突，重建落地前是双倍工作 | 重建是否已落地；落地则优先重评 |
-| `gpui-webview` 替代 `steer-webview` | 长期观察 | 三平台成熟度、IPC 模型是否覆盖 Tauri 式用法 |
+| syntect 三比（编译/体积/高亮质量） | 0.8.0 轮作者明确不做；0.9.1 轮征询未答复 | 上游 syntect 后端是否成熟（主题映射、语言覆盖） |
+| `gpui-webview` 替代 `steer-webview` | 长期观察 | 三平台成熟度、IPC 模型是否覆盖 Tauri 式用法；0.9.1 修了 Linux X11 drop abort |
+
+### 0.9.1 轮新吸收候选（评估完成，未立项，供下轮再征询）
+
+- **截断 diff 渲染**（0.8.1 `DiffFile::parse_with` + `truncated_hunks` / 0.9.1 #3473）：右栏 DiffTab（#220）对流式 Edit patch 从「解析失败显错」变实时渲染不完整 hunk；推荐项，作者未答复。
+- **`InputEditsEvent`**（0.9.0 #3751）：`Change` 携带编辑批次 + 后文档，或可细化 completion 重同步（#222 后靠整段 Change）；需读实现再评。
+- **Markdown 任务清单勾选**（0.9.1 `on_task_toggle`）：transcript 任务清单可交互；产品语义需作者定。

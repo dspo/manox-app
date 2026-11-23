@@ -127,7 +127,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.100.0"
           components: rustfmt
 
       # `cargo tree` resolves the workspace graph, so the git dependencies must
@@ -219,7 +219,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.100.0"
           components: rustfmt, clippy
 
       - name: Cache cargo registry
@@ -271,7 +271,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.100.0"
           components: rustfmt, clippy
 
       - name: Cache cargo registry
@@ -327,7 +327,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.100.0"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -418,7 +418,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.100.0"
 
       - name: Cache cargo registry
         uses: actions/cache@v4

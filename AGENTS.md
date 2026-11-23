@@ -158,7 +158,7 @@ cd pi-harness && bun run smoke                   # 离线 ACP 烟测（不调模
 MANOX_RUN_LIVE=1 cargo test -p steer-acp -- --ignored   # 对真 pi-acp 的握手/new/close 烟雾
 ```
 
-Rust **1.97.1**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 系统依赖的**唯一清单**是 `.github/actions/linux-deps/action.yml`（Fedora 侧对应 `.github/actions/linux-deps-fedora/action.yml`，两份声明同一包集合；集成浏览器在 Linux 编译排除，故两份都不含 GTK/WebKitGTK；改一处必须同步另一处）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
+Rust **1.100.0**（`rust-toolchain.toml`），edition **2024**，需 `clippy`/`rustfmt`/`rust-src`。Linux 系统依赖的**唯一清单**是 `.github/actions/linux-deps/action.yml`（Fedora 侧对应 `.github/actions/linux-deps-fedora/action.yml`，两份声明同一包集合；集成浏览器在 Linux 编译排除，故两份都不含 GTK/WebKitGTK；改一处必须同步另一处）；deb/rpm 另声明 `bubblewrap`——Linux 沙箱的 bwrap 地板，缺失即退化为逐调用审批。
 
 **libghostty-vt 的编译期前置（`crates/steer-ghostty`）**：该 crate 的 build script 静态链接 libghostty-vt，源码与工具链不在 Cargo 依赖图里，由三种输入之一提供——
 - **Ghostty 源**：`GHOSTTY_SRC=<本地 checkout>`（开发环，zig 自身 cache 使其增量；每次 build script 都重跑 zig），否则下载 `build.rs` 里 pin 的 rev tarball（sha256 校验）。
@@ -191,11 +191,11 @@ CHROME_SHOT=/tmp/canvas.png CHROME_CANVAS=1 cargo test -p agent-ui --features te
 - 画布出图在 **agent-ui** 侧（`tests/visual_canvas.rs`）：chrome 的 harness 装不进真 Workspace，所以那里挂的是真 `chrome_assembly::mount`；场景经生产手势落地（`focus_conversation` + `diagnostic_bind_store` + 分屏），标题由 seed 的 catalogue 行解析，不重画任何视图。
 
 - 诊断开关 `CHROME_SWITCH=1`：开第二个（更宽的）页签、等布局稳定后切回第一个——**这是唯一能触达页签指示器滑动动画的路径**，单页签出图看不到「从哪来」。
-- **动画类改动注意**：离屏测试**没有平台帧循环**，`request_animation_frame` 排的回调只有经 `Window::simulate_next_frame` 才会送达；只 `run_until_parked` 的话动画永远停在第一帧（`delta=0`）。settle 循环已补一帧，但**要看中间帧必须自己 pump**；出图只反映终态。
+- **动画类改动注意**：离屏测试**没有平台帧循环**，`request_animation_frame` 排的回调只有经 `Window::simulate_next_frame` 才会送达；且动画读的是 **executor 时钟**（gpui-pre 0.3.10 起），wall-clock `sleep` 不再推进——settle 循环用 `advance_clock` 走表，出图前再 notify 强制一次重绘（截图回读滞后一个 presented frame，终态帧不补就不会被捕获）。**要看中间帧必须自己 pump**；出图只反映终态。
 - **页签指示器的不变量**（原 `script/check-tab-indicator.sh` 已删，改成出图时人工核对）：① 对齐量**左端**而非宽度——曾经宽度/高度全对却整体右偏 6px，任何宽度或 y 断言都看不见；正确位置是 rail 左端 + 8 device px（`STRIP_PL` 4 logical @2x）。② 可见厚度必须是 4 device px（`TAB_INDICATOR_H` 2 logical），而指示器必须是 strip 的**兄弟节点**（放在 relative wrapper 里）——gpui 在子节点之后绘制父级 border，做成 strip 的子节点会被盖掉一半。
 - 产物是 **1280×820 @2x = 2560×1640** 的 PNG（约 300KB）。
 - **macOS only**：Metal 纹理回读，其它平台打印一行跳过；**未设 `CHROME_SHOT` 时同样跳过**，所以在 CI 里安全（门禁不受影响）。
-- 侧栏铺的是真实 thread store（`refresh_thread_list` 一次同步扫描），所以图里是**真实会话数据**，不是占位。
+- 侧栏铺的是真实 thread store（`refresh_thread_list` 一次同步扫描），所以图里是**真实会话数据**，不是占位。**推论**：默认壳图的侧栏随本机会话库漂移，逐字节对比只在两图取自同一 store 状态时成立——跨时刻复核请按区域比较，侧栏列表区（`x < 413`）的差异不算回归，渲染面其余部分是像素中性的。侧栏需要确定性时照 `CHROME_PROJECT_GROUPS` / `CHROME_CANVAS` 的写法换合成行。
 - 页签内容用 dummy tab：PTY 会触发 gpui 的泄漏检测，wry subview 在离屏下读不回来——需要终端/webview 真内容时改用 `cargo run` 看。
 - 改 UI 后**重跑截图**比描述更可信；图与代码不会漂移，因为图就是代码画的。**不接受**用脚本手绘 SVG 复刻一套 UI（已退役，见 git 历史）：那是同一套 UI 的第二种表达，必然与真实渲染分叉。
 

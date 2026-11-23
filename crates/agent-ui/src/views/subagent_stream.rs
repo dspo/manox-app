@@ -332,18 +332,16 @@ impl Render for SubagentStreamView {
                 }
                 scroll.scroll_to_bottom();
             })
-            .on_scroll_wheel(
-                cx.listener(|this, ev: &gpui::ScrollWheelEvent, window, cx| {
-                    // An upward wheel breaks tail-follow so the user can read
-                    // back; a pass that finds the viewport back at the bottom
-                    // re-arms it.
-                    let dy = ev.delta.pixel_delta(window.line_height()).y;
-                    if dy > gpui::Pixels::ZERO {
-                        this.stick_to_bottom = false;
-                        cx.notify();
-                    }
-                }),
-            );
+            .on_scroll(cx.listener(|this, ev: &gpui::ScrollEvent, window, cx| {
+                // An upward wheel breaks tail-follow so the user can read
+                // back; a pass that finds the viewport back at the bottom
+                // re-arms it.
+                let dy = ev.delta.pixel_delta(window.line_height()).y;
+                if dy > gpui::Pixels::ZERO {
+                    this.stick_to_bottom = false;
+                    cx.notify();
+                }
+            }));
 
         v_flex()
             .h_full()

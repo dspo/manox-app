@@ -60,6 +60,10 @@ transcript 侧的确定性根因（引用定义后到导致同一段落重排变
 ### 每次 bump 的复核动作
 
 1. 读新的 `gpui-base` 源码：grep `with_runs`、`InvalidTextRun`、`text_runs`、`highlighted_styles`，确认是否出现边界消毒/裁剪。
-2. 跑 `CJK_FUZZ_RUN=1 cargo test -p agent-ui --test cjk_fuzz_deep`（该 battery 当前预期复现，只有上游修复后才应转绿）。
+2. 跑 `CJK_FUZZ_RUN=1 cargo test -p agent-ui --test cjk_fuzz_deep`（复现状态见下方轮次记录；转红即上游回归或暴露面变化）。
 3. 跑 `cargo test -p steer-agent-chat-ui --test tool_card_stream`。
-4. 上游已修：**删除**伪流式合批（恢复真流式）、`clamp_runs` 与本条。上游未修：保持现状，不额外加 workaround。
+4. 上游已修（三条判据任一满足）：**删除**伪流式合批（恢复真流式）、`clamp_runs` 与本条。上游未修：保持现状，不额外加 workaround。
+
+### 轮次复核记录
+
+- **gpui-pre 0.3.12 / gpui-base 0.9.1（2026-11-23）**：`with_runs` panic 原样（`elements/text.rs:531-536`）；`highlighted_styles` 对超界 range 仍过滤丢弃不裁剪（`text/node.rs:2558`）；`Inline::request_layout` 边界无新增消毒——三条判据均未满足，缓解全维持。**经验状态变化**：`CJK_FUZZ_RUN=1` battery 10/10 全绿（321s 真 fuzz；0.3.9 上按 battery 头注必崩）。确切上游修复点未定位（候选：0.9.1 #3846 高亮合并重写、#3799 选择高亮裁剪——都在 fade/highlight 机械上）。battery 保持 env-gated 作回归金丝雀：后续 bump 转红即报警。
