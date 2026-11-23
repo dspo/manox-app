@@ -236,6 +236,13 @@ pub struct ChannelBook {
     /// read the omission as "archived". The walk that names the id confirms
     /// it and clears the mark, so a later omission still prunes it.
     unconfirmed_rows: HashSet<String>,
+    /// Session ids an `x-manox/archivedChanged` envelope moved to the host's
+    /// archived partition (cleared by the matching `archived: false`). The
+    /// removal channel cannot carry the reason: a `sessionRemoved` fires for
+    /// an archive exit exactly as for a deletion, so the mark is what turns
+    /// the row's catalogue exit into "still alive" for consumers that key
+    /// per-session state off deletions (the title bridge's prune).
+    archived_ids: HashSet<String>,
     pub sessions: HashMap<String, SessionState>,
     pub chats: HashMap<String, ChatState>,
     /// Extension channel URI → folded state (a baseline replaces, deltas fold).
@@ -300,6 +307,12 @@ pub struct RefusalRecord {
 /// are consumed by the transcript sync within a notify of arriving, so the
 /// cap only bounds a parked session's backlog.
 const RECEIPT_TABLE_CAP: usize = 512;
+
+/// The deletion queue's cap ([`AhpStore::take_deleted_sessions`]): the
+/// projection pump drains it every pass, so the cap only bounds a burst —
+/// a container teardown archiving a whole tree does not ride this queue
+/// (an archive exit is not a deletion), making a cap overflow pathological.
+const DELETED_SESSIONS_CAP: usize = 64;
 
 /// Derive the steer-consumption receipt from one envelope's (channel,
 /// action). Two wire shapes are receipts: a `chat/pendingMessageRemoved
@@ -376,6 +389,7 @@ impl Default for ChannelBook {
             summary_order: Vec::new(),
             walk_order: Vec::new(),
             unconfirmed_rows: HashSet::new(),
+            archived_ids: HashSet::new(),
             sessions: HashMap::new(),
             chats: HashMap::new(),
             ext: HashMap::new(),
@@ -522,6 +536,30 @@ impl ChannelBook {
         }
         if let Some(reason) = value.get("rejectionReason").and_then(Value::as_str) {
             return FoldEffect::Rejected(reason.to_string());
+        }
+        // The batched archive decision rides an unknown action on the
+        // catalogue root (`{type, sessions, archived}`); its accepted echo is
+        // broadcast to every root subscriber, so a PEER's archive marks the
+        // ids here too. A refused write carries `rejectionReason` and never
+        // reaches this arm — the rows stayed, so no mark is due.
+        if value.get("type").and_then(Value::as_str) == Some(ext::actions::ARCHIVED_CHANGED) {
+            let archived = value
+                .get("archived")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let ids = value
+                .get("sessions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str);
+            for id in ids {
+                if archived {
+                    self.archived_ids.insert(id.to_string());
+                } else {
+                    self.archived_ids.remove(id);
+                }
+            }
         }
         // The aggregate arm owns `metricsChanged` completely — both outcomes
         // return here. Everything else on the metrics channel falls through
@@ -1118,6 +1156,10 @@ pub struct AhpStore {
     request_hook: Option<RequestHook>,
     /// Recent dispatch rejections (bounded ring) for UI surfacing.
     rejections: std::collections::VecDeque<String>,
+    /// Session ids the fold judged DELETED (a `sessionRemoved` with no
+    /// archive mark — [`Self::fold_session_removed`]). Bounded ring; the
+    /// title bridge's pump drains it and drops one interpreter per id.
+    deleted_sessions: std::collections::VecDeque<String>,
     /// Session ids whose thread channel this store already subscribed —
     /// the pin path's guard (the pin badge and the pin dispatch both read
     /// `x-manox-thread` state): every pin click on an un-attached row
@@ -1180,6 +1222,7 @@ impl AhpStore {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            deleted_sessions: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
             metrics_subs: std::collections::HashSet::new(),
             delivery_failure: None,
@@ -1323,6 +1366,7 @@ impl AhpStore {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            deleted_sessions: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
             metrics_subs: std::collections::HashSet::new(),
             delivery_failure: None,
@@ -2049,10 +2093,26 @@ impl AhpStore {
     /// folded state. The URI is the SESSION's; `params.channel` is the
     /// root the notification rode, and keying the removal off it removes
     /// nothing.
+    ///
+    /// The notification carries no disposition, so a DELETION is judged by
+    /// exclusion: the `x-manox/archivedChanged` envelope that archived the
+    /// id marks it in [`ChannelBook::archived_ids`], and a removal of a
+    /// marked id is an archive exit — the row survives on the host (same
+    /// id, revivable) and its per-session state must too. A removal with no
+    /// mark is a true deletion (a peer's bare `disposeSession`, or a
+    /// never-materialized row the host dropped) and lands in
+    /// `deleted_sessions` for the title bridge's prune.
     fn fold_session_removed(&mut self, session: &ahp_types::common::Uri) -> bool {
+        let id = id_of(session).to_string();
         let removed = self.book.remove_summary(session);
         if removed {
             self.book.sessions.remove(id_of(session));
+            if !self.book.archived_ids.contains(&id) {
+                self.deleted_sessions.push_back(id);
+                while self.deleted_sessions.len() > DELETED_SESSIONS_CAP {
+                    self.deleted_sessions.pop_front();
+                }
+            }
         }
         removed
     }
@@ -2978,6 +3038,14 @@ impl AhpStore {
     /// Recent dispatch rejections, oldest first.
     pub fn rejections(&self) -> impl Iterator<Item = &str> {
         self.rejections.iter().map(String::as_str)
+    }
+
+    /// Drain the session ids the fold judged DELETED (the
+    /// [`Self::fold_session_removed`] judgements). The title bridge's pump
+    /// prunes one interpreter per id; archive exits never enter this queue,
+    /// so an archived (revivable) session keeps its per-session state.
+    pub fn take_deleted_sessions(&mut self) -> Vec<String> {
+        self.deleted_sessions.drain(..).collect()
     }
 
     /// How many subscriptions this store has queued because it has no client
@@ -5033,6 +5101,7 @@ mod tests {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            deleted_sessions: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
             metrics_subs: std::collections::HashSet::new(),
             delivery_failure: None,
@@ -6236,6 +6305,7 @@ mod tests {
             pending_writes: Vec::new(),
             request_hook: None,
             rejections: std::collections::VecDeque::new(),
+            deleted_sessions: std::collections::VecDeque::new(),
             thread_subs: std::collections::HashSet::new(),
             metrics_subs: std::collections::HashSet::new(),
             delivery_failure: None,
@@ -6301,6 +6371,101 @@ mod tests {
         assert!(
             !store.fold_session_removed(&removed_uri),
             "a second removal is a no-op, not a panic"
+        );
+    }
+
+    /// The removal notification carries no disposition, so a DELETION is
+    /// judged by exclusion: an accepted `x-manox/archivedChanged` echo (the
+    /// initiator's own or a peer's — the host broadcasts it to every root
+    /// subscriber) marks the ids, and a `sessionRemoved` for a marked id is
+    /// an ARCHIVE EXIT. The row still exists on the host (same id, revivable),
+    /// so per-session state keyed off deletions — the title bridge's prune —
+    /// must not fire for it.
+    #[test]
+    fn a_peer_archive_exit_is_not_a_deletion() {
+        let mut store = test_store();
+        store
+            .book
+            .seed_summaries(vec![catalogue_row("s-arch", 0), catalogue_row("s-live", 0)]);
+        // The accepted echo folds through the same unknown-action arm as a
+        // peer's envelope; the root channel has no ext bucket, so the fold
+        // itself stays Ignored — the mark is the side-band.
+        let marked = store.book.apply(
+            "ahp-root://",
+            &StateAction::Unknown(serde_json::json!({
+                "type": ext::actions::ARCHIVED_CHANGED,
+                "sessions": ["s-arch"],
+                "archived": true,
+            })),
+        );
+        assert_eq!(marked, FoldEffect::Ignored);
+        assert!(
+            store.fold_session_removed(&manox_ahp::channels::session::uri("s-arch")),
+            "the archived row still leaves the catalogue"
+        );
+        assert!(!store.book.summaries.contains_key("s-arch"));
+        assert!(
+            store.take_deleted_sessions().is_empty(),
+            "an archive exit is not a deletion: the title survives"
+        );
+        // The unmarked neighbour IS a deletion (a bare dispose, or a
+        // never-materialized row the host dropped).
+        assert!(store.fold_session_removed(&manox_ahp::channels::session::uri("s-live")));
+        assert_eq!(
+            store.take_deleted_sessions(),
+            vec!["s-live".to_string()],
+            "a removal with no archive mark is a deletion"
+        );
+        assert!(store.take_deleted_sessions().is_empty(), "drained once");
+    }
+
+    /// `archivedChanged(false)` clears the mark: after an unarchive, the
+    /// same id's next catalogue exit (a genuine dispose) is a deletion
+    /// again, not a second archive exit.
+    #[test]
+    fn an_unarchive_clears_the_archive_mark() {
+        let mut store = test_store();
+        for archived in [true, false] {
+            store.book.apply(
+                "ahp-root://",
+                &StateAction::Unknown(serde_json::json!({
+                    "type": ext::actions::ARCHIVED_CHANGED,
+                    "sessions": ["s-x"],
+                    "archived": archived,
+                })),
+            );
+        }
+        store.book.seed_summaries(vec![catalogue_row("s-x", 0)]);
+        assert!(store.fold_session_removed(&manox_ahp::channels::session::uri("s-x")));
+        assert_eq!(
+            store.take_deleted_sessions(),
+            vec!["s-x".to_string()],
+            "the unarchived id's removal is a deletion"
+        );
+    }
+
+    /// A refused archive write carries `rejectionReason` and folds no mark:
+    /// the host refused the batch, the rows stayed, and their later removal
+    /// (if one ever lands) cannot hide behind the refused mark.
+    #[test]
+    fn a_refused_archive_write_marks_nothing() {
+        let mut store = test_store();
+        store.book.seed_summaries(vec![catalogue_row("s-a", 0)]);
+        let refused = store.book.apply(
+            "ahp-root://",
+            &StateAction::Unknown(serde_json::json!({
+                "type": ext::actions::ARCHIVED_CHANGED,
+                "sessions": ["s-a"],
+                "archived": true,
+                "rejectionReason": "unknown sessions",
+            })),
+        );
+        assert_eq!(refused, FoldEffect::Rejected("unknown sessions".into()));
+        assert!(store.fold_session_removed(&manox_ahp::channels::session::uri("s-a")));
+        assert_eq!(
+            store.take_deleted_sessions(),
+            vec!["s-a".to_string()],
+            "a refused write left no mark: the removal reads as a deletion"
         );
     }
 
