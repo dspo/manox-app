@@ -1,0 +1,239 @@
+//! The pi runtime against the ACP stub agent: spawn, bind, replay/live
+//! ordering, a streamed turn folded into the book, and the graceful close.
+//!
+//! The stub is the same fixture `steer-acp`'s lifecycle suite drives; using it
+//! here keeps this test model-free and the two seams in agreement about the
+//! wire.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use async_channel::Receiver;
+use serde_json::json;
+use steer_agent_chat_ui::pi::{OpenMode, PiBook, PiRuntime, PiSessionState, StoreEvent};
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION: &str = "11111111-1111-4111-8111-111111111111";
+
+fn stub() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../steer-acp/tests/fixtures/stub-agent.sh")
+}
+
+fn state_root() -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "steer-pi-runtime-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&root).expect("the temporary state root is created");
+    root
+}
+
+async fn next_event(events: &Receiver<StoreEvent>) -> StoreEvent {
+    tokio::time::timeout(TIMEOUT, events.recv())
+        .await
+        .expect("an event arrives")
+        .expect("the channel stays open")
+}
+
+fn open_book(root: &Path, session: &str) -> PiBook {
+    let mut book = PiBook::new();
+    book.open(session, root);
+    book
+}
+
+#[tokio::test]
+async fn a_new_session_streams_a_turn_through_the_book() {
+    let root = state_root();
+    let (events, receiver) = async_channel::unbounded();
+    let runtime = PiRuntime::new(stub(), &root, &root);
+    let connection = tokio::time::timeout(
+        TIMEOUT,
+        runtime.open(Some(SESSION), &root, OpenMode::New, &events),
+    )
+    .await
+    .expect("the bind answers")
+    .expect("the session opens");
+    assert_eq!(connection.session_id(), SESSION);
+
+    let mut book = open_book(&root, SESSION);
+    let ready = next_event(&receiver).await;
+    assert!(matches!(ready, StoreEvent::Ready { .. }));
+    book.apply(&ready);
+    assert!(
+        !book.view(SESSION).unwrap().config_options.is_empty(),
+        "session/new announces its selectors"
+    );
+
+    // The command table lands as a live update after the bind.
+    let commands = next_event(&receiver).await;
+    book.apply(&commands);
+
+    book.prompt_started(SESSION, "hello");
+    let prompt = tokio::spawn({
+        let connection = connection.clone();
+        async move { connection.prompt("hello").await }
+    });
+    // Fold the turn's frames until the assistant's entry settles.
+    let mut settled = false;
+    while !settled {
+        let event = next_event(&receiver).await;
+        if let StoreEvent::Update { update, .. } = &event {
+            settled = update["sessionUpdate"] == "agent_message_chunk"
+                && update["_meta"]["pi"]["settled"] == true;
+        }
+        book.apply(&event);
+    }
+    let stop = tokio::time::timeout(TIMEOUT, prompt)
+        .await
+        .expect("the turn settles")
+        .expect("the task does not panic")
+        .expect("the prompt succeeds");
+    assert_eq!(stop, "end_turn");
+    book.turn_finished(SESSION);
+
+    let rows = book.rows(SESSION);
+    let kinds: Vec<_> = rows
+        .iter()
+        .map(|row| match row {
+            steer_agent_chat_ui::pi::Entry::User(_) => "user",
+            steer_agent_chat_ui::pi::Entry::Assistant(_) => "assistant",
+            steer_agent_chat_ui::pi::Entry::Tool(_) => "tool",
+            steer_agent_chat_ui::pi::Entry::Note(_) => "note",
+        })
+        .collect();
+    assert_eq!(kinds, ["user", "assistant"], "rows: {rows:?}");
+    assert_eq!(book.view(SESSION).unwrap().state, PiSessionState::Ready);
+
+    tokio::time::timeout(TIMEOUT, connection.close())
+        .await
+        .expect("close settles");
+    let exit = next_event(&receiver).await;
+    match exit {
+        StoreEvent::Exited { reason, .. } => {
+            assert!(reason.contains("exit 0"), "unexpected exit: {reason}");
+        }
+        other => panic!("expected the exit event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_restored_session_replays_before_any_live_frame() {
+    let root = state_root();
+    let (events, receiver) = async_channel::unbounded();
+    let runtime = PiRuntime::new(stub(), &root, &root);
+    let connection = tokio::time::timeout(
+        TIMEOUT,
+        runtime.open(Some("cross"), &root, OpenMode::History, &events),
+    )
+    .await
+    .expect("the bind answers")
+    .expect("the session restores");
+
+    let mut book = open_book(&root, "cross");
+    let ready = next_event(&receiver).await;
+    assert!(matches!(ready, StoreEvent::Ready { .. }), "got {ready:?}");
+    book.apply(&ready);
+    // The replay is a single event, already in the harness's order.
+    let replay = next_event(&receiver).await;
+    assert!(
+        matches!(replay, StoreEvent::Replay { .. }),
+        "got {replay:?}"
+    );
+    book.apply(&replay);
+    assert_eq!(book.rows("cross").len(), 2);
+    assert!(!book.view("cross").unwrap().loading);
+    assert_eq!(book.view("cross").unwrap().state, PiSessionState::Ready);
+
+    tokio::time::timeout(TIMEOUT, connection.close())
+        .await
+        .expect("close settles");
+}
+
+#[tokio::test]
+async fn a_missing_session_is_rebuilt_under_the_same_id() {
+    let root = state_root();
+    let (events, receiver) = async_channel::unbounded();
+    let runtime = PiRuntime::new(stub(), &root, &root);
+    let connection = tokio::time::timeout(
+        TIMEOUT,
+        runtime.open(Some("missing"), &root, OpenMode::History, &events),
+    )
+    .await
+    .expect("the bind answers")
+    .expect("an empty conversation replaces the lost one");
+    assert_eq!(connection.session_id(), "missing");
+
+    let mut book = open_book(&root, "missing");
+    let ready = next_event(&receiver).await;
+    book.apply(&ready);
+    assert_eq!(book.view("missing").unwrap().state, PiSessionState::Ready);
+    assert!(book.rows("missing").is_empty());
+
+    tokio::time::timeout(TIMEOUT, connection.close())
+        .await
+        .expect("close settles");
+}
+
+#[tokio::test]
+async fn a_permission_request_reaches_the_host_and_the_answer_returns() {
+    let root = state_root();
+    let (events, receiver) = async_channel::unbounded();
+    let runtime = PiRuntime::new(stub(), &root, &root);
+    let connection = tokio::time::timeout(
+        TIMEOUT,
+        runtime.open(Some(SESSION), &root, OpenMode::New, &events),
+    )
+    .await
+    .expect("the bind answers")
+    .expect("the session opens");
+    let mut book = open_book(&root, SESSION);
+    book.apply(&next_event(&receiver).await);
+
+    book.prompt_started(SESSION, "permission");
+    let prompt = tokio::spawn({
+        let connection = connection.clone();
+        async move { connection.prompt("permission").await }
+    });
+    // Drain the bind's command table and the turn's first frame until the
+    // request lands.
+    let event = loop {
+        let event = next_event(&receiver).await;
+        if let StoreEvent::Request { request, .. } = &event {
+            assert_eq!(request.method, "session/request_permission");
+            break event;
+        }
+        book.apply(&event);
+    };
+    let StoreEvent::Request { request, .. } = &event else {
+        unreachable!("the loop breaks only on a request");
+    };
+    let request = request.clone();
+    book.apply(&event);
+    assert_eq!(
+        book.view(SESSION).unwrap().state,
+        PiSessionState::WaitingUser
+    );
+    let pending = book
+        .take_request(SESSION, &request.id)
+        .expect("the request is pending");
+    connection
+        .respond(&pending.id, json!({"optionId": "allow"}))
+        .expect("the answer is written");
+
+    let stop = tokio::time::timeout(TIMEOUT, prompt)
+        .await
+        .expect("the turn settles")
+        .expect("the task does not panic")
+        .expect("the prompt succeeds");
+    assert_eq!(stop, "end_turn");
+    book.turn_finished(SESSION);
+    assert_eq!(book.view(SESSION).unwrap().state, PiSessionState::Ready);
+
+    tokio::time::timeout(TIMEOUT, connection.close())
+        .await
+        .expect("close settles");
+}
