@@ -127,7 +127,9 @@ fn wait_until(
 
 #[gpui::test]
 async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
-    let (ws, window, shell) = common::full_wiring_boot_shell(cx);
+    // The shell is not driven directly here: the teardown's chrome half runs
+    // through the deferred reclaimer, so the binding is the witness only.
+    let (ws, window, _shell) = common::full_wiring_boot_shell(cx);
 
     // ── closing an external row kills the child explicitly ──────────────
     let (_dir, cat) = spawn_cat();
