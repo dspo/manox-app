@@ -185,21 +185,22 @@ impl ContainerRow {
     }
 }
 
-/// Project one wire row through [`derive_status`]. The row's own wire flag
-/// is the single unread source (the official IsRead bit folded from the
-/// protocol). The time stamp and the host rank ride separately — the stamp
-/// is a real unix time the chrome's recency buckets decode, the rank its
-/// order key; a container tree's children are re-stamped to their captain's
-/// by [`project_forest`].
 /// The canvas's contribution to a sidebar row: how many sheets the container's
 /// canvas holds, and the container title projection (the earliest surviving
-/// sheet that names the container). `None` = the container has no canvas yet.
+/// sheet that names the container). The lookup answers `None` when the
+/// container has no canvas yet, and the row keeps its own catalogue title.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CanvasRowFacts {
     pub sheet_count: usize,
     pub title: Option<String>,
 }
 
+/// Project one wire row through [`derive_status`]. The row's own wire flag
+/// is the single unread source (the official IsRead bit folded from the
+/// protocol). The time stamp and the host rank ride separately — the stamp
+/// is a real unix time the chrome's recency buckets decode, the rank its
+/// order key; a container tree's children are re-stamped to their captain's
+/// by [`project_forest`].
 pub fn project_row(item: &ContainerRow) -> SessionRowData {
     SessionRowData {
         id: item.id.clone(),

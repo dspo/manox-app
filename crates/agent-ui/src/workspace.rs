@@ -3380,6 +3380,11 @@ impl Workspace {
     /// The canvas's contribution to a sidebar row: its sheet count and the
     /// container title projection (the earliest surviving sheet that names the
     /// container). `None` when the container has no canvas.
+    ///
+    /// A parked canvas answers too: its layout is still the fact (the row does
+    /// not stop being a container because another one is shown), so the title
+    /// and the count do not flicker on every switch. A canvas evicted from
+    /// the LRU is gone and reads `None`.
     pub(crate) fn canvas_row_facts(
         &self,
         container_id: &str,
@@ -3387,18 +3392,15 @@ impl Workspace {
     ) -> Option<crate::sidebar_projection::CanvasRowFacts> {
         let canvas = self.canvas_view.as_ref()?;
         let canvas = canvas.read(cx);
-        if canvas.host.active_container() != Some(container_id) {
-            // Only the shown canvas has a layout to count (parked ones keep
-            // their own, but the row belongs to the foreground view).
-            return canvas
-                .host
-                .held()
-                .contains(container_id)
-                .then_some(crate::sidebar_projection::CanvasRowFacts::default());
-        }
+        let host = &canvas.host;
+        let title = host.container_title(container_id, cx);
+        let layout = match host.active_container() {
+            Some(active) if active == container_id => host.layout(),
+            _ => &host.held().get(container_id)?.layout,
+        };
         Some(crate::sidebar_projection::CanvasRowFacts {
-            sheet_count: steer_canvas::layout::sheet_count(canvas.host.layout()),
-            title: canvas.host.container_title(container_id, cx),
+            sheet_count: steer_canvas::layout::sheet_count(layout),
+            title,
         })
     }
 
