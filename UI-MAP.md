@@ -272,27 +272,45 @@ ask 卡与投影的 reconcile、ask 自定义输入框、投影快照、跨端�
 
 ---
 
-## 2.9 画布（ViewMode::Canvas，plan β）
+## 2.9 画布（容器视图本身，plan β）
 
-容器的画布：一张布局树（`steer-canvas`），叶子是 sheet。`agent_ui::workspace::canvas_view::CanvasView`
-是它的渲染面，`canvas_host::CanvasHost` 是唯一写入路径（ticket + `set_layout`）。当前入口是
-`Workspace::open_canvas()`（容器视图的默认化待剩余 kind 落地后开启）。
+容器的画布：一张布局树（`steer-canvas`），叶子是 sheet。**画布就是容器视图**——不是与
+Chat/Settings 并列的 `ViewMode`：`Workspace::render_column` 每帧 `sync_canvas`（前景容器变了就
+park 旧画布、恢复新画布），再由 `CanvasView::render_canvas` 画出前景容器的布局。
+`canvas_host::CanvasHost` 是唯一写入路径（ticket + `set_layout`），`CanvasView` 只读布局、发命令。
 
 ```
-┌ CanvasView ─────────────────────────────────┐
-│ [GroupFrame 0] tab strip：tab × / ＋        │
-│  ├ 显示中的 sheet body（会话列 / 起始页）   │
-│ [GroupFrame 1] …（双击 tab = 向右分屏）      │
-└─────────────────────────────────────────────┘
+┌ CanvasView（前景容器） ──────────────────────────────┐
+│ [GroupFrame 0] tab strip：tab × | 终端 ＋ | 起始页 ＋ │
+│  ├ 显示中的 sheet body（会话列 / 起始页 / 终端）      │
+│ [GroupFrame 1] …（双击 tab = 把起始页挪到右侧新组）   │
+└───────────────────────────────────────────────────────┘
 ```
 
 - 几何来自 `steer_canvas::projection`（`tab_bar_boxes` / `group_frames`），渲染只摆放；
 - 每个 group 一条 tab strip（`canvas-strip-*` 调试选择器）+ 每 tab 的关闭键（`canvas-tab-close-*`）；
-- 单击 = 激活（走 host 的单写者），双击 = 在右侧新建一组并打开容器的起始页，`＋` = 打开起始页；
+  strip 是 group 盒内的绝对子节点（原点 = group 原点），分屏后不会按画布坐标二次偏移；
+- tab 文本 = registry 的 `tab_title`（session 的 OSC 程序标题，回落 `title`）；`title` 经**宿主注入的
+  `SheetTitles`** 解析——session sheet 读会话折的标题（与侧栏同一字符串），home/terminal 用静态
+  i18n 文案（`canvas-tab-home` / `canvas-tab-terminal`），未命中的 session 落 `canvas-tab-new-chat`。
+  画布**不读 workspace**（渲染期正持有其租约）：标题源由装配点注入，捕获的是会话实体而非 workspace；
+- 单击 = 激活（走 host 的单写者）；双击 = 分屏：把容器的起始页放到该 tab 右侧的新组（已开则
+  **移动**而非复制——一个 sheet 只有一处）；`＋` = 打开起始页，终端 `＋` = 打开本容器的下一个终端 sheet；
 - 关掉最后一个 sheet 由 host 返回 `AutoArchive`，画布交给 `Workspace::canvas_auto_archive`（不跨实体写）；
-- 布局变更走 400ms 防抖保存泵（`SAVE_DEBOUNCE`，generation 去重）。
+- 布局变更走 400ms 防抖保存泵（`SAVE_DEBOUNCE`，generation 去重）；
+- 切容器 = park（布局进 LRU，PTY 保活）与 restore；资源回收按 `open_sheet_ids(layout ∪ held)` 并集判定；
+- scratch 画布（`SCRATCH_CONTAINER`）不 park、不持久化；launcher 铸容器时 `migrate_scratch` 把 sheet 平移过去。
 
-尚未落地：terminal sheet（PTY 记账户）、侧栏容器行、scratch 铸容器、出图场景。
+侧栏容器行的画布投影（`sidebar_projection::project_groups_with_canvas`）：标题 = 容器标题投影
+（创建序最早、且 kind 声明 `names_container` 的 sheet 的标题），第三行追加 sheet 计数
+（`chrome-row-sheet-count`），选中行贴 3px 品牌色竖条（`session_list`，透明占位防位移）。
+
+离屏出图：`CHROME_SHOT=/tmp/canvas.png CHROME_CANVAS=1 cargo test -p agent-ui --features test-support
+--test visual_canvas`（`CANVAS_SPLIT=1` 加分屏；侧栏那半面是 chrome 的 `CHROME_CANVAS=1` 场景）。
+
+> Source: `crates/agent-ui/src/workspace/canvas_view.rs`, `crates/agent-ui/src/workspace/canvas_host.rs`,
+> `crates/steer-canvas/`, `crates/agent-ui/src/sidebar_projection.rs`,
+> `crates/steer-agent-chrome-ui/src/session_list.rs`
 
 ## 3. 会话列布局
 
