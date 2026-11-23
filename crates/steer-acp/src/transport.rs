@@ -29,9 +29,13 @@ const STDERR_TAIL_LINES: usize = 64;
 /// How long a graceful close waits for the harness to flush and exit.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 
-/// The frames a `session/load` diverts from the live channel.
+/// The frames a `session/load` diverts from the live channel. The capture
+/// ends at its request's settlement: replay frames precede the response on
+/// the wire, so a same-session frame settled after it is live traffic.
 struct ReplayCapture {
+    request_id: i64,
     session_id: String,
+    sealed: bool,
     frames: Vec<SessionUpdate>,
 }
 
@@ -148,6 +152,18 @@ impl Connection {
         timeout: Option<Duration>,
     ) -> Result<Value, AcpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        self.request_with_id(id, method, params, timeout).await
+    }
+
+    /// [`Connection::request`] for an id minted elsewhere: the replay capture
+    /// must know its own request before the frame goes out.
+    pub(crate) async fn request_with_id(
+        &self,
+        id: i64,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value, AcpError> {
         let (sender, receiver) = oneshot::channel();
         {
             if self.writer.lock().is_ok_and(|writer| writer.is_none()) {
@@ -248,11 +264,19 @@ impl Connection {
             .ok_or(AcpError::Taken("host-request"))
     }
 
-    /// Captures this session's `session/update` frames until the ticket is
-    /// dropped; the call that installs it reads them back with
-    /// [`ReplayTicket::take`]. Dropping the ticket without taking (a cancelled
-    /// load) releases the capture, so live traffic resumes.
-    pub(crate) fn begin_replay(&self, session_id: &str) -> Result<ReplayTicket<'_>, AcpError> {
+    /// Captures this session's `session/update` frames until the returned
+    /// request id's response settles; the call that installs it sends the
+    /// request under that id and reads the frames back with
+    /// [`ReplayTicket::take`]. The settlement seals the capture even before
+    /// the waiter observes the answer — the reader may dispatch a
+    /// same-session frame in that gap, and replay frames precede the
+    /// response, so anything later is live traffic. Dropping the ticket
+    /// without taking (a cancelled load) releases the capture, so live
+    /// traffic resumes.
+    pub(crate) fn begin_replay(
+        &self,
+        session_id: &str,
+    ) -> Result<(i64, ReplayTicket<'_>), AcpError> {
         let mut replay = self
             .replay
             .lock()
@@ -262,11 +286,14 @@ impl Connection {
                 "a session replay is already in flight".to_owned(),
             ));
         }
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         *replay = Some(ReplayCapture {
+            request_id,
             session_id: session_id.to_owned(),
+            sealed: false,
             frames: Vec::new(),
         });
-        Ok(ReplayTicket { connection: self })
+        Ok((request_id, ReplayTicket { connection: self }))
     }
 
     fn take_replay(&self) -> Vec<SessionUpdate> {
@@ -363,6 +390,21 @@ impl Connection {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&id);
+        // The response seals its replay capture before the waiter observes
+        // the answer: dispatch is sequential, so a same-session frame read
+        // after the response would otherwise land in the capture while the
+        // load call is still on its way to take the frames.
+        {
+            let mut replay = self
+                .replay
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(capture) = replay.as_mut()
+                && capture.request_id == id
+            {
+                capture.sealed = true;
+            }
+        }
         if let Some(sender) = pending {
             let _ = sender.send(outcome);
         }
@@ -534,6 +576,7 @@ fn dispatch(connection: &Arc<Connection>, message: Value) {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Some(capture) = replay.as_mut()
+                    && !capture.sealed
                     && capture.session_id == update.session_id
                 {
                     capture.frames.push(update);

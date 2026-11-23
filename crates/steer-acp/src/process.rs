@@ -208,19 +208,22 @@ impl AcpProcess {
 
     /// `session/load`: reattach with the transcript replay. The replay frames
     /// precede the response on the wire, so they are captured while the call
-    /// is in flight and returned with it — never raced against the response.
-    /// A coded refusal (the harness answered, it did not die) keeps the
-    /// process usable, like [`AcpProcess::resume_session`].
+    /// is in flight and returned with it — never raced against the response,
+    /// and the capture ends at the response: same-session frames from then on
+    /// arrive on the live update channel. A coded refusal (the harness
+    /// answered, it did not die) keeps the process usable, like
+    /// [`AcpProcess::resume_session`].
     pub async fn load_session(
         &self,
         session_id: &str,
         cwd: &Path,
     ) -> Result<(SessionProxy, Vec<SessionUpdate>), AcpError> {
         let _guard = self.connection.load_guard().await;
-        let replay = self.connection.begin_replay(session_id)?;
+        let (id, replay) = self.connection.begin_replay(session_id)?;
         let result = self
             .connection
-            .request(
+            .request_with_id(
+                id,
                 "session/load",
                 bind_params(session_id, cwd),
                 Some(BIND_TIMEOUT),
