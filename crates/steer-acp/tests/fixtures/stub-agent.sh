@@ -4,10 +4,12 @@
 # Speaks the same newline-delimited JSON-RPC 2.0 surface as `pi-acp` but
 # decides from the prompt text, so every lifecycle branch is reachable without
 # a model: `wait` settles on session/cancel, `permission` asks the host first,
-# `ask` sends a `_zu/ask/create` card, `crash` exits mid-turn, `missing` is the
-# unknown-session id. The panel methods (`_zu/todos/*`, `_zu/subagents/*`,
-# `_zu/ask/pending|answer`) answer with fixed fixture data. stdout carries
-# protocol only; everything the script itself has to say goes to stderr.
+# `ask` sends a `_zu/ask/create` card, `crash` exits mid-turn, `flood` overruns
+# the host's stdout line budget, `burst` loads replay + response + a live frame
+# in one write, `missing` is the unknown-session id. The panel methods
+# (`_zu/todos/*`, `_zu/subagents/*`, `_zu/ask/pending|answer`) answer with
+# fixed fixture data. stdout carries protocol only; everything the script
+# itself has to say goes to stderr.
 #
 # Bash 3.2 safe (macOS): integer read timeouts, no associative arrays.
 
@@ -96,6 +98,18 @@ dispatch() {
         slow) sleep 2 ;;
         cross) update_for "stub-other" '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"other session"}}' ;;
       esac
+      if [ "$asked" = "burst" ]; then
+        # One write, so the host reads replay, response and the trailing frame
+        # as one buffered stretch: the frame that follows the response belongs
+        # to the live channel, not the replay.
+        payload=$(session_payload)
+        printf '%s\n%s\n%s\n%s\n' \
+          '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"burst","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"earlier question"},"messageId":"e0","_meta":{"pi":{"at":1,"entryId":"e0"}}}}}' \
+          '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"burst","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"earlier answer"},"messageId":"e1","_meta":{"pi":{"at":2,"entryId":"e1","stopReason":"end_turn"}}}}}' \
+          "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":$payload}" \
+          '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"burst","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"live after load"},"messageId":"m2"}}}'
+        return
+      fi
       # Replay precedes the response, in order. A replay carries the entries'
       # settle facts on the chunks themselves (no separate settle marker).
       update '{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"earlier question"},"messageId":"e0","_meta":{"pi":{"at":1,"entryId":"e0"}}}'
@@ -117,6 +131,13 @@ dispatch() {
         crash)
           printf 'stub: crashing on request\n' >&2
           exit 7
+          ;;
+        flood)
+          # Overrun the host's line budget in one shot, no newline: the host
+          # must hang up instead of waiting forever for this frame to end.
+          head -c 40000000 /dev/zero
+          printf 'stub: flooded stdout past the host line budget\n' >&2
+          sleep 30
           ;;
         wait)
           update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"},"messageId":"m1"}'

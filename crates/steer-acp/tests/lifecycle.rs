@@ -1,6 +1,7 @@
 //! The ACP lifecycle against a stub agent: handshake, host-minted sessions,
-//! streamed updates, the request bridge, replay ordering, cancellation,
-//! coded refusals, and both ways a process ends.
+//! streamed updates, the request bridge, replay ordering, a frame that lands
+//! after the load response, cancellation, coded refusals, the oversized-frame
+//! hangup, and both ways a process ends.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -265,6 +266,48 @@ async fn crash_fails_the_pending_turn_and_closes_the_channels() {
 }
 
 #[tokio::test]
+async fn an_oversized_frame_hangs_up_and_fails_the_pending_turn() {
+    let mut harness = Harness::start();
+    let session = harness.open_session(&mint_session_id()).await;
+
+    let error = tokio::time::timeout(TIMEOUT, session.prompt("flood"))
+        .await
+        .expect("the turn settles instead of hanging past the test timeout")
+        .expect_err("a framing failure fails the turn");
+    assert!(error.is_fatal(), "unexpected error: {error}");
+    assert!(
+        error.to_string().contains("framing"),
+        "the failure must carry the framing diagnosis, got: {error}"
+    );
+
+    let leftover = tokio::time::timeout(TIMEOUT, harness.updates.recv())
+        .await
+        .expect("the update channel settles");
+    assert!(
+        leftover.is_none(),
+        "the update channel closes after the framing failure"
+    );
+    let leftover = tokio::time::timeout(TIMEOUT, harness.requests.recv())
+        .await
+        .expect("the request channel settles");
+    assert!(
+        leftover.is_none(),
+        "the request channel closes after the framing failure"
+    );
+
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if !harness.process.is_alive() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the flood child is hung up");
+}
+
+#[tokio::test]
 async fn initialize_failure_hangs_up_the_child() {
     let harness = Harness::start_with(AcpEnv::inherit().with_var("PI_STUB_PROTOCOL", "2"));
     let error = tokio::time::timeout(
@@ -317,6 +360,31 @@ async fn load_captures_only_the_loaded_session() {
     // The other session's update belonged to the live channel all along.
     let live = harness.next_update().await;
     assert_eq!(live.session_id, "stub-other");
+}
+
+#[tokio::test]
+async fn a_frame_after_the_load_response_is_live_not_replay() {
+    let mut harness = Harness::start();
+    harness.handshake().await;
+
+    let (session, replay) = tokio::time::timeout(
+        TIMEOUT,
+        harness.process.load_session("burst", &std::env::temp_dir()),
+    )
+    .await
+    .expect("session/load answers")
+    .expect("session/load succeeds");
+    assert_eq!(session.id(), "burst");
+    let kinds: Vec<_> = replay.iter().filter_map(SessionUpdate::kind).collect();
+    assert_eq!(
+        kinds,
+        ["user_message_chunk", "agent_message_chunk"],
+        "the frame that follows the response is not replay: {replay:?}"
+    );
+
+    let live = harness.next_update().await;
+    assert_eq!(live.session_id, "burst");
+    assert_eq!(live.update["content"]["text"], "live after load");
 }
 
 #[tokio::test]
