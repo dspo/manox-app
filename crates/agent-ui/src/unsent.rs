@@ -56,19 +56,7 @@ impl Default for UnsentOutbox {
 
 impl UnsentOutbox {
     pub fn new() -> Self {
-        // Tests (unit and `test-support` binaries) share one temp file per
-        // process: the ledger must never write the developer's real state.
-        #[cfg(any(test, feature = "test-support"))]
-        let path = std::env::temp_dir().join(format!("steer-unsent-{}.jsonl", std::process::id()));
-        #[cfg(not(any(test, feature = "test-support")))]
-        let path = {
-            let path = steer_paths::steer_home()
-                .map(|home| ledger_path(&home))
-                .unwrap_or_else(|| PathBuf::from("unsent.jsonl"));
-            carry_over_from_manox_layer(&path);
-            path
-        };
-        Self { path }
+        Self::at(ledger_location())
     }
 
     pub fn at(path: PathBuf) -> Self {
@@ -174,6 +162,25 @@ impl UnsentOutbox {
     }
 }
 
+/// Where this process's ledger lives. Tests (unit and `test-support`
+/// binaries) share one temp file per process: the ledger must never write
+/// the developer's real state. A shipped build uses the app-layer home and
+/// carries the pre-split ledger over once.
+///
+/// The pick is a compile-time constant (`cfg!`, not `#[cfg]` on statements):
+/// both arms and every helper they call stay referenced in every build, so no
+/// feature combination leaves dead code or an unused import behind.
+fn ledger_location() -> PathBuf {
+    if cfg!(any(test, feature = "test-support")) {
+        return std::env::temp_dir().join(format!("steer-unsent-{}.jsonl", std::process::id()));
+    }
+    let path = steer_paths::steer_home()
+        .map(|home| ledger_path(&home))
+        .unwrap_or_else(|| PathBuf::from("unsent.jsonl"));
+    carry_over_from_manox_layer(&path);
+    path
+}
+
 /// The ledger file under an app-layer home.
 fn ledger_path(home: &Path) -> PathBuf {
     home.join("unsent.jsonl")
@@ -186,10 +193,6 @@ fn ledger_path(home: &Path) -> PathBuf {
 /// path authority so an isolated (`STEER_HOME`) instance never reaches into
 /// the real root. A failure logs and starts from an empty ledger — recovery
 /// drafts are never worth a startup blocker.
-///
-/// Compiled only where its caller is: tests and `test-support` builds start
-/// on a temp-file ledger and never carry anything over.
-#[cfg(not(any(test, feature = "test-support")))]
 fn carry_over_from_manox_layer(new_path: &Path) {
     let Some(old_path) =
         steer_paths::manox_root().map(|root| root.join("steer").join("unsent.jsonl"))
