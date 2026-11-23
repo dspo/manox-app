@@ -32,6 +32,8 @@ crates/                    # 全部 workspace 成员平铺于此（cargo 交付�
   ai-elements/             # agent 显示语义组件（Reasoning/…），对齐 Vercel AI Elements 的语义
   steer-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
   steer-i18n/              # app chrome 本地化（Fluent 栈 + locales/{zh-CN,en}.ftl，无 gpui 依赖）
+  steer-paths/             # 状态根权威（`~/.steer` 与 `~/.steer/.manox` 的分层、
+                           #   `MANOX_HOME` 注入与一次性迁移；无 gpui 依赖）
   steer-updater/           # 应用内自更新（GitHub Releases 检查 + dmg 校验下载 + macOS 原地
                            #   覆盖安装 + UpdateStore 状态机；仅 steer-app 消费，seam 外编译为拒绝桩）
   steer-webview/           # wry 原生 webview + Tauri 式 IPC
@@ -74,7 +76,7 @@ manox ↔ app 的交互协议是 **AHP（Agent Host Protocol）channel 化**（d
 
 容器持有画布、画布是布局树、叶子是 sheet。本 crate 是**状态层**（渲染面在 PLAN-ABSORB-04）。不可从代码推导的约束：
 
-- **sheet 的存在由 registry 决定**，布局只决定放在哪：`SheetKindSpec` 在装配点注册（kind 二次认领 panic 即 fail fast），`body` 是 `AnyView` 工厂——kind 的状态必须住自己的 store（切 tab 会卸载 body），不得驻留在视图里。
+- **sheet 的存在由 registry 决定**，布局只决定放在哪：`SheetKindSpec` 在装配点注册（kind 二次认领 panic 即 fail fast），`body` 是 `AnyView` 工厂——kind 的状态必须住自己的 store（切 tab 会卸载 body），不得驻留在视图里。两种形态：`body: Some(factory)` 由 kind 自己造视图；`body: None` 由画布按 kind 分派（`session:` 会话列与 `pi-session:` pi 会话走这条）。
 - **布局只有一个写者**：`CanvasState::set_layout(container_id, next, ticket)`。手势先 `take_ticket()` 再提交；过期票（含「该画布已切走」）静默丢弃。`sheet_count == 0` 返回 `AutoArchive(cid)`，归档动作由调用方走 workspace 的 teardown 面——状态层不做跨实体写。
 - **park 有界**：切走的容器布局进 held（LRU 至多 4 份），被显示的容器永不留在 held；scratch 画布（`SCRATCH_CONTAINER`）不 park、不持久化，布局留在内存，铸成正式容器时 `migrate_scratch` 平移。
 - **容器标题是投影**：`container_title` 取创建序中最早存活 sheet 的标题（跳 `home:`；`names_container = false` 的 kind 由调用方返回 None 跳过），无 → None，调用方落 cwd 尾段。
@@ -124,11 +126,15 @@ script/local-manox.sh off           # 还原纯 git 依赖（CI 形态）
 
 runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题在本仓修。状态根分层（PLAN-ABSORB-01）：应用层（Steer 平台）在 `~/.steer/`（`settings.toml` 存 `ui_language`、`projects.toml` 存项目注册表，`steer-paths` crate 是路径权威，`STEER_HOME` 可覆盖）；manox harness 层在 `~/.steer/.manox/`——两个 bin（steer/cx）启动早期（任何线程与 manox 路径解析之前）调 `steer_paths::install()` 注入 `MANOX_HOME` 并把旧 `~/.manox` 一次性 rename 进来，runtime 代码零改动（路径清单见 dspo/manox 仓 AGENTS.md）。
 
+单实例：`~/.steer/instance.lock` 以非阻塞 `flock` 做唯一权威（进程退出内核自动释放，不留死锁）；第二实例先经 AppKit 把运行中的实例带到前台再自退（macOS），Linux 只保证不重复启动（`crates/steer-app/src/instance.rs`）。
+
 ### 跨仓配对修复的消费义务
 
 上游 PR 的 body 或 commit message 点名 dspo/manox-app 需要伴随改动的（「Companion change required in dspo/manox-app」及同类表述），其消费义务落在把锁推进到该发布的那个本仓 PR：**同一 PR 内完成订阅/换道/接线，或在 Assumptions 里显式申报滞留原因**——静默不消费等于上游白修（桌面端撞不到修复）。台账只列**未结清**义务（销账即删行；历史销账记录走 git 历史与 PR 描述，不驻留本文件，禁止「本 PR」类随时腐烂的指代）：
 
 - pi distro 版本跟进（`pi-harness/package.json` 的 `@earendil-works/pi-coding-agent` pin）：升级 = 独立小 PR，同步 `pi-harness/src/version.ts`，重跑 `typecheck / bun test / build / smoke` 与 `MANOX_RUN_LIVE=1 cargo test -p steer-acp --test live -- --ignored`。
+
+**依赖 pin 纪律**：任何 pin 变更（manox tag、gpui-kit、rust channel、Ghostty rev/zig、pi distro、lock 级 pin）= bump PR 必须先读 `docs/upstream-watch.md`，对每个 **open** 项在**新版本里实测核对**（不能只读文档），在台账「核对记录」补一行（日期、旧→新、逐条 missing/satisfied/changed/unchecked），PR 描述带 `upstream-watch: YYYY-MM-DD checked, <n> open → <n> open`。**没有核对视为 bump 未完成**。
 
 ## 构建与开发命令
 
@@ -228,7 +234,7 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
   （chrome crate 的 Shell + 投影侧栏 + 右栏 ToolTab 注册表 + 会话列作为主区卡内容）。
   双壳构建开关（`--features chrome-shell`）与 `agent-ui::Workspace` 的旧全壳渲染已删净；
   上一个双壳形态留在 tag `dual-shell-final`（计划文档已随退役删除，历史见 git log）。
-- **每 PR 门禁 = `.github/workflows/ci.yml` 的 `checks_pass`**（分支保护只 require 这一条；`no-coauthor.yml` 是第二条、事件集不同不能并入）：`guards`（`cargo fmt --check` + chat crate 依赖不变量 + chrome 边界不变量）→ `pi_harness`（bun：typecheck → bun test → build → 离线 ACP smoke）→ 两条并行 verify（linux amd64 `ubuntu-24.04` / macOS arm64 `macos-26`，各自 `clippy -D warnings --all-targets` → 一次 feature-inclusive 全量 `cargo test --features agent-ui/test-support`；`--all-targets` 已把 bin 编过，所以没有单独的 build 步，shipping 二进制由打包腿的 release 构建产出）。本地等价：`cargo fmt --all -- --check`、`./script/check-chat-crate-deps.sh`、`./script/check-chrome-boundary.sh`、`cd pi-harness && bun run typecheck && bun test && bun run build && bun run smoke`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets --features agent-ui/test-support`。打包腿（`.deb` / `.dmg`）与 verify **并行**，但只随 main 推送与 `workflow_dispatch` 启用：PR 触发的 CI 恒为 verify-only，不跑 package（要打包某个 PR 分支就在该 ref 上 `workflow_dispatch`）——冷 release 构建不该躺在任何 PR 的必经路上；`.rpm` 只在 `release.yml` 出（Fedora 容器 + glibc baseline）。PR 写清 Test Plan 与 Assumptions。
+- **每 PR 门禁 = `.github/workflows/ci.yml` 的 `checks_pass`**（分支保护只 require 这一条；`no-coauthor.yml` 是第二条、事件集不同不能并入）：`guards`（`cargo fmt --check` + chat crate 依赖不变量 + chrome 边界不变量）→ `pi_harness`（bun：typecheck → bun test → build → 离线 ACP smoke）→ 两条并行 verify（linux amd64 `ubuntu-24.04` / macOS arm64 `macos-26`，各自 `clippy -D warnings --all-targets` → 一次 feature-inclusive 全量 `cargo test --features agent-ui/test-support`；`--all-targets` 已把 bin 编过，所以没有单独的 build 步，shipping 二进制由打包腿的 release 构建产出）。本地等价：`cargo fmt --all -- --check`、`./script/check-chat-crate-deps.sh`、`./script/check-chrome-boundary.sh`、`cd pi-harness && bun run typecheck && bun test && bun run build && bun run smoke`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets --features agent-ui/test-support`；PR 描述贴出本地门禁结果。打包腿（`.deb` / `.dmg`）与 verify **并行**，但只随 main 推送与 `workflow_dispatch` 启用：PR 触发的 CI 恒为 verify-only，不跑 package（要打包某个 PR 分支就在该 ref 上 `workflow_dispatch`）——冷 release 构建不该躺在任何 PR 的必经路上；`.rpm` 只在 `release.yml` 出（Fedora 容器 + glibc baseline）。PR 写清 Test Plan 与 Assumptions。
 - **合并前必须把 manox 依赖 bump 到最新兼容发布**：决定合并（含批准后的最后一步）前，在 `script/local-manox.sh off` 形态下确认 Cargo.toml 的 runtime tag 指向当前 release 线（release/0.5 的 v0.5.x，或 main 的下一轨）最新兼容 tag——8 个依赖共用同一 tag，改一处声明 + `cargo update -p manox-agent` 整体移动——重跑全部门禁，并把变更随合并一并提交。若最新上游与本仓不兼容，先在 dspo/manox 修出兼容发布再 bump，或在 PR 中显式声明滞留原因（旧 tag 停留是债务，不是默认状态）。
 - **chrome/host 边界**（#279 的结论，`script/check-chrome-boundary.sh` 守）：`Shell` 是宿主状态的投影。
   gpui 的「一次一个实体租约」让**跨实体同步调用在回调里必崩**（panic 跨不过 macOS 事件的 `extern "C"`
@@ -243,12 +249,26 @@ GPUI 栈整体走 **longbridge/gpui-kit 轨**（crates.io 发布），**不再�
   `crates/agent-ui/tests/chrome_boundary.rs`（真实装配 + 真实租约）。
 - 提交信息不得携带 Co-Authored-By 尾注（CI 强制拒绝）。
 
+## 工作方法
+
+源自 nsh-pi 的工作方法（PLAN-ABSORB-07 吸纳），无脚本门禁，靠评审与自觉守：
+
+- **PR 编辑在独立 worktree**：`git worktree add $PWD.worktrees/pr_topic -b feat/pr_topic <PR目标分支>`（吸纳系列期间基分支为 `origin/integrate/absorb-nsh-pi`，其后回 `origin/main`）；合并后回收 branch 与 worktree。
+- **先回应再动手**：收到指示后、第一次写操作前用一句话说清理解与打算，说完就继续，不等确认。
+- **尽早交付 PR**：提 PR 后不傻等远端检查，静态 review 与本地/CI 验证并行。
+- **review 别重复劳动**：GitHub CI 会验证的，review 时非必要不在本地再跑一遍。
+- **review 必须给结论**：三选一 `approve` / `approve with changes`（处理意见后自合并）/ `request changes`。
+- **不留 follow-up**：follow-up 当场处理——附进当前 PR，或立即开后续 PR，不等用户跟踪。
+- **subagent 任务粒度**：10–60 分钟为宜；太小顺手做掉，太大拆阶段委派。
+- **subagent 工作必须验收**：必要时要求返工；小瑕疵自己接手修掉。
+- **UI 变更给目视验收指引**：PR 涉及 UI/UX 时描述里给运行命令 + 目视验收要点（与「出 UI 图」互补）。
+
 ## 项目规则
 
 - **技术选型喜新厌旧**：能选最新 stable 就选最新 stable（依赖、工具链、API）。
 - **禁止 vendor / submodule**：所有依赖经 Cargo 声明；上游 manox 仓一律 git 依赖，禁止改回 path 依赖提交。
 - **crate 依赖只认 crate 索引或 git 地址**：外部 crate 只能是 crates.io 版本或 `git = "..."`，禁止 `path = "..."` 指向本机路径（CI 不可复现）；workspace 内部成员间 `path` 例外；本地联动只经 gitignored 的 `.cargo/config.toml` [patch]。
-- **只允许单二进制、单进程交付**（桌面应用；cx CLI 为独立 bin）。唯一特许 sidecar：`pi-harness` 的 bun 产物 `pi-acp`（随三产物分发、由 `steer-acp` 按需 spawn，生命周期随会话/容器；不引入第三个二进制，也不为它开第二条交付面）。
+- **只允许单二进制、单进程交付**（桌面应用；cx CLI 为独立 bin）。唯一特许 sidecar：`pi-harness` 的 bun 产物 `pi-acp`（随三产物分发、由 `steer-acp` 按需 spawn，生命周期随会话/容器；不引入第三个二进制，也不为它开第二条交付面）。单实例由 `~/.steer/instance.lock` 的 `flock` 保证（`crates/steer-app/src/instance.rs`），不得引入其他 IPC/socket 形态。
 - **禁止抄袭第三方 crate 代码**：可参考架构思想，禁止复制粘贴后修改。`git2` 被禁（plugin marketplace shell out 系统 `git`）。
 - **注释一律英文，面向终态**（描述不变量/意图）而非过程流水账，非必要不注释。详见 `~/.claude/rules/code-comments.md`。
 - **零构建告警**：CI 以 `-D warnings` 编译。提交前本地 `cargo clippy --all-targets -- -D warnings` 全绿。新增 `#[allow(...)]` 视为逃避而非修复，除非 lint 本身与项目设计冲突（如 GPUI 派生宏假阳性），且必须英文注释说明。`Result` 必须 `let _ =` 或 `?` 处理；test 模块在文件末尾。
