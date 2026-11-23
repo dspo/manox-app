@@ -11,7 +11,7 @@ use std::path::Path;
 use steer_acp::RequestId;
 
 use super::runtime::StoreEvent;
-use super::session::{PendingRequest, PiSessionView};
+use super::session::{PendingRequest, PiPlan, PiSessionView, PiSubagentMessage, PiSubagentRun};
 
 /// Every session the host has opened, keyed by pi session id.
 #[derive(Debug, Default)]
@@ -46,6 +46,39 @@ impl PiBook {
         if let Some(view) = self.sessions.get_mut(id) {
             view.queued = queued;
         }
+    }
+
+    /// Folds a `_zu/todos/list` (or a write's) answer.
+    pub fn set_plan(&mut self, id: &str, plan: PiPlan) -> bool {
+        self.sessions
+            .get_mut(id)
+            .is_some_and(|view| view.set_plan(plan))
+    }
+
+    /// Folds a `_zu/subagents/list` answer.
+    pub fn set_subagents(&mut self, id: &str, runs: Vec<PiSubagentRun>) -> bool {
+        self.sessions
+            .get_mut(id)
+            .is_some_and(|view| view.set_subagents(runs))
+    }
+
+    /// Expands (and asks the store to fetch) or collapses a run's transcript.
+    pub fn toggle_subagent(&mut self, id: &str, run_id: &str) -> Option<String> {
+        self.sessions
+            .get_mut(id)
+            .and_then(|view| view.toggle_subagent(run_id))
+    }
+
+    /// Folds a `_zu/subagents/transcript` answer.
+    pub fn set_subagent_transcript(
+        &mut self,
+        id: &str,
+        run_id: &str,
+        messages: Vec<PiSubagentMessage>,
+    ) -> bool {
+        self.sessions
+            .get_mut(id)
+            .is_some_and(|view| view.set_subagent_transcript(run_id, messages))
     }
 
     /// Records an error without changing the lifecycle face (a config call

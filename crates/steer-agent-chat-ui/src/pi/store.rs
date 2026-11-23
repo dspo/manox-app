@@ -11,11 +11,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use gpui::{Context, SharedString};
-use serde_json::Value;
+use serde_json::{Value, json};
 use steer_acp::RequestId;
 
 use super::book::PiBook;
 use super::runtime::{OpenMode, PiConnection, PiRuntime, StoreEvent};
+use super::session::{parse_plan, parse_subagent_runs, parse_subagent_transcript};
 
 /// One window's pi sessions.
 pub struct AcpStore {
@@ -139,6 +140,7 @@ impl AcpStore {
                     Ok(connection) => {
                         store.error = None;
                         store.connections.insert(session_id.clone(), connection);
+                        store.refresh_panels(&session_id, cx);
                     }
                     Err(reason) => {
                         store.book.apply(&StoreEvent::Exited {
@@ -344,6 +346,154 @@ impl AcpStore {
         .detach();
     }
 
+    /// Refreshes the two request/response panels (the plan and the subagent
+    /// runs). Neither pushes: the harness's tools write the same store the
+    /// panel reads, so a pull after every bind and settled turn keeps them
+    /// current (the write paths answer with the fresh plan themselves).
+    pub fn refresh_panels(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let Some(connection) = self.connections.get(session_id).cloned() else {
+            return;
+        };
+        let session_id = session_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let call = {
+                let connection = connection.clone();
+                move || async move {
+                    let plan = connection
+                        .request("_zu/todos/list", json!({}))
+                        .await
+                        .map_err(|error| error.describe());
+                    let runs = connection
+                        .request("_zu/subagents/list", json!({}))
+                        .await
+                        .map_err(|error| error.describe());
+                    Ok::<_, String>((plan, runs))
+                }
+            };
+            let Ok((plan, runs)) = tokio_wait(call).await else {
+                return;
+            };
+            this.update(cx, |store, cx| {
+                let mut changed = false;
+                if let Ok(plan) = plan {
+                    changed |= store.book.set_plan(&session_id, parse_plan(&plan));
+                }
+                // A session without the subagent surface answers
+                // method-not-found; that is an empty panel, not an error.
+                if let Ok(runs) = runs {
+                    changed |= store
+                        .book
+                        .set_subagents(&session_id, parse_subagent_runs(&runs));
+                }
+                if changed {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Writes one plan edit (`_zu/todos/write`); the harness answers with the
+    /// new plan, which lands here (the panel never mutates its own copy).
+    pub fn set_todo_status(
+        &mut self,
+        session_id: &str,
+        todo_id: String,
+        status: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self.connections.get(session_id).cloned() else {
+            self.book
+                .note_error(session_id, "the pi harness is not connected");
+            cx.notify();
+            return;
+        };
+        let session_id = session_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let call = {
+                let connection = connection.clone();
+                let todo_id = todo_id.clone();
+                move || async move {
+                    connection
+                        .request(
+                            "_zu/todos/write",
+                            json!({
+                                "op": { "kind": "update", "id": todo_id, "status": status }
+                            }),
+                        )
+                        .await
+                        .map_err(|error| error.describe())
+                }
+            };
+            let result = tokio_wait(call).await;
+            this.update(cx, |store, cx| {
+                match result {
+                    Ok(value) => {
+                        // The write answer is `{plan}` without `enabled`; a
+                        // successful write means the surface is on.
+                        let mut plan = parse_plan(&value);
+                        plan.enabled = true;
+                        store.book.set_plan(&session_id, plan);
+                    }
+                    Err(reason) => store.book.note_error(&session_id, &reason),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Expands a subagent run's transcript (fetching it on first open) or
+    /// collapses it.
+    pub fn toggle_subagent(&mut self, session_id: &str, run_id: String, cx: &mut Context<Self>) {
+        let Some(expand) = self.book.toggle_subagent(session_id, &run_id) else {
+            cx.notify();
+            return;
+        };
+        let cached = self
+            .book
+            .view(session_id)
+            .is_some_and(|view| view.subagent_transcripts.contains_key(expand.as_str()));
+        cx.notify();
+        if cached {
+            return;
+        }
+        let Some(connection) = self.connections.get(session_id).cloned() else {
+            return;
+        };
+        let session_id = session_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let call = {
+                let connection = connection.clone();
+                let run_id = run_id.clone();
+                move || async move {
+                    connection
+                        .request("_zu/subagents/transcript", json!({ "runId": run_id }))
+                        .await
+                        .map_err(|error| error.describe())
+                }
+            };
+            let result = tokio_wait(call).await;
+            this.update(cx, |store, cx| {
+                match result {
+                    Ok(value) => {
+                        store.book.set_subagent_transcript(
+                            &session_id,
+                            &run_id,
+                            parse_subagent_transcript(&value),
+                        );
+                    }
+                    Err(reason) => store.book.note_error(&session_id, &reason),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Closes one session: `session/close`, then the process (one process per
     /// session). The view is dropped with it.
     pub fn close_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
@@ -385,6 +535,8 @@ impl AcpStore {
         if let Some(next) = next {
             self.prompt(session_id, next, cx);
         }
+        // The turn may have moved the plan or settled subagent runs.
+        self.refresh_panels(session_id, cx);
         cx.notify();
     }
 }

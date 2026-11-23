@@ -26,8 +26,8 @@ use steer_acp::RequestId;
 use crate::i18n::{t, t_str};
 use crate::pi::store::fallback_title;
 use crate::pi::{
-    AcpStore, Entry, PendingRequest, PiCommand, PiSessionState, ToolEntry, ToolStatus,
-    transcript::DiffBlock,
+    AcpStore, Entry, PendingRequest, PiBannerEntry, PiCommand, PiSessionState, PiTodo,
+    PiTodoStatus, ToolEntry, ToolStatus, transcript::DiffBlock,
 };
 
 /// How many slash rows the composer lists before it stops (the list sits
@@ -348,7 +348,7 @@ impl PiSessionView {
 impl Render for PiSessionView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let (title, error, rows, state, loading, streaming, queued, usage, version) = {
+        let (title, error, rows, state, loading, streaming, queued, usage) = {
             let store = self.store.read(cx);
             let view = store.book().view(&self.session_id);
             let title = fallback_title(store, &self.session_id);
@@ -357,7 +357,7 @@ impl Render for PiSessionView {
                     .map(SharedString::from)
             });
             let rows = store.book().rows(&self.session_id);
-            let (state, loading, streaming, queued, usage, version) = view
+            let (state, loading, streaming, queued, usage) = view
                 .map(|view| {
                     (
                         view.state,
@@ -365,13 +365,10 @@ impl Render for PiSessionView {
                         view.streaming,
                         view.queued,
                         view.usage,
-                        view.banner.as_ref().map(|banner| banner.version.clone()),
                     )
                 })
-                .unwrap_or((PiSessionState::Starting, true, false, 0, None, None));
-            (
-                title, error, rows, state, loading, streaming, queued, usage, version,
-            )
+                .unwrap_or((PiSessionState::Starting, true, false, 0, None));
+            (title, error, rows, state, loading, streaming, queued, usage)
         };
 
         let rows = rows
@@ -380,6 +377,9 @@ impl Render for PiSessionView {
             .collect::<Vec<_>>();
         let selectors = self.selector_chips(&theme, cx);
         let slash = self.slash_candidates(&theme, cx);
+        let banner = self.banner_card(&theme, cx);
+        let plan = self.plan_panel(&theme, cx);
+        let subagents = self.subagent_panel(&theme, cx);
         let cards = self.pending_cards(cx, &theme);
         let percent = usage.and_then(|usage| usage.percent());
         let store = self.store.clone();
@@ -414,11 +414,11 @@ impl Render for PiSessionView {
                                     &theme,
                                 )
                             })),
-                    )
-                    .children(version.map(|version| {
-                        muted_text(t_str("pi-banner-version", &[("version", &version)]), &theme)
-                    })),
+                    ),
             )
+            .children(banner)
+            .children(plan)
+            .children(subagents)
             .child(
                 div()
                     .id("pi-transcript")
@@ -510,6 +510,242 @@ impl Render for PiSessionView {
 }
 
 impl PiSessionView {
+    /// The session banner (`_zu/session_banner`): what the harness loaded and
+    /// what it warned about. Runtime values (versions, model names, paths)
+    /// render verbatim; only the row labels are app chrome.
+    fn banner_card(&self, theme: &gpui_component::Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        let banner = self
+            .store
+            .read(cx)
+            .book()
+            .view(&self.session_id)?
+            .banner
+            .clone()?;
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .bg(theme.muted)
+            .text_xs();
+        let mut head = format!("pi {}", banner.version);
+        if let Some(model) = &banner.model {
+            let name = model
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{}/{}", model.provider, model.id));
+            head.push_str(&format!(" · {name}"));
+        }
+        if let Some(level) = &banner.thinking_level {
+            head.push_str(&format!(" · {level}"));
+        }
+        column = column.child(
+            div()
+                .text_color(theme.foreground)
+                .child(SharedString::from(head)),
+        );
+        if !banner.skills.is_empty() {
+            let names = entry_names(&banner.skills);
+            column = column.child(muted_text(
+                format!("{}: {names}", t("pi-banner-skills")),
+                theme,
+            ));
+        }
+        if !banner.extensions.is_empty() {
+            let names = entry_names(&banner.extensions);
+            column = column.child(muted_text(
+                format!("{}: {names}", t("pi-banner-extensions")),
+                theme,
+            ));
+        }
+        for warning in &banner.warnings {
+            column = column.child(div().text_color(theme.warning).child(SharedString::from(
+                format!("{} · {}", warning.source, warning.message),
+            )));
+        }
+        Some(column.into_any_element())
+    }
+
+    /// The session plan (`_zu/todos/*`): the loose drafts then each group.
+    /// Clicking an item flips it between pending and done; the harness answers
+    /// with the new plan (the panel never mutates its own copy).
+    fn plan_panel(
+        &mut self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let plan = self
+            .store
+            .read(cx)
+            .book()
+            .view(&self.session_id)?
+            .plan
+            .clone()?;
+        if !plan.enabled || plan.is_empty() {
+            return None;
+        }
+        let (done, total) = plan.progress();
+        let store = self.store.clone();
+        let session_id = self.session_id.clone();
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border);
+        column = column.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(t("pi-plan-title"))
+                .child(SharedString::from(format!("{done}/{total}"))),
+        );
+        let mut rows = Vec::new();
+        for todo in &plan.todos {
+            rows.push(todo_row(todo, theme, &store, &session_id));
+        }
+        for group in &plan.groups {
+            rows.push(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(SharedString::from(group.title.clone()))
+                    .into_any_element(),
+            );
+            for todo in &group.todos {
+                rows.push(todo_row(todo, theme, &store, &session_id));
+            }
+        }
+        Some(column.children(rows).into_any_element())
+    }
+
+    /// The captain's subagent runs (`_zu/subagents/*`). Clicking a run expands
+    /// its transcript inline (fetched on first open); a settled run's output
+    /// is its verdict line.
+    fn subagent_panel(
+        &mut self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (runs, expanded, transcript) = {
+            let store = self.store.read(cx);
+            let view = store.book().view(&self.session_id)?;
+            (
+                view.subagents.clone(),
+                view.expanded_subagent.clone(),
+                view.expanded_subagent
+                    .as_ref()
+                    .and_then(|run| view.subagent_transcripts.get(run))
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        };
+        if runs.is_empty() {
+            return None;
+        }
+        let store = self.store.clone();
+        let session_id = self.session_id.clone();
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border);
+        column = column.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(t("pi-subagents-title"))
+                .child(SharedString::from(runs.len().to_string())),
+        );
+        for run in &runs {
+            let open = expanded.as_deref() == Some(run.run_id.as_str());
+            let marker = if run.status.is_live() { "●" } else { "○" };
+            let marker_color = if run.status.is_live() {
+                theme.accent
+            } else {
+                theme.muted_foreground
+            };
+            let row = div()
+                .id(gpui::ElementId::Name(
+                    format!("pi-subagent-{}", run.run_id).into(),
+                ))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded(theme.radius)
+                .cursor_pointer()
+                .hover(|this| this.bg(theme.muted))
+                .on_click({
+                    let store = store.clone();
+                    let session_id = session_id.clone();
+                    let run_id = run.run_id.clone();
+                    move |_, _, cx| {
+                        store.update(cx, |store, cx| {
+                            store.toggle_subagent(&session_id, run_id.clone(), cx);
+                        });
+                    }
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .child(div().text_color(marker_color).child(marker))
+                        .child(
+                            div()
+                                .text_color(theme.foreground)
+                                .child(SharedString::from(run.agent.clone())),
+                        )
+                        .child(muted_text(run.status.wire(), theme))
+                        .children(
+                            run.verdict
+                                .clone()
+                                .map(|verdict| muted_text(verdict, theme)),
+                        ),
+                )
+                .child(muted_text(truncate(&run.task, 160), theme));
+            column = column.child(row);
+            if open {
+                column = column.child(div().flex().flex_col().gap_1().pl_4().children(
+                    if transcript.is_empty() {
+                        vec![muted_text(t("pi-subagent-transcript-empty"), theme)]
+                    } else {
+                        transcript
+                            .iter()
+                            .map(|message| {
+                                div()
+                                    .text_xs()
+                                    .child(muted_text(message.role.clone(), theme))
+                                    .child(
+                                        div()
+                                            .text_color(theme.foreground)
+                                            .child(SharedString::from(message.text.clone())),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect()
+                    },
+                ));
+            }
+        }
+        Some(column.into_any_element())
+    }
+
     /// Every pending interactive card: approvals, elicitations, asks. The
     /// pending lists are cloned out of the store first — building a card needs
     /// `&mut Context` (its state entity), which conflicts with a live read.
@@ -1057,6 +1293,94 @@ fn slash_matches<'a>(commands: &'a [PiCommand], query: &str) -> Vec<&'a PiComman
         .filter(|command| command.name.to_lowercase().starts_with(query))
         .take(SLASH_ROWS)
         .collect()
+}
+
+/// One plan item row: the status mark, the title, and the agent's note (or
+/// the completion facts). Clicking flips the item between pending and done.
+fn todo_row(
+    todo: &PiTodo,
+    theme: &gpui_component::Theme,
+    store: &Entity<AcpStore>,
+    session_id: &str,
+) -> AnyElement {
+    let (mark, mark_color) = match todo.status {
+        PiTodoStatus::Done => ("✓", theme.success),
+        PiTodoStatus::InProgress => ("~", theme.warning),
+        PiTodoStatus::Pending => ("○", theme.muted_foreground),
+    };
+    let title_color = if todo.status == PiTodoStatus::Done {
+        theme.muted_foreground
+    } else {
+        theme.foreground
+    };
+    let next = if todo.status == PiTodoStatus::Done {
+        PiTodoStatus::Pending.wire()
+    } else {
+        PiTodoStatus::Done.wire()
+    };
+    let detail = todo
+        .summary
+        .clone()
+        .or_else(|| {
+            todo.verification
+                .clone()
+                .map(|verified| format!("verified: {verified}"))
+        })
+        .or_else(|| todo.note.clone());
+    let store = store.clone();
+    let session_id = session_id.to_owned();
+    let id = todo.id.clone();
+    div()
+        .id(gpui::ElementId::Name(format!("pi-todo-{id}").into()))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded(theme.radius)
+        .cursor_pointer()
+        .hover(|this| this.bg(theme.muted))
+        .on_click(move |_, _, cx| {
+            let id = id.clone();
+            let session_id = session_id.clone();
+            store.update(cx, |store, cx| {
+                store.set_todo_status(&session_id, id.clone(), next, cx);
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .child(div().text_color(mark_color).child(mark))
+                .child(
+                    div()
+                        .text_color(title_color)
+                        .child(SharedString::from(todo.title.clone())),
+                ),
+        )
+        .children(detail.map(|detail| muted_text(detail, theme)))
+        .into_any_element()
+}
+
+/// The banner's resource names, capped so a long catalogue stays one line.
+fn entry_names(entries: &[PiBannerEntry]) -> String {
+    let shown = entries.iter().take(6).map(|entry| entry.name.as_str());
+    let mut names = shown.collect::<Vec<_>>().join(", ");
+    if entries.len() > 6 {
+        names.push_str(&format!(" +{}", entries.len() - 6));
+    }
+    names
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 fn muted_text(text: impl Into<SharedString>, theme: &gpui_component::Theme) -> AnyElement {
