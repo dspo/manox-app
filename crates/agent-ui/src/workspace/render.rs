@@ -281,16 +281,12 @@ impl Workspace {
 
     fn render_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
-        // The column entity derives the gate and prunes it; this frame only
-        // mounts it.
-        super::column_view::prune_history_gate(&self.chat, cx);
+        // The container view is its canvas: keep it on the foreground
+        // container (a no-op unless the foreground changed), then mount it.
+        self.sync_canvas(cx);
         let column_view = self.ensure_column_view(cx);
-        // The page is built in the column's own entity (its state has one
-        // owner). Nested entity elements measure their contents, so a
-        // percentage-sized page would collapse — the frame takes the element
-        // itself and lays it out as a flex item.
-        let page: gpui::AnyElement =
-            column_view.update(cx, |view, cx| view.render_page(window, cx));
+        let _ = column_view;
+        let canvas = self.ensure_canvas_view(cx);
         let main_body_w = self
             .chat
             .read(cx)
@@ -299,18 +295,18 @@ impl Workspace {
             .unwrap_or_else(|| window.bounds().size.width);
         let turn_navigator_overlay = self.render_turn_navigator_overlay(&theme, main_body_w, cx);
         // The card's interior width — what this view was actually laid out in
-        // (the shell's sidebar and right pane are siblings, so the window
-        // width overstates it). The measurement lands at prepaint; the first
-        // frame of a fresh window falls back to the window width and the
-        // prepaint below schedules the frame that corrects it.
+        // (the shell's sidebar and right pane are siblings, so the window width
+        // overstates it). The measurement lands at prepaint; the first frame of
+        // a fresh window falls back to the window width.
         let card_width = self.chat.read(cx).card_width.clone();
+        // The canvas produces its page inside its own update: a nested entity
+        // element would measure its contents instead of the card, collapsing
+        // every percentage-sized page to zero.
+        let page: gpui::AnyElement = canvas.update(cx, |view, cx| view.render_canvas(window, cx));
         let root = gpui::div()
             .id("embedded-column")
             .size_full()
             .flex()
-            // The column is its own entity; a cached view element is laid out
-            // at the card's size (an uncached child measures its contents, and
-            // the page's percentage sizing resolves to zero that way).
             .child(
                 gpui::div()
                     .flex_1()

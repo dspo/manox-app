@@ -143,6 +143,7 @@ dependencies = [
  "serde_json",
  "steer-agent-chat-ui",
  "steer-agent-chrome-ui",
+ "steer-canvas",
  "steer-components",
  "steer-ext-agents",
  "steer-ghostty",

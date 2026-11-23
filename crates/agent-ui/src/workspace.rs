@@ -69,6 +69,8 @@ mod chat_column;
 pub mod gallery;
 use chat_column::ChatColumn;
 use steer_agent_chat_ui::ask_card::AskCardSnapshot;
+mod canvas_host;
+mod canvas_view;
 mod chat_access;
 mod chips;
 mod column_composer;
@@ -385,6 +387,9 @@ pub struct Workspace {
     /// the session-scoped surface a canvas mounts as a sheet body. Created on
     /// the first frame — it is a view over `chat`, not a state owner.
     pub(crate) column_view: Option<Entity<crate::workspace::column_view::ChatColumnView>>,
+    /// The container canvas (plan β). Created on first open; a projection over
+    /// the canvas host's state, never a state owner.
+    pub(crate) canvas_view: Option<Entity<crate::workspace::canvas_view::CanvasView>>,
     /// User turns that have not reached the journal yet (durable across a
     /// restart; see [`crate::unsent`]).
     pub(crate) unsent: crate::unsent::UnsentOutbox,
@@ -1118,6 +1123,7 @@ impl Workspace {
             settings_nav_view: None,
             dialog: None,
             column_view: None,
+            canvas_view: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
                 thread,
@@ -3300,5 +3306,183 @@ mod tests;
 impl Workspace {
     pub(crate) fn model_label(&self, cx: &App) -> String {
         chat_access::model_label(&self.chat, cx)
+    }
+}
+
+impl Workspace {
+    /// The canvas asked for an archive: the container lost its last sheet.
+    ///
+    /// The canvas only reports the fact; the archive is the workspace's write
+    /// (confirm-or-direct, the same path the sidebar's archive gesture takes).
+    pub(crate) fn canvas_auto_archive(
+        &mut self,
+        container_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The canvas state drops the gone container's bookkeeping first, so a
+        // revived container never inherits a stale parked canvas.
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, _| {
+                canvas.host.forget_container(container_id);
+            });
+        }
+        self.confirm_archive_containers(vec![container_id.to_string()], None, window, cx);
+    }
+}
+
+impl Workspace {
+    /// The canvas entity, created on first use. It is a projection over the
+    /// canvas host's state (which it owns) — the workspace keeps no canvas
+    /// mirror.
+    pub(crate) fn ensure_canvas_view(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::workspace::canvas_view::CanvasView> {
+        if let Some(view) = &self.canvas_view {
+            return view.clone();
+        }
+        let column = self.ensure_column_view(cx);
+        let workspace = cx.weak_entity();
+        // Titles come from the conversation entity, not from this workspace:
+        // the canvas paints inside the workspace's own update, so a title
+        // read through `self` would take a second lease.
+        let titles = crate::workspace::canvas_view::sheet_titles(self.chat.clone());
+        let view = cx.new(|_| {
+            crate::workspace::canvas_view::CanvasView::new(
+                crate::workspace::canvas_host::CanvasHost::new(
+                    crate::workspace::canvas_view::registry(titles),
+                ),
+                workspace,
+            )
+        });
+        view.update(cx, |view, cx| view.set_column(column, cx));
+        self.canvas_view = Some(view.clone());
+        view
+    }
+
+    /// Keeps the canvas on the foreground container. The container view is the
+    /// canvas: this runs on every column render, and is a no-op unless the
+    /// foreground changed.
+    pub(crate) fn sync_canvas(&mut self, cx: &mut Context<Self>) {
+        let foreground = self.foreground_container_id(cx);
+        let session = self.chat_store(cx).map(|(_, sid)| sid);
+        let cwd = foreground
+            .as_deref()
+            .map(|container| self.container_attrs(container, cx).cwd)
+            .unwrap_or_else(|| self.cwd.clone());
+        let canvas = self.ensure_canvas_view(cx);
+        canvas.update(cx, |canvas, cx| {
+            canvas.sync_foreground(foreground.as_deref(), session.as_deref(), cwd, cx)
+        });
+    }
+
+    /// The canvas's contribution to a sidebar row: its sheet count and the
+    /// container title projection (the earliest surviving sheet that names the
+    /// container). `None` when the container has no canvas.
+    ///
+    /// A parked canvas answers too: its layout is still the fact (the row does
+    /// not stop being a container because another one is shown), so the title
+    /// and the count do not flicker on every switch. A canvas evicted from
+    /// the LRU is gone and reads `None`.
+    pub(crate) fn canvas_row_facts(
+        &self,
+        container_id: &str,
+        cx: &App,
+    ) -> Option<crate::sidebar_projection::CanvasRowFacts> {
+        let canvas = self.canvas_view.as_ref()?;
+        let canvas = canvas.read(cx);
+        let host = &canvas.host;
+        let title = host.container_title(container_id, cx);
+        let layout = match host.active_container() {
+            Some(active) if active == container_id => host.layout(),
+            _ => &host.held().get(container_id)?.layout,
+        };
+        Some(crate::sidebar_projection::CanvasRowFacts {
+            sheet_count: steer_canvas::layout::sheet_count(layout),
+            title,
+        })
+    }
+
+    /// The canvas's sheet ids, in layout order. Test-support read face (the
+    /// canvas entity and host stay private).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_sheets(&self, cx: &App) -> Vec<String> {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| {
+                steer_canvas::layout::panel_ids(canvas.read(cx).host.layout())
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The canvas's groups (each one's sheet ids, in tab order), for the
+    /// gesture matrix. Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_groups(&self, cx: &App) -> Vec<Vec<String>> {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| {
+                steer_canvas::layout::group_panels(canvas.read(cx).host.layout())
+                    .into_iter()
+                    .map(|group| group.into_iter().map(str::to_string).collect())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The canvas's terminal gesture (the strip's terminal ＋), for the
+    /// gesture matrix.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_open_terminal(&mut self, cx: &mut Context<Self>) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| canvas.open_terminal(cx));
+        }
+    }
+
+    /// A container was minted: when the canvas is still on the scratch
+    /// surface, its sheets move into the new container.
+    pub(crate) fn mint_canvas_from_scratch(&mut self, container_id: &str, cx: &mut Context<Self>) {
+        let Some(canvas) = &self.canvas_view else {
+            return;
+        };
+        let cwd = self.container_attrs(container_id, cx).cwd;
+        canvas.update(cx, |canvas, cx| {
+            canvas.mint_container(container_id, cwd, cx)
+        });
+    }
+
+    /// The canvas's activate gesture (a tab click), for the gesture matrix.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_activate(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, _| {
+                canvas.host.activate_sheet(sheet);
+            });
+        }
+    }
+
+    /// The canvas's split gesture (a tab double-click: the container's start
+    /// page opens beside that tab), for the gesture matrix and the visual
+    /// scene.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_split_home(&mut self, beside: &str, cx: &mut Context<Self>) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| canvas.split_home(beside, cx));
+        }
+    }
+
+    /// The canvas's own close gesture (the tab ×'s path), for the gesture
+    /// matrix.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_close(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, _| {
+                canvas.host.close_sheet(sheet);
+            });
+        }
     }
 }

@@ -85,6 +85,7 @@ fn sample_row(id: &str) -> SessionRow {
         tag: None,
         team_leader: false,
         last_message_at: None,
+        sheet_count: None,
     }
 }
 
@@ -111,6 +112,7 @@ fn row_data(
         tag: None,
         team_leader,
         last_message_at: None,
+        sheet_count: None,
     }
 }
 
@@ -134,6 +136,7 @@ fn external_row(id: &str) -> SessionRow {
         tag: None,
         team_leader: false,
         last_message_at: None,
+        sheet_count: None,
     }
 }
 
@@ -743,6 +746,7 @@ fn sidebar_filter_narrows_and_force_expands(cx: &mut TestAppContext) {
         tag: None,
         team_leader: false,
         last_message_at: None,
+        sheet_count: None,
     };
     let rows = SessionRow::from_group(SessionGroup {
         name: "proj".into(),

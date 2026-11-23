@@ -185,6 +185,16 @@ impl ContainerRow {
     }
 }
 
+/// The canvas's contribution to a sidebar row: how many sheets the container's
+/// canvas holds, and the container title projection (the earliest surviving
+/// sheet that names the container). The lookup answers `None` when the
+/// container has no canvas yet, and the row keeps its own catalogue title.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CanvasRowFacts {
+    pub sheet_count: usize,
+    pub title: Option<String>,
+}
+
 /// Project one wire row through [`derive_status`]. The row's own wire flag
 /// is the single unread source (the official IsRead bit folded from the
 /// protocol). The time stamp and the host rank ride separately — the stamp
@@ -206,6 +216,7 @@ pub fn project_row(item: &ContainerRow) -> SessionRowData {
         tag: item.tag.clone(),
         team_leader: false,
         last_message_at: item.last_message_at,
+        sheet_count: None,
     }
 }
 
@@ -286,6 +297,16 @@ pub fn project_groups(
     projects: &[crate::projects::Project],
     membership: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<SessionGroup> {
+    project_groups_with_canvas(rows, projects, membership, &|_| None)
+}
+
+/// [`project_groups`] plus the canvas facts lookup (see [`CanvasRowFacts`]).
+pub fn project_groups_with_canvas(
+    rows: &[ContainerRow],
+    projects: &[crate::projects::Project],
+    membership: &dyn Fn(&str) -> Option<String>,
+    canvas: &dyn Fn(&str) -> Option<CanvasRowFacts>,
+) -> Vec<SessionGroup> {
     let loose_name = loose_bucket_name();
     let mut groups: Vec<(SessionGroup, Vec<ContainerRow>)> = projects
         .iter()
@@ -336,7 +357,18 @@ pub fn project_groups(
     groups
         .into_iter()
         .map(|(mut group, bucket)| {
-            group.rows = project_forest(bucket.as_slice());
+            group.rows = project_forest(bucket.as_slice())
+                .into_iter()
+                .map(|mut row| {
+                    if let Some(facts) = canvas(&row.id) {
+                        if let Some(title) = facts.title {
+                            row.title = title;
+                        }
+                        row.sheet_count = Some(facts.sheet_count);
+                    }
+                    row
+                })
+                .collect();
             group
         })
         .collect()

@@ -261,6 +261,7 @@ impl Workspace {
                 let (project, workspace) = member
                     .unwrap_or_else(|| (None, crate::sidebar_projection::loose_bucket_name()));
                 SessionRow {
+                    sheet_count: None,
                     id: s.id.clone(),
                     // The chip shows the uuid SEGMENT (the row id's
                     // `external:{agent}:` namespace stays out of the chip) —

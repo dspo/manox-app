@@ -58,6 +58,7 @@ fn thread_row(id: &str) -> SessionRow {
         tag: None,
         team_leader: false,
         last_message_at: None,
+        sheet_count: None,
     }
 }
 

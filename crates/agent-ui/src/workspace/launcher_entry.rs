@@ -101,7 +101,7 @@ impl crate::Workspace {
         }
         let roots = target.roots();
         let project_id = target.project_id().map(str::to_string);
-        self.create_container(
+        let created = self.create_container(
             crate::workspace::container::ContainerSeed::Manox(
                 crate::workspace::container::NativeContainerSeed {
                     roots,
@@ -113,6 +113,9 @@ impl crate::Workspace {
             ),
             cx,
         );
+        // A container minted from the scratch canvas carries that canvas's
+        // sheets over (plan β: the scratch surface is never stranded).
+        self.mint_canvas_from_scratch(&created, cx);
         // The grouping fact lands at the attach tail (the seed carries it
         // there — a refused create must not leave a dead key); the launcher
         // itself remembers nothing across conversations.
