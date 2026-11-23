@@ -12,10 +12,12 @@
 //!   `manox_home()` resolves every path beneath it.
 //!
 //! [`install`] also performs the one-time rename of a pre-split `~/.manox`
-//! into `<steer_home>/.manox`. That is a filesystem move, not a schema
-//! migration: documents are carried verbatim and the app-layer keys are
-//! extracted to their new documents by the owners (`steer-i18n`,
-//! `agent-ui::projects`), each on first touch of its own document.
+//! into the default `<steer_home>/.manox`. That is a filesystem move, not a
+//! schema migration: documents are carried verbatim and the app-layer keys
+//! are extracted to their new documents by the owners (`steer-i18n`,
+//! `agent-ui::projects`), each on first touch of its own document. A
+//! `STEER_HOME` override never runs the migration — the override directory
+//! is a fresh root by construction (see [`steer_home`]).
 
 use std::env;
 use std::fs;
@@ -24,8 +26,12 @@ use std::path::{Path, PathBuf};
 
 /// Steer platform state root: `~/.steer`. `STEER_HOME` overrides it wholesale
 /// (same precedence discipline as `MANOX_HOME`; the override exists for
-/// hermetic tests). `None` means no resolvable home — callers fall back to
-/// defaults instead of guessing a path.
+/// hermetic tests and isolated dev instances). An override names a fresh
+/// root by construction: nothing from the default root is carried into it —
+/// in particular [`install`] skips the pre-split `~/.manox` migration, so an
+/// isolated instance can never rename the real runtime root away from the
+/// default installation. `None` means no resolvable home — callers fall back
+/// to defaults instead of guessing a path.
 pub fn steer_home() -> Option<PathBuf> {
     if let Some(dir) = env::var_os("STEER_HOME").filter(|dir| !dir.is_empty()) {
         return Some(PathBuf::from(dir));
@@ -65,9 +71,13 @@ pub fn migrate_legacy_root(legacy: &Path, target: &Path) -> io::Result<()> {
 /// start, from `main()`.
 ///
 /// A preset `MANOX_HOME` is an isolation contract (developers, hermetic
-/// tests): respected as-is, no injection, no migration. A migration failure
-/// falls back to the legacy root instead of abandoning the user's data —
-/// the next launch retries the rename.
+/// tests): respected as-is, no injection, no migration. A `STEER_HOME`
+/// override is the same contract against the app layer: the override
+/// directory is a fresh root (see [`steer_home`]), so only `MANOX_HOME` is
+/// injected and the pre-split migration never runs — an isolated instance
+/// must not pull the real `~/.manox` into the override directory. A
+/// migration failure falls back to the legacy root instead of abandoning
+/// the user's data — the next launch retries the rename.
 pub fn install() -> io::Result<()> {
     if env::var_os("MANOX_HOME").is_some_and(|root| !root.is_empty()) {
         return Ok(());
@@ -78,10 +88,32 @@ pub fn install() -> io::Result<()> {
             "no home directory; nowhere to root ~/.steer",
         )
     })?;
-    fs::create_dir_all(&home)?;
+    // The migration only ever runs against the default home; an overridden
+    // root has no pre-split history to carry (see above). `None` is also the
+    // shape when no legacy root exists on disk.
+    let legacy = if env::var_os("STEER_HOME").is_some_and(|dir| !dir.is_empty()) {
+        None
+    } else {
+        dirs::home_dir()
+            .map(|home| home.join(".manox"))
+            .filter(|root| root.exists())
+    };
+    let root = install_root(&home, legacy.as_deref())?;
+    // SAFETY: process-startup, before any thread exists or any manox path is
+    // resolved; the runtime reads this lazily at call time.
+    unsafe { env::set_var("MANOX_HOME", &root) };
+    Ok(())
+}
+
+/// The path-explicit core of [`install`]: create `<home>`, carry `legacy`
+/// into `<home>/.manox` when given, and return the effective runtime root.
+/// `legacy` is `None` when nothing may be carried — an overridden root (a
+/// fresh root by construction) or an absent legacy root.
+fn install_root(home: &Path, legacy: Option<&Path>) -> io::Result<PathBuf> {
+    fs::create_dir_all(home)?;
     let target = home.join(".manox");
-    let root = match dirs::home_dir().map(|home| home.join(".manox")) {
-        Some(legacy) if legacy.exists() => match migrate_legacy_root(&legacy, &target) {
+    let root = match legacy {
+        Some(legacy) => match migrate_legacy_root(legacy, &target) {
             Ok(()) => target,
             Err(error) => {
                 eprintln!(
@@ -89,32 +121,40 @@ pub fn install() -> io::Result<()> {
                     legacy.display(),
                     target.display()
                 );
-                legacy
+                legacy.to_path_buf()
             }
         },
-        _ => target,
+        None => target,
     };
     fs::create_dir_all(&root)?;
-    // SAFETY: process-startup, before any thread exists or any manox path is
-    // resolved; the runtime reads this lazily at call time.
-    unsafe { env::set_var("MANOX_HOME", &root) };
-    Ok(())
+    Ok(root)
 }
 
 /// Per-entry move for the shape a whole rename cannot cover: the target
 /// already exists (an interrupted earlier migration) or the rename failed.
-/// Missing entries move in; present ones stay. Entries that rename cannot
-/// carry (e.g. across a device boundary) fall back to a recursive copy +
-/// delete.
+/// An entry present on both sides resolves to the LEGACY copy: whenever both
+/// sides hold an entry, the migration had fallen back to the legacy root
+/// (failed migration, crash or partial copy mid-move), and while that
+/// fallback was live the legacy root is the one every write landed in — the
+/// target's copy is stale data from the interrupted attempt. Removing the
+/// target's copy first also lets the rename below replace it instead of
+/// landing inside it. Entries that rename cannot carry (e.g. across a
+/// device boundary) fall back to a recursive copy + delete.
 fn move_entries(legacy: &Path, target: &Path) -> io::Result<()> {
     fs::create_dir_all(target)?;
     for entry in fs::read_dir(legacy)? {
         let entry = entry?;
-        let to = target.join(entry.file_name());
-        if to.exists() {
-            continue;
-        }
         let from = entry.path();
+        let to = target.join(entry.file_name());
+        // `symlink_metadata` keeps a symlink on the target side a plain
+        // unlink (never a descent into whatever it points at).
+        if let Ok(meta) = fs::symlink_metadata(&to) {
+            if meta.is_dir() {
+                fs::remove_dir_all(&to)?;
+            } else {
+                fs::remove_file(&to)?;
+            }
+        }
         let is_dir = entry.file_type().is_ok_and(|ty| ty.is_dir());
         match fs::rename(&from, &to) {
             Ok(()) => {}
@@ -179,21 +219,33 @@ mod tests {
         assert!(root.path().join("target/journal/log.v1.jsonl").is_file());
     }
 
+    /// An entry present on both sides resolves to the legacy copy: the app
+    /// wrote into the legacy root while the migration was falling back to
+    /// it, so the target's copy is stale. Entries only the legacy side has
+    /// still move in.
     #[test]
-    fn an_existing_target_sweeps_only_missing_entries() {
+    fn an_entry_on_both_sides_resolves_to_the_legacy_copy() {
         let root = temp_root("steer-paths-sweep");
-        touch(&root.path().join("legacy/journal/log.v1.jsonl"), "moved");
+        touch(
+            &root.path().join("legacy/journal/log.v1.jsonl"),
+            "written during the fallback",
+        );
+        touch(
+            &root.path().join("target/journal/log.v1.jsonl"),
+            "stale from the interrupted attempt",
+        );
         touch(&root.path().join("legacy/settings.toml"), "key = 1");
-        touch(&root.path().join("target/journal/log.v1.jsonl"), "kept");
         migrate_legacy_root(&root.path().join("legacy"), &root.path().join("target")).unwrap();
         assert_eq!(
             std::fs::read_to_string(root.path().join("target/journal/log.v1.jsonl")).unwrap(),
-            "kept"
+            "written during the fallback"
         );
         assert_eq!(
             std::fs::read_to_string(root.path().join("target/settings.toml")).unwrap(),
             "key = 1"
         );
+        assert!(!root.path().join("legacy/journal/log.v1.jsonl").exists());
+        assert!(!root.path().join("legacy/settings.toml").exists());
     }
 
     #[test]
@@ -207,5 +259,42 @@ mod tests {
             std::fs::read_to_string(target.join("journal/log.v1.jsonl")).unwrap(),
             "{}"
         );
+    }
+
+    /// The default-home shape of `install_root`: the legacy root is carried
+    /// into `<home>/.manox` and drained.
+    #[test]
+    fn the_default_home_carries_the_legacy_root() {
+        let root = temp_root("steer-paths-install");
+        let legacy = root.path().join("legacy-manox");
+        touch(&legacy.join("journal/log.v1.jsonl"), "data");
+        let home = root.path().join("home");
+        assert_eq!(
+            install_root(&home, Some(&legacy)).unwrap(),
+            home.join(".manox")
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(".manox/journal/log.v1.jsonl")).unwrap(),
+            "data"
+        );
+        assert!(!legacy.join("journal/log.v1.jsonl").exists());
+    }
+
+    /// The override shape (`legacy: None`): a fresh `.manox` is created and
+    /// the real legacy root is left exactly as it was — an isolated instance
+    /// must never rename the default installation's runtime root away.
+    #[test]
+    fn an_override_root_never_touches_the_legacy_root() {
+        let root = temp_root("steer-paths-override");
+        let legacy = root.path().join("real-manox");
+        touch(&legacy.join("journal/log.v1.jsonl"), "real data");
+        let home = root.path().join("override-home");
+        install_root(&home, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("journal/log.v1.jsonl")).unwrap(),
+            "real data"
+        );
+        assert!(home.join(".manox").is_dir());
+        assert_eq!(std::fs::read_dir(home.join(".manox")).unwrap().count(), 0);
     }
 }
