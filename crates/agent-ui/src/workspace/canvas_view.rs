@@ -98,10 +98,10 @@ fn static_title(key: &'static str) -> steer_canvas::registry::TitleFn {
 /// container's own name is the projection over the earliest surviving sheet
 /// that *does* name it).
 ///
-/// The `body` factories here are the mountable face for hosts that place
-/// `AnyView`s directly; this canvas renders its bodies inline from the
-/// entities it holds (see [`CanvasView::render_sheet_body`]), so a factory's
-/// result is only used by such hosts.
+/// Every `body` is `None`: the canvas paints its sheets from the entities it
+/// already holds, so a kind owns existence/title/closability and the last mile
+/// of painting is the host's. A kind whose own store builds the view (the pi
+/// sheet) registers a factory instead.
 fn v1_registry(titles: SheetTitles) -> steer_canvas::SheetRegistry {
     use std::sync::Arc;
     use steer_canvas::{ParsedSheet, SheetKindSpec};
@@ -127,7 +127,6 @@ fn v1_registry(titles: SheetTitles) -> steer_canvas::SheetRegistry {
             body: None,
         }
     };
-    let session_title = titles;
     steer_canvas::SheetRegistry::new()
         .with(kind(
             "home",
@@ -156,7 +155,7 @@ fn v1_registry(titles: SheetTitles) -> steer_canvas::SheetRegistry {
             "chat",
             true,
             Arc::new(move |id, cx| {
-                session_title(id, cx).unwrap_or_else(|| crate::i18n::t("canvas-tab-new-chat"))
+                titles(id, cx).unwrap_or_else(|| crate::i18n::t("canvas-tab-new-chat"))
             }),
             // The tab-only projection (PLAN-ABSORB-02): a program's OSC title
             // renames its tab, never the container.
