@@ -2,8 +2,8 @@
 //! the tree's leaves are sheets.
 //!
 //! The geometry layer under the window — the sheet host, the tab strips and the
-//! gestures are a separate crate's job (PLAN-ABSORB-04). What lives here is the
-//! data those surfaces read and write:
+//! gestures are a separate crate's job. What lives here is the data those
+//! surfaces read and write:
 //!
 //! | module | what it is | gpui |
 //! |---|---|---|

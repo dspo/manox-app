@@ -5,11 +5,12 @@
 //! glyph, whether it can be closed, whether it may name its container, whether
 //! its resource still exists on restore, its parsed payload, and its body.
 //!
-//! Registration happens at the assembly point, before the first render (v1
-//! registers `home`, `manox-session` and `terminal` there; the pi sheet's kind
-//! joins them in its own plan). A kind is claimed by exactly one module: a
-//! second registration panics, because two owners would make `title` and `body`
-//! ambiguous (fail fast rather than pick one silently).
+//! Registration happens at the assembly point, before the first render — the
+//! app's assembly registers every kind it ships (start pages, sessions, and
+//! terminals today), and a new kind joins by registering there. A kind is
+//! claimed by exactly one module: a second registration panics, because two
+//! owners would make `title` and `body` ambiguous (fail fast rather than pick
+//! one silently).
 //!
 //! **The body is a view factory, never a state owner.** Switching tabs unmounts
 //! a body, so whatever a kind remembers lives in its own store (the AHP store,

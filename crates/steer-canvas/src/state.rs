@@ -3,9 +3,9 @@
 //!
 //! This is the only writer of a stored layout ([`CanvasState::set_layout`]) —
 //! the geometry-layer counterpart of the chrome boundary's "one writer, one
-//! queue" rule (AGENTS.md, 不变量③). Every commit carries a ticket taken
-//! *before* the intent was formed; a commit that finds its ticket superseded
-//! is dropped silently instead of rolling a newer intent back.
+//! queue" rule. Every commit carries a ticket taken *before* the intent was
+//! formed; a commit that finds its ticket superseded is dropped silently
+//! instead of rolling a newer intent back.
 //!
 //! Two derived facts live here as projections, never as stored truth:
 //!
