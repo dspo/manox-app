@@ -494,6 +494,17 @@ impl AcpStore {
         .detach();
     }
 
+    /// Reattaches a dead session: `session/resume` (with replay, so the sheet
+    /// keeps its transcript) under the same id. A harness that no longer has
+    /// the session re-mints a fresh one under that id — the same repair the
+    /// bind path performs.
+    pub fn reconnect(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let Some(cwd) = self.book.view(session_id).map(|view| view.cwd.clone()) else {
+            return;
+        };
+        self.open_existing(session_id, cwd, true, cx);
+    }
+
     /// Closes one session: `session/close`, then the process (one process per
     /// session). The view is dropped with it.
     pub fn close_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
