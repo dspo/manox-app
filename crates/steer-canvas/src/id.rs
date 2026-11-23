@@ -76,13 +76,16 @@ pub struct TerminalResource {
 /// index is the last `:`-segment and only when it is numeric. An id written
 /// before terminals were numbered resources (`terminal:{container_id}`) is
 /// resource 1 — the same tolerance the experiment's `terminalResource` keeps.
+/// A numbered id whose index does not fit `u32` is malformed (`None`): folding
+/// it onto resource 1 would collide with the sheet it is not.
 pub fn terminal_resource(id: &str) -> Option<TerminalResource> {
     let rest = id.strip_prefix("terminal:")?;
     match rest.rsplit_once(':') {
         Some((container, tail)) if !container.is_empty() && is_index(tail) => {
+            let index = tail.parse().ok()?;
             Some(TerminalResource {
                 container_id: container.to_string(),
-                index: tail.parse().unwrap_or(1),
+                index,
             })
         }
         _ if rest.is_empty() => None,
@@ -153,6 +156,21 @@ mod tests {
             Some(TerminalResource {
                 container_id: "c1".to_string(),
                 index: 1
+            })
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_terminal_index_is_malformed() {
+        // An index past `u32` must not fold onto the resource it would
+        // collide with (`terminal:c1:4294967296` vs `terminal:c1:1`).
+        assert_eq!(terminal_resource("terminal:c1:4294967296"), None);
+        assert_eq!(sheet_container("terminal:c1:4294967296"), None);
+        assert_eq!(
+            terminal_resource(&terminal_sheet_id("c1", u32::MAX)),
+            Some(TerminalResource {
+                container_id: "c1".to_string(),
+                index: u32::MAX
             })
         );
     }
