@@ -17,7 +17,6 @@ async fn the_canvas_paints_its_strip_and_the_session_body(cx: &mut TestAppContex
     let (window, workspace) = open_workspace(cx);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
 
-    workspace.update(&mut visual.cx, |ws, cx| ws.open_canvas(cx));
     for _ in 0..3 {
         visual.update(|window, cx| {
             window.draw(cx).clear(cx);
@@ -25,8 +24,9 @@ async fn the_canvas_paints_its_strip_and_the_session_body(cx: &mut TestAppContex
     }
 
     assert!(
-        visual.debug_bounds("canvas-main").is_some(),
-        "the canvas main column must paint"
+        visual.debug_bounds("canvas-open-home").is_some()
+            || visual.debug_bounds("workspace-message-list").is_some(),
+        "the canvas chrome must paint"
     );
     let sheets = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx));
     assert!(
@@ -46,7 +46,11 @@ async fn closing_a_tab_goes_through_the_one_writer(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
 
-    workspace.update(&mut visual.cx, |ws, cx| ws.open_canvas(cx));
+    for _ in 0..2 {
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
     let before = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx));
     assert!(!before.is_empty());
 
@@ -68,7 +72,11 @@ async fn a_terminal_sheet_opens_on_the_canvas(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
 
-    workspace.update(&mut visual.cx, |ws, cx| ws.open_canvas(cx));
+    for _ in 0..2 {
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_canvas_open_terminal(cx)
     });

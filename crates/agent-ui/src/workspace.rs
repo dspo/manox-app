@@ -535,10 +535,6 @@ enum ViewMode {
     /// composer's ⏎ mints the Manox container, the action row mints the
     /// external ones. No container backs this mode.
     Launcher,
-    /// The container's canvas (plan β): the layout tree of sheet tabs and the
-    /// sheet bodies on it. Entered through [`Workspace::open_canvas`]; the
-    /// default container view once the canvas carries every sheet kind.
-    Canvas,
 }
 
 /// The main card's `border_1` on both edges; width budgets that measure
@@ -3361,6 +3357,22 @@ impl Workspace {
         view
     }
 
+    /// Keeps the canvas on the foreground container. The container view is the
+    /// canvas: this runs on every column render, and is a no-op unless the
+    /// foreground changed.
+    pub(crate) fn sync_canvas(&mut self, cx: &mut Context<Self>) {
+        let foreground = self.foreground_container_id(cx);
+        let session = self.chat_store(cx).map(|(_, sid)| sid);
+        let cwd = foreground
+            .as_deref()
+            .map(|container| self.container_attrs(container, cx).cwd)
+            .unwrap_or_else(|| self.cwd.clone());
+        let canvas = self.ensure_canvas_view(cx);
+        canvas.update(cx, |canvas, cx| {
+            canvas.sync_foreground(foreground.as_deref(), session.as_deref(), cwd, cx)
+        });
+    }
+
     /// The canvas's sheet ids, in layout order. Test-support read face (the
     /// canvas entity and host stay private).
     #[cfg(feature = "test-support")]
@@ -3416,24 +3428,5 @@ impl Workspace {
                 canvas.host.close_sheet(sheet);
             });
         }
-    }
-
-    /// Opens the foreground container's canvas (the plan β entry point): its
-    /// start page plus — when the container is a session — that session's
-    /// sheet.
-    pub fn open_canvas(&mut self, cx: &mut Context<Self>) {
-        let container = self.foreground_container_id(cx);
-        let session = self.chat_store(cx).map(|(_, sid)| sid);
-        let view = self.ensure_canvas_view(cx);
-        let cwd = container
-            .as_deref()
-            .map(|container| self.container_attrs(container, cx).cwd)
-            .unwrap_or_else(|| self.cwd.clone());
-        view.update(cx, |view, cx| match container.as_deref() {
-            Some(container) => view.open_container(container, session.as_deref(), cwd, cx),
-            None => view.show_scratch(cx),
-        });
-        self.view_mode = ViewMode::Canvas;
-        cx.notify();
     }
 }

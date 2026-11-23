@@ -205,6 +205,27 @@ impl CanvasView {
         self.terminals.retain(|sheet, _| alive.contains(sheet));
     }
 
+    /// Keeps the canvas on the workspace's foreground container: the container
+    /// view IS the canvas, so every attach / sidebar click lands here and the
+    /// previous canvas parks (its layout is kept, its PTYs stay alive).
+    pub(crate) fn sync_foreground(
+        &mut self,
+        container_id: Option<&str>,
+        session_id: Option<&str>,
+        cwd: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        match container_id {
+            Some(container_id) if self.host.active_container() != Some(container_id) => {
+                self.open_container(container_id, session_id, cwd, cx);
+            }
+            None if self.host.active_container().is_some() => {
+                self.show_scratch(cx);
+            }
+            _ => {}
+        }
+    }
+
     /// A container was just minted: when the canvas is still the scratch one,
     /// its sheets move into the new container.
     pub(crate) fn mint_container(

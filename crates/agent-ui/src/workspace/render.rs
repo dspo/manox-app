@@ -76,20 +76,6 @@ impl Render for Workspace {
                 .child(launcher);
             return self.apply_chat_actions(root, window, cx);
         }
-        // The container canvas (plan β): the layout tree and the sheet bodies
-        // on it. The page is produced in the canvas entity, which owns the
-        // layout state; the frame only mounts it.
-        if matches!(self.view_mode, ViewMode::Canvas) {
-            let canvas = self.ensure_canvas_view(cx);
-            let page: gpui::AnyElement =
-                canvas.update(cx, |view, cx| view.render_canvas(window, cx));
-            let root = gpui::div()
-                .id("canvas-main")
-                .debug_selector(|| "canvas-main".to_string())
-                .size_full()
-                .child(page);
-            return self.apply_chat_actions(root, window, cx);
-        }
         // A blocking overlay owns the page: the turn navigator cannot stay
         // mounted under it.
         if self.blocking_overlay_active(cx) && self.chat.read(cx).turn_navigator.is_some() {
@@ -295,16 +281,12 @@ impl Workspace {
 
     fn render_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
-        // The column entity derives the gate and prunes it; this frame only
-        // mounts it.
-        super::column_view::prune_history_gate(&self.chat, cx);
+        // The container view is its canvas: keep it on the foreground
+        // container (a no-op unless the foreground changed), then mount it.
+        self.sync_canvas(cx);
         let column_view = self.ensure_column_view(cx);
-        // The page is built in the column's own entity (its state has one
-        // owner). Nested entity elements measure their contents, so a
-        // percentage-sized page would collapse — the frame takes the element
-        // itself and lays it out as a flex item.
-        let page: gpui::AnyElement =
-            column_view.update(cx, |view, cx| view.render_page(window, cx));
+        let _ = column_view;
+        let canvas = self.ensure_canvas_view(cx);
         let main_body_w = self
             .chat
             .read(cx)
@@ -313,18 +295,15 @@ impl Workspace {
             .unwrap_or_else(|| window.bounds().size.width);
         let turn_navigator_overlay = self.render_turn_navigator_overlay(&theme, main_body_w, cx);
         // The card's interior width — what this view was actually laid out in
-        // (the shell's sidebar and right pane are siblings, so the window
-        // width overstates it). The measurement lands at prepaint; the first
-        // frame of a fresh window falls back to the window width and the
-        // prepaint below schedules the frame that corrects it.
+        // (the shell's sidebar and right pane are siblings, so the window width
+        // overstates it). The measurement lands at prepaint; the first frame of
+        // a fresh window falls back to the window width.
         let card_width = self.chat.read(cx).card_width.clone();
+        let page: gpui::AnyElement = canvas.update(cx, |view, cx| view.render_canvas(window, cx));
         let root = gpui::div()
             .id("embedded-column")
             .size_full()
             .flex()
-            // The column is its own entity; a cached view element is laid out
-            // at the card's size (an uncached child measures its contents, and
-            // the page's percentage sizing resolves to zero that way).
             .child(
                 gpui::div()
                     .flex_1()
@@ -334,17 +313,10 @@ impl Workspace {
                     .child(page),
             )
             .children(turn_navigator_overlay)
-            // A zero-size canvas is the paint-phase hook this registration
-            // needs (window listeners may only be installed while painting).
             .child(
                 gpui::canvas(
                     |_, _, _| (),
                     |_, _, window, _| {
-                        // A popup menu's click stops propagation, so the
-                        // selection engine never sees the mouse-up that would
-                        // end the drag its mouse-down armed; without the guard
-                        // the pointer's next button-less travel across the
-                        // transcript selects whatever it crosses.
                         steer_components::markdown::install_selection_drag_guard(window);
                     },
                 )
