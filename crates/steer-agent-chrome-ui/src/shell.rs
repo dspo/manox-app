@@ -21,15 +21,12 @@ use gpui::{
 };
 
 use crate::main_surface::MainSurfaceHandle;
-use crate::panel::{PanelSlot, PanelSurface};
 use crate::right_pane::{RightPane, ToolTabFactory};
 use crate::session_list::{
     CustomizationRow, DraggedRow, FixedRow, LOOSE_BUCKET_KEY, SessionGroup, SessionList,
     SessionRowData, SessionRowKind, SessionStatus, SidebarGrouping,
 };
-use crate::theme::{
-    CARD_BG, CARD_BORDER, FG_DIM, FG_STRONG, FLOAT_GAP, PANEL_BG, TABBAR_BG, icon, icons,
-};
+use crate::theme::{CARD_BG, CARD_BORDER, FLOAT_GAP};
 use crate::{divider, titlebar};
 
 actions!(steer_agent_chrome_ui, [NewSession]);
@@ -246,7 +243,18 @@ pub struct HostHooks {
     /// The 移出项目 pick (row id): detach from its project — the row falls
     /// to the loose bucket. Absent → the item does not render.
     pub on_remove_row_from_project: Option<HookOnId>,
+    /// The bottom-dock toggle (the titlebar's panel button — the dock itself
+    /// is the container canvas's dock region). The hook performs the host-side
+    /// flip; the button's lit state arrives through [`Self::dock_open`].
+    /// Absent → the click is inert.
+    pub on_toggle_dock: Option<HookOnDockSide>,
+    /// Whether the bottom dock is open, read at render time (the button's
+    /// state; no local mirror — invariant ②). Absent → the button reads dark.
+    pub dock_open: Option<HookQuery<bool>>,
 }
+
+/// Dock-side callback: the side's wire name (`left` / `right` / `bottom`).
+pub type HookOnDockSide = Box<dyn Fn(&str, &mut Window, &mut App)>;
 
 /// Batch-ids callback (the selection bar's archive commit).
 pub type HookOnIds = Box<dyn Fn(&[String], &mut Window, &mut App)>;
@@ -268,7 +276,6 @@ struct MembershipMenuRows {
 pub struct ShellConfig {
     pub main: MainSurfaceHandle,
     pub tool_kinds: Vec<Arc<dyn ToolTabFactory>>,
-    pub panel_surface: Option<Arc<dyn PanelSurface>>,
     /// Fixed sidebar rows (Automations / Chats …) — labels resolved by the
     /// host.
     pub fixed_rows: Vec<FixedRow>,
@@ -363,7 +370,6 @@ pub struct Shell {
     title_edit: Option<InlineEdit>,
     // ── layout ──
     pub show_sidebar: bool,
-    pub show_panel: bool,
     /// Set while a host-injected sidebar surface is mounted (the Settings
     /// split layout). The injected surface is the only exit of that mode, so
     /// while this is set the titlebar's hide toggle is a no-op and the
@@ -398,8 +404,6 @@ pub struct Shell {
     /// is built on the event path).
     filter_query: Option<Entity<gpui_component::input::InputState>>,
     _filter_sub: Option<gpui::Subscription>,
-    // ── bottom dock ──
-    panel: Option<PanelSlot>,
     // ── titlebar session picker ──
     pub(crate) session_picker_open: bool,
     /// Picker search term (created on open; an InputState needs a Window, so
@@ -408,7 +412,7 @@ pub struct Shell {
     _picker_sub: Option<gpui::Subscription>,
     // ── host faces ──
     pub(crate) main: MainSurfaceHandle,
-    hooks: HostHooks,
+    pub(crate) hooks: HostHooks,
 }
 
 impl Shell {
@@ -465,11 +469,6 @@ impl Shell {
 
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let right = cx.new(|_| RightPane::new(config.tool_kinds));
-        let panel = config.panel_surface.map(|surface| PanelSlot {
-            surface,
-            view: None,
-            error: None,
-        });
         Self {
             right,
             sessions: Vec::new(),
@@ -493,7 +492,6 @@ impl Shell {
             tag_edit: None,
             title_edit: None,
             show_sidebar: true,
-            show_panel: false,
             sidebar_pinned: false,
             sidebar_pinned_was: true,
             sidebar_width: px(divider::SIDEBAR_DEFAULT),
@@ -504,7 +502,6 @@ impl Shell {
             sidebar_filter_open: false,
             filter_query: None,
             _filter_sub: None,
-            panel,
             session_picker_open: false,
             picker_query: None,
             _picker_sub: None,
@@ -1728,6 +1725,16 @@ impl Shell {
         groups
     }
 
+    /// The titlebar's bottom-dock toggle: a host action (the canvas owns the
+    /// dock — the shell keeps no dock state of its own to flip). A host
+    /// without the hook renders the button inert.
+    pub fn toggle_bottom_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(hook) = &self.hooks.on_toggle_dock {
+            hook("bottom", window, cx);
+            cx.notify();
+        }
+    }
+
     /// Session-picker open/close: builds/clears the search term on open and
     /// focuses it; closing only collapses. The panel's placement is derived
     /// at render time (window-centered under the titlebar) — no click anchor
@@ -1765,35 +1772,6 @@ impl Shell {
         self.sidebar_width = px(width.clamp(divider::SIDEBAR_MIN, divider::SIDEBAR_MAX));
     }
 
-    /// Detach the live panel view WITHOUT teardown — the host takes
-    /// ownership (per-thread dock stashing: the view keeps running and is
-    /// re-installed on switch-back). `None` when the slot is empty.
-    pub fn take_panel_view(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyView> {
-        let slot = self.panel.as_mut()?;
-        let view = slot.view.take();
-        if view.is_some() {
-            cx.notify();
-        }
-        view
-    }
-
-    /// Whether the dock slot holds a live view (the `/exit` teardown's
-    /// read-only probe — a collapsed dock reads false).
-    pub fn panel_live(&self) -> bool {
-        self.panel.as_ref().is_some_and(|slot| slot.view.is_some())
-    }
-
-    /// Install a view into the panel slot (the per-thread restore half of
-    /// [`Self::take_panel_view`]); clears any error state. Does not change
-    /// visibility — a collapsed dock stays collapsed.
-    pub fn set_panel_view(&mut self, view: gpui::AnyView, cx: &mut Context<Self>) {
-        if let Some(slot) = self.panel.as_mut() {
-            slot.error = None;
-            slot.view = Some(view);
-            cx.notify();
-        }
-    }
-
     /// Detach the right pane's whole session (per-thread stashing — see
     /// [`crate::right_pane::RightPaneSession`]).
     pub fn stash_right_session(
@@ -1819,55 +1797,6 @@ impl Shell {
         self.right
             .update(cx, |pane, cx| pane.open_kind(kind, window, cx));
         cx.notify();
-    }
-
-    /// Titlebar panel toggle: expand runs the surface's `open` (mount equals
-    /// launch), collapse runs `close` (drop → teardown, e.g. a PTY's process
-    /// tree). Spawning happens on the event path.
-    pub fn toggle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_panel = !self.show_panel;
-        if self.show_panel {
-            self.open_panel_content(window, cx);
-        } else {
-            self.clear_panel_content(cx);
-        }
-    }
-
-    fn open_panel_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(slot) = &mut self.panel {
-            slot.error = None;
-            if slot.view.is_some() {
-                return;
-            }
-            let surface = slot.surface.clone();
-            match surface.open(window, cx) {
-                Ok(view) => slot.view = Some(view),
-                Err(e) => slot.error = Some(e),
-            }
-        }
-    }
-
-    /// Teardown the panel content but keep the dock expanded (the trash
-    /// glyph): the next expand or recycle rebuilds it.
-    fn clear_panel_content(&mut self, cx: &mut Context<Self>) {
-        if let Some(slot) = &mut self.panel {
-            if let Some(view) = slot.view.take() {
-                let surface = slot.surface.clone();
-                surface.close(view, cx);
-            }
-            slot.error = None;
-        }
-        cx.notify();
-    }
-
-    /// Fresh content (the + glyph): teardown then rebuild — for a terminal
-    /// surface this is "kill and spawn a new one".
-    fn recycle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panel.is_some() {
-            self.clear_panel_content(cx);
-            self.open_panel_content(window, cx);
-            cx.notify();
-        }
     }
 }
 
@@ -2071,7 +2000,6 @@ impl Shell {
     /// taking no layout width.
     fn render_content(&mut self, cx: &mut Context<Shell>) -> gpui::AnyElement {
         let show_sidebar = self.show_sidebar;
-        let show_panel = self.show_panel;
         let sidebar_surface = self.sidebar_surface.clone();
         let right = self.right.clone();
         let right_visible = right.read(cx).visible;
@@ -2144,8 +2072,7 @@ impl Shell {
                             .when(right_visible, |this| {
                                 this.child(divider::chat_right_sash(cx)).child(right)
                             }),
-                    )
-                    .when(show_panel, |this| this.child(self.render_panel(cx))),
+                    ),
             )
             .children(sidebar_handle)
             .into_any_element()
@@ -2417,118 +2344,6 @@ impl Shell {
                     on_selection_cancel(e, w, cx)
                 }),
             })
-    }
-
-    /// The bottom dock: the shell card + tab strip; the body hosts the
-    /// surface's view, its open failure, or the cleared-state hint.
-    fn render_panel(&mut self, cx: &mut Context<Shell>) -> impl IntoElement {
-        const HEIGHT: f32 = 220.0;
-
-        let Some(slot) = &self.panel else {
-            return div().into_any_element();
-        };
-        let surface = slot.surface.clone();
-
-        let body: gpui::AnyElement = match (&slot.view, slot.error.as_ref()) {
-            (Some(view), _) => div()
-                .w_full()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .py(px(4.))
-                .px(px(8.))
-                .child(view.clone())
-                .into_any_element(),
-            (None, Some(err)) => div()
-                .w_full()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(12.5))
-                .text_color(FG_DIM)
-                .child(err.clone())
-                .into_any_element(),
-            (None, None) => div()
-                .w_full()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(12.5))
-                .text_color(FG_DIM)
-                .child(steer_i18n::t("chrome-panel-empty"))
-                .into_any_element(),
-        };
-
-        let on_new_content = cx.listener(|this, _: &ClickEvent, w, cx| {
-            this.recycle_panel(w, cx);
-        });
-        let on_clear = cx.listener(|this, _: &ClickEvent, _w, cx| {
-            this.clear_panel_content(cx);
-        });
-        let on_collapse = cx.listener(|this, _: &ClickEvent, w, cx| {
-            this.toggle_panel(w, cx);
-            cx.notify();
-        });
-
-        div()
-            .w_full()
-            .h(px(HEIGHT))
-            .flex_shrink_0()
-            .bg(PANEL_BG)
-            .border_1()
-            .border_color(CARD_BORDER)
-            .rounded(px(crate::theme::CARD_RADIUS))
-            .overflow_hidden()
-            .text_color(FG_STRONG)
-            .flex()
-            .flex_col()
-            // Tab strip: the surface label + new/clear/collapse.
-            .child(
-                div()
-                    .w_full()
-                    .h(px(32.))
-                    .flex_shrink_0()
-                    .bg(TABBAR_BG)
-                    .items_center()
-                    .px(px(10.))
-                    .gap(px(10.))
-                    .text_size(px(12.5))
-                    .flex()
-                    .child(
-                        div()
-                            .gap(px(6.))
-                            .items_center()
-                            .text_color(FG_STRONG)
-                            .flex()
-                            .child(icon(surface.icon(), 14.))
-                            .child(surface.title()),
-                    )
-                    .child(div().flex_1().min_w_0())
-                    .child(
-                        div()
-                            .id("panel-new")
-                            .on_click(move |e, w, cx| on_new_content(e, w, cx))
-                            .child(icon(icons::ADD, 14.)),
-                    )
-                    .child(
-                        div()
-                            .id("panel-clear")
-                            .on_click(move |e, w, cx| on_clear(e, w, cx))
-                            .child(icon(icons::TRASH, 14.)),
-                    )
-                    .child(
-                        div()
-                            .id("panel-collapse")
-                            .on_click(move |e, w, cx| on_collapse(e, w, cx))
-                            .child(icon(icons::CHEVRON_DOWN, 14.)),
-                    ),
-            )
-            .child(body)
-            .into_any_element()
     }
 }
 

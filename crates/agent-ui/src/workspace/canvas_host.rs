@@ -18,6 +18,7 @@
 //!   never destroys it.
 
 use gpui::App;
+use steer_canvas::layout::{DockSide, DropTarget};
 use steer_canvas::state::{CanvasSnapshot, CanvasState, SetLayoutOutcome, SwitchOutcome};
 use steer_canvas::{DockLayout, SheetRegistry, layout};
 
@@ -107,11 +108,60 @@ impl CanvasHost {
         self.commit(&container, next)
     }
 
-    /// Opens `sheet` in a new group beside `beside`.
-    pub fn split_right(&mut self, beside: &str, sheet: &str) -> CanvasAction {
+    /// The one placement command: a drop (a tab slot, a group, a split edge,
+    /// a dock) moves `sheet` there. A sheet nobody holds is simply placed —
+    /// "open beside this tab" rides the same command.
+    pub fn drop_sheet(&mut self, sheet: &str, target: DropTarget) -> CanvasAction {
         self.note(sheet);
         let container = self.state.canvas_key().to_string();
-        let next = layout::split_right(self.state.layout(), beside, sheet);
+        let next = layout::move_sheet(self.state.layout(), sheet, target);
+        self.commit(&container, next)
+    }
+
+    /// Zooms `sheet`, or leaves zoom when it is the zoomed one. A dock sheet
+    /// is not a zoom candidate (the dock is a fixed placement surface): a
+    /// blind toggle on one keeps the current zoom instead of clearing it.
+    pub fn toggle_zoom(&mut self, sheet: &str) -> CanvasAction {
+        let zoomable = layout::has_center_sheet(self.state.layout(), sheet);
+        let next_zoom = if self.state.zoomed() == Some(sheet) {
+            None
+        } else if zoomable {
+            Some(sheet.to_string())
+        } else {
+            return CanvasAction::Stale;
+        };
+        self.state.set_zoom(next_zoom);
+        self.save_generation += 1;
+        CanvasAction::Applied
+    }
+
+    /// Flips a dock's open flag (a dock the layout never had opens at its
+    /// defaults).
+    pub fn toggle_dock(&mut self, side: DockSide) -> CanvasAction {
+        let container = self.state.canvas_key().to_string();
+        let next = layout::toggle_dock(self.state.layout(), side);
+        self.commit(&container, next)
+    }
+
+    /// Sets a dock's open flag.
+    pub fn set_dock_open(&mut self, side: DockSide, open: bool) -> CanvasAction {
+        let container = self.state.canvas_key().to_string();
+        let next = layout::set_dock_open(self.state.layout(), side, open);
+        self.commit(&container, next)
+    }
+
+    /// Records a dock's cross-edge size (a drag frame on the dock's handle;
+    /// the 400ms debounce still converges the save).
+    pub fn set_dock_size(&mut self, side: DockSide, size: f32) -> CanvasAction {
+        let container = self.state.canvas_key().to_string();
+        let next = layout::set_dock_size(self.state.layout(), side, size);
+        self.commit(&container, next)
+    }
+
+    /// Records a center split's slot sizes; `None` resets to equal shares.
+    pub fn set_split_sizes(&mut self, path: &[usize], sizes: Option<Vec<f32>>) -> CanvasAction {
+        let container = self.state.canvas_key().to_string();
+        let next = layout::set_split_sizes(self.state.layout(), None, path, sizes);
         self.commit(&container, next)
     }
 
@@ -195,6 +245,8 @@ impl CanvasHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steer_canvas::DockNode;
+    use steer_canvas::layout::SplitEdge;
 
     fn host() -> CanvasHost {
         let mut host = CanvasHost::new(SheetRegistry::new());
@@ -231,12 +283,107 @@ mod tests {
     fn a_split_opens_beside_the_shown_sheet() {
         let mut host = host();
         assert_eq!(
-            host.split_right("home:c1", "terminal:c1:1"),
+            host.drop_sheet(
+                "terminal:c1:1",
+                DropTarget::Split {
+                    anchor: "home:c1".into(),
+                    side: SplitEdge::Right,
+                },
+            ),
             CanvasAction::Applied
         );
         assert_eq!(
             layout::active_panel_ids(host.layout(), None),
             ["home:c1", "terminal:c1:1"]
+        );
+    }
+
+    #[test]
+    fn a_drop_into_the_dock_opens_and_fills_it() {
+        let mut host = host();
+        assert_eq!(host.toggle_dock(DockSide::Bottom), CanvasAction::Applied);
+        assert_eq!(
+            host.drop_sheet(
+                "terminal:c1:1",
+                DropTarget::Dock {
+                    side: DockSide::Bottom
+                },
+            ),
+            CanvasAction::Applied
+        );
+        assert_eq!(
+            layout::panels_in_region(host.layout(), DockSide::Bottom),
+            ["terminal:c1:1"]
+        );
+        // The dock's sheets count toward the container-death check.
+        assert_eq!(host.close_sheet("home:c1"), CanvasAction::Applied);
+        assert_eq!(layout::sheet_count(host.layout()), 1);
+    }
+
+    #[test]
+    fn toggling_a_dock_that_was_never_there_opens_it() {
+        let mut host = host();
+        assert_eq!(host.toggle_dock(DockSide::Bottom), CanvasAction::Applied);
+        assert!(
+            host.layout()
+                .region(DockSide::Bottom)
+                .is_some_and(|r| r.open)
+        );
+        assert_eq!(host.toggle_dock(DockSide::Bottom), CanvasAction::Applied);
+        assert!(
+            host.layout()
+                .region(DockSide::Bottom)
+                .is_some_and(|r| !r.open)
+        );
+    }
+
+    #[test]
+    fn zoom_toggles_and_refuses_dock_sheets() {
+        let mut host = host();
+        host.open_sheet("session:s1", None);
+        assert_eq!(host.toggle_zoom("session:s1"), CanvasAction::Applied);
+        assert_eq!(host.zoomed(), Some("session:s1"));
+        assert_eq!(host.toggle_zoom("session:s1"), CanvasAction::Applied);
+        assert_eq!(host.zoomed(), None);
+        // A dock sheet never zooms.
+        host.toggle_dock(DockSide::Bottom);
+        host.drop_sheet(
+            "terminal:c1:1",
+            DropTarget::Dock {
+                side: DockSide::Bottom,
+            },
+        );
+        host.toggle_zoom("terminal:c1:1");
+        assert_eq!(host.zoomed(), None);
+    }
+
+    #[test]
+    fn split_sizes_and_dock_sizes_go_through_the_writer() {
+        let mut host = host();
+        host.drop_sheet(
+            "session:s1",
+            DropTarget::Split {
+                anchor: "home:c1".into(),
+                side: SplitEdge::Right,
+            },
+        );
+        assert_eq!(
+            host.set_split_sizes(&[], Some(vec![300.])),
+            CanvasAction::Applied
+        );
+        match &host.layout().center {
+            DockNode::Split { sizes, .. } => assert_eq!(sizes, &Some(vec![300.])),
+            other => panic!("a split stays, got {other:?}"),
+        }
+        assert_eq!(host.set_split_sizes(&[], None), CanvasAction::Applied);
+        host.toggle_dock(DockSide::Bottom);
+        assert_eq!(
+            host.set_dock_size(DockSide::Bottom, 280.),
+            CanvasAction::Applied
+        );
+        assert_eq!(
+            host.layout().region(DockSide::Bottom).unwrap().size,
+            Some(280.)
         );
     }
 

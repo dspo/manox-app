@@ -66,7 +66,8 @@ gpui::actions!(
         FocusConversation,
         BackgroundCurrentThread,
         ArchiveCurrentThread,
-        DismissContextBubble
+        DismissContextBubble,
+        CanvasToggleZoom
     ]
 );
 

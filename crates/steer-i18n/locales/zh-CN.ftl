@@ -1051,6 +1051,12 @@ canvas-sheet-unavailable = 这种 sheet 还没有可用的内容
 
 ### pi（画布与启动器入口）
 canvas-tab-pi = pi
+
+### canvas interactions（拖拽/dock/zoom，PLAN-ABSORB-08）
+canvas-tab-zoom = 放大
+canvas-tab-unzoom = 还原
+canvas-split-right = 向右分屏
+canvas-close-sheet = 关闭标签页
 launcher-action-pi = pi 会话
 pi-selector-mode = 模式
 pi-plan-title = 计划

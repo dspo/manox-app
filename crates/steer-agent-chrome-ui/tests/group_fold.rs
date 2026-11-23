@@ -94,11 +94,12 @@ fn mount(
                 ShellConfig {
                     main: Arc::new(StubMain { view: main }),
                     tool_kinds: vec![],
-                    panel_surface: None,
                     brand: None,
                     fixed_rows: vec![],
                     customizations: vec![],
                     hooks: HostHooks {
+                        on_toggle_dock: None,
+                        dock_open: None,
                         active_row: Some(Box::new(|_| active_row())),
                         ..Default::default()
                     },

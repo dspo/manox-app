@@ -274,9 +274,7 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
         assert!(common::wait_launcher(cx, &ws), "/exit lands the launcher");
     }
 
-    // ── the dock/right stash is keyed per container ─────────────────────
-    let fake_dock_view =
-        |cx: &mut TestAppContext| gpui::AnyView::from(common::ghostty_fixture(cx).view);
+    // ── the right stash is keyed per container ──────────────────────────
     let attach = |cx: &mut TestAppContext,
                   id: &str,
                   ws: &gpui::Entity<agent_ui::Workspace>,
@@ -293,36 +291,12 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     };
     attach(cx, "stash-a", &ws, window);
     attach(cx, "stash-b", &ws, window);
-    let owners = ws.read_with(cx, |ws, _| ws.diagnostic_live_owners());
+    let owner = ws.read_with(cx, |ws, _| ws.diagnostic_live_owner());
     assert_eq!(
-        owners,
-        (Some("stash-b".into()), Some("stash-b".into())),
-        "the live dock/right owner slots follow the foreground container"
+        owner,
+        Some("stash-b".into()),
+        "the live right owner slot follows the foreground container"
     );
-    let dock_view = fake_dock_view(cx);
-    shell.update(cx, |shell, cx| shell.set_panel_view(dock_view, cx));
-    cx.run_until_parked();
-    // Switching away parks the dock view under stash-b; coming back
-    // restores it — the per-container stash round trip through the REAL
-    // observer.
-    attach(cx, "stash-a", &ws, window);
-    wait_until(cx, "the dock view parked under stash-b", |cx| {
-        ws.read_with(cx, |ws, _| {
-            ws.diagnostic_dock_stash()
-                .iter()
-                .any(|(container, has_view)| container == "stash-b" && *has_view)
-        })
-    });
-    attach(cx, "stash-b", &ws, window);
-    wait_until(cx, "the dock view restored for stash-b", |cx| {
-        ws.read_with(cx, |ws, _| {
-            // The restore TAKES the view (the emptied entry stays — only a
-            // teardown reclaims the key), so the assertion reads the flag.
-            !ws.diagnostic_dock_stash()
-                .iter()
-                .any(|(container, has_view)| container == "stash-b" && *has_view)
-        })
-    });
 
     common::full_wiring_teardown(cx);
 }

@@ -202,3 +202,372 @@ async fn switching_containers_parks_and_restores_the_layout(cx: &mut TestAppCont
     let restored = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx));
     assert_eq!(restored, before, "the parked layout comes back as it was");
 }
+
+// ── the 08A gesture matrix ────────────────────────────────────────────────
+// Drags run the REAL pointer sequence (down → move → up) through the shell's
+// mounted canvas; the drop is `projection::drop_target`'s verdict, committed
+// once, through the host's single write path.
+
+use gpui::{Modifiers, MouseButton};
+
+/// A drag as a real pointer sequence: press, a nudge (the drag promotes while
+/// the pointer is still over the source), then travel, then drop.
+fn drag(
+    visual: &mut VisualTestContext,
+    from: gpui::Point<gpui::Pixels>,
+    to: gpui::Point<gpui::Pixels>,
+) {
+    use gpui::{Modifiers, MouseButton};
+    let nudge = gpui::point(from.x + gpui::px(4.), from.y + gpui::px(2.));
+    visual.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    visual.simulate_mouse_move(nudge, MouseButton::Left, Modifiers::default());
+    visual.cx.run_until_parked();
+    visual.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+    visual.cx.run_until_parked();
+}
+
+fn release(visual: &mut VisualTestContext, to: gpui::Point<gpui::Pixels>) {
+    use gpui::{Modifiers, MouseButton};
+    visual.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+    visual.cx.run_until_parked();
+}
+
+fn center(bounds: gpui::Bounds<gpui::Pixels>) -> gpui::Point<gpui::Pixels> {
+    gpui::point(
+        bounds.left() + bounds.size.width / 2.,
+        bounds.top() + bounds.size.height / 2.,
+    )
+}
+
+#[gpui::test]
+async fn a_right_edge_drag_splits_the_single_group(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, "drag-split", cx);
+    });
+    draw(&mut visual);
+    let session = workspace
+        .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx))
+        .into_iter()
+        .find(|sheet| sheet.starts_with("session:"))
+        .expect("the container opens with its session sheet");
+
+    // Drag the session tab toward the canvas's right edge: the outer ring is
+    // the outermost group's own edge — a SPLIT, never a dock.
+    let tab = visual
+        .debug_bounds(Box::leak(format!("canvas-tab-{session}").into_boxed_str()))
+        .expect("the session tab paints");
+    let card = visual
+        .debug_bounds("canvas-strip-home:drag-split")
+        .expect("the strip paints");
+    let edge = gpui::point(card.right() - gpui::px(8.), tab.bottom() + gpui::px(150.));
+    drag(&mut visual, center(tab), edge);
+
+    // Mid-drag: the source fades, the indicator paints, and the layout has
+    // not moved yet (a move-drag writes nothing).
+    let dragging = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_dragging(cx));
+    assert_eq!(
+        dragging.as_deref(),
+        Some(session.as_str()),
+        "the drag is live"
+    );
+    assert!(
+        visual.debug_bounds("canvas-drop-indicator").is_some(),
+        "the indicator paints mid-drag"
+    );
+    assert_eq!(
+        workspace
+            .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_groups(cx))
+            .len(),
+        1,
+        "the layout does not move until the drop"
+    );
+
+    release(&mut visual, edge);
+    let groups = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_groups(cx));
+    assert_eq!(groups.len(), 2, "the right-edge drop splits the group");
+    let sheets = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx));
+    assert_eq!(
+        sheets.len(),
+        sheets
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        "one instance per sheet"
+    );
+}
+
+#[gpui::test]
+async fn a_tab_drag_between_groups_moves_the_sheet(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, "drag-move", cx);
+    });
+    draw(&mut visual);
+    let session = workspace
+        .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx))
+        .into_iter()
+        .find(|sheet| sheet.starts_with("session:"))
+        .expect("the session sheet");
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_split_home(&session, cx);
+    });
+    draw(&mut visual);
+    let home = "home:drag-move".to_string();
+    assert_eq!(
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_groups(cx)),
+        [vec![session.clone()], vec![home.clone()]],
+        "the seeded split"
+    );
+
+    // Drop the start page ONTO the session group: it joins that group.
+    let tab = visual
+        .debug_bounds(Box::leak(format!("canvas-tab-{home}").into_boxed_str()))
+        .expect("the home tab paints");
+    let other = visual
+        .debug_bounds(Box::leak(format!("canvas-tab-{session}").into_boxed_str()))
+        .expect("the session tab paints");
+    let content = gpui::point(center(other).x, other.bottom() + gpui::px(120.));
+    drag(&mut visual, center(tab), content);
+    release(&mut visual, content);
+
+    let groups = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_groups(cx));
+    assert_eq!(groups.len(), 1, "the emptied source group collapses");
+    // A content drop appends (and shows): the dragged tab lands last.
+    assert_eq!(
+        groups[0],
+        [session, home],
+        "the drop joined the group, in slot order"
+    );
+}
+
+#[gpui::test]
+async fn the_dock_toggle_opens_a_terminal_into_an_empty_bottom(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, "dock-open", cx);
+    });
+    draw(&mut visual);
+
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_toggle_dock("bottom", cx);
+    });
+    let regions = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, _, _)| side == "bottom")
+        .expect("the region exists");
+    assert!(bottom.1, "the first toggle opens the region");
+    assert!(
+        bottom.2.iter().any(|sheet| sheet.starts_with("terminal:")),
+        "opening an empty bottom dock asks for a terminal, got {:?}",
+        bottom.2
+    );
+
+    // The dock's group paints its own strip (named by its sheet).
+    draw(&mut visual);
+    let terminal = bottom
+        .2
+        .iter()
+        .find(|sheet| sheet.starts_with("terminal:"))
+        .expect("the dock's terminal");
+    assert!(
+        visual
+            .debug_bounds(Box::leak(
+                format!("canvas-strip-{terminal}").into_boxed_str()
+            ))
+            .is_some()
+    );
+
+    // And the second toggle closes it, keeping the region (its sheets stay).
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_toggle_dock("bottom", cx);
+    });
+    let regions = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, _, _)| side == "bottom")
+        .expect("the region stays");
+    assert!(!bottom.1, "the second toggle closes");
+    assert!(
+        !bottom.2.is_empty(),
+        "a closed dock's sheets stay resources"
+    );
+}
+
+#[gpui::test]
+async fn a_dock_drag_sizes_and_collapses_below_the_floor(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, "dock-size", cx);
+    });
+    draw(&mut visual);
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_toggle_dock("bottom", cx);
+    });
+    draw(&mut visual);
+
+    // The dock band rides the seam; drag it downward past the floor: the
+    // dock collapses instead of going under 100pt.
+    let band = visual
+        .debug_bounds("canvas-dock-band-bottom")
+        .expect("the dock band paints");
+    let below = gpui::point(center(band).x, band.top() + gpui::px(120.));
+    drag(&mut visual, center(band), below);
+    let regions = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, ..)| side == "bottom")
+        .expect("the region");
+    assert!(
+        !bottom.1,
+        "dragging the band below the floor collapses the dock"
+    );
+
+    // Drag the closed edge upward: past the floor it reopens.
+    let band = visual
+        .debug_bounds("canvas-dock-band-bottom")
+        .expect("the closed edge still carries its band");
+    let up = gpui::point(center(band).x, band.top() - gpui::px(300.));
+    drag(&mut visual, center(band), up);
+    release(&mut visual, up);
+    let regions = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, ..)| side == "bottom")
+        .expect("the region");
+    assert!(bottom.1, "dragging a closed edge past the floor reopens it");
+    let size = workspace.read_with(&visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_dock_size("bottom", cx)
+    });
+    assert!(
+        size.is_some_and(|size| size >= 100.),
+        "the reopened dock records its dragged size, got {size:?}"
+    );
+}
+
+#[gpui::test]
+async fn a_zoom_toggles_and_survives_a_container_switch(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let alpha = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(alpha, "zoom-alpha", cx);
+    });
+    draw(&mut visual);
+    let session = workspace
+        .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx))
+        .into_iter()
+        .find(|sheet| sheet.starts_with("session:"))
+        .expect("the session sheet");
+
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_toggle_zoom(&session, cx);
+    });
+    assert_eq!(
+        workspace
+            .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx))
+            .as_deref(),
+        Some(session.as_str())
+    );
+
+    // A dock sheet never zooms, even by request.
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_toggle_dock("bottom", cx);
+    });
+    let terminal = workspace
+        .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx))
+        .iter()
+        .find(|(side, ..)| side == "bottom")
+        .and_then(|(_, _, panels)| panels.iter().find(|s| s.starts_with("terminal:")).cloned())
+        .expect("the dock's terminal");
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_toggle_zoom(&terminal, cx);
+    });
+    assert_eq!(
+        workspace
+            .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx))
+            .as_deref(),
+        Some(session.as_str()),
+        "a dock sheet never zooms"
+    );
+
+    // Switch away and back: the zoom comes home with the layout.
+    let beta = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(beta, "zoom-beta", cx);
+    });
+    draw(&mut visual);
+    assert_eq!(
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx)),
+        None,
+        "the parked canvas takes its zoom with it"
+    );
+    let alpha = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(alpha, "zoom-alpha", cx);
+    });
+    draw(&mut visual);
+    assert_eq!(
+        workspace
+            .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx))
+            .as_deref(),
+        Some(session.as_str()),
+        "the zoom restores with the container"
+    );
+    let _ = window;
+}
+
+#[gpui::test]
+async fn a_split_handle_drag_sizes_and_the_center_resets(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, "split-size", cx);
+    });
+    draw(&mut visual);
+    let session = workspace
+        .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx))
+        .into_iter()
+        .find(|sheet| sheet.starts_with("session:"))
+        .expect("the session sheet");
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_split_home(&session, cx);
+    });
+    draw(&mut visual);
+
+    // Drag the center's split band: the slots record real sizes.
+    let band = visual
+        .debug_bounds("canvas-split-band-root")
+        .expect("the split band paints");
+    let right = gpui::point(band.right() + gpui::px(180.), center(band).y);
+    drag(&mut visual, center(band), right);
+    release(&mut visual, right);
+    let sizes = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_center_sizes(cx));
+    assert!(
+        matches!(&sizes, Some(Some(values)) if values.len() == 2 && values[0] > 100.),
+        "the drag records the split's sizes, got {sizes:?}"
+    );
+
+    // The double-click resets to equal shares.
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_set_split_sizes(None, cx);
+    });
+    let sizes = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_center_sizes(cx));
+    assert_eq!(sizes, Some(None), "the reset lands None (equal shares)");
+}

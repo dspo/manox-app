@@ -489,7 +489,6 @@ pub struct Workspace {
     /// slots, and the CLI tabs' kill handles. Process-lifetime (the
     /// workspace's own), main-thread by construction.
     pub(crate) pane_stash: HashMap<String, crate::resource_registry::PaneEntry>,
-    pub(crate) live_dock_owner: Option<String>,
     pub(crate) live_right_owner: Option<String>,
     pub(crate) kill_handles: crate::resource_registry::KillHandles,
     /// The container-death cascade: the workspace subscribes to its own
@@ -1122,7 +1121,6 @@ impl Workspace {
             speech,
             _speech_events: speech_events,
             pane_stash: HashMap::new(),
-            live_dock_owner: None,
             live_right_owner: None,
             kill_handles: HashMap::new(),
             _died_sub: None,
@@ -3348,6 +3346,75 @@ impl Workspace {
         }
         self.confirm_archive_containers(vec![container_id.to_string()], None, window, cx);
     }
+
+    /// Whether the outgoing container still holds terminal sheets anywhere on
+    /// its canvas (the `/exit` waterfall's terminal probe).
+    pub(crate) fn container_has_canvas_terminal(&self, container_id: &str, cx: &App) -> bool {
+        let Some(canvas) = &self.canvas_view else {
+            return false;
+        };
+        !canvas.read(cx).terminal_sheets(container_id).is_empty()
+    }
+
+    /// Closes the outgoing container's canvas terminal sheets (the `/exit`
+    /// dock leg): their PTY views drop with the tabs, which is how the
+    /// subprocess tree ends.
+    pub(crate) fn close_container_terminal_sheets(
+        &mut self,
+        container_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(canvas) = self.canvas_view.clone() else {
+            return;
+        };
+        let sheets = canvas.update(cx, |canvas, _| canvas.terminal_sheets(container_id));
+        if sheets.is_empty() {
+            return;
+        }
+        canvas.update(cx, |canvas, cx| canvas.close_sheets_detached(&sheets, cx));
+    }
+
+    /// Whether the canvas's bottom dock is open (the chrome's render-time
+    /// read for the titlebar button — the dock is canvas state).
+    pub(crate) fn canvas_dock_open(&self, cx: &App) -> bool {
+        let Some(canvas) = &self.canvas_view else {
+            return false;
+        };
+        canvas
+            .read(cx)
+            .host
+            .layout()
+            .region(steer_canvas::layout::DockSide::Bottom)
+            .is_some_and(|r| r.open)
+    }
+
+    /// The dock toggle (the chrome's titlebar lands here through the host
+    /// hook): flips the region. An OPEN of an empty BOTTOM dock asks for a
+    /// terminal — opening the bottom dock means wanting one.
+    pub(crate) fn toggle_canvas_dock(&mut self, side_name: &str, cx: &mut Context<Self>) {
+        let Some(side) = steer_canvas::layout::DockSide::from_name(side_name) else {
+            return;
+        };
+        let canvas = self.ensure_canvas_view(cx);
+        canvas.update(cx, |canvas, cx| {
+            let was_open = canvas
+                .host
+                .layout()
+                .region(side)
+                .is_some_and(|region| region.open);
+            if canvas.host.toggle_dock(side) != crate::workspace::canvas_host::CanvasAction::Applied
+            {
+                return;
+            }
+            if !was_open
+                && side == steer_canvas::layout::DockSide::Bottom
+                && steer_canvas::layout::panels_in_region(canvas.host.layout(), side).is_empty()
+            {
+                canvas.open_terminal_into_dock(cx);
+            }
+            cx.notify();
+        });
+    }
 }
 
 impl Workspace {
@@ -3505,5 +3572,206 @@ impl Workspace {
                 canvas.host.close_sheet(sheet);
             });
         }
+    }
+
+    /// The drop gesture, encoded `group:{anchor}` / `tab:{anchor}:{index}` /
+    /// `split:{anchor}:{left|right|top|bottom}` / `dock:{side}` — the same
+    /// `drop_sheet` command the pointer drop runs, for the gesture matrix.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_drop(&mut self, sheet: &str, target: &str, cx: &mut Context<Self>) {
+        use steer_canvas::layout::{DockSide, DropTarget, SplitEdge};
+        let Some(target) = (|| {
+            let (kind, rest) = target.split_once(':')?;
+            match kind {
+                "group" => Some(DropTarget::Group {
+                    anchor: rest.to_string(),
+                }),
+                "tab" => {
+                    let (anchor, index) = rest.rsplit_once(':')?;
+                    Some(DropTarget::TabSlot {
+                        anchor: anchor.to_string(),
+                        index: index.parse().ok()?,
+                    })
+                }
+                "split" => {
+                    let (anchor, edge) = rest.rsplit_once(':')?;
+                    Some(DropTarget::Split {
+                        anchor: anchor.to_string(),
+                        side: match edge {
+                            "left" => SplitEdge::Left,
+                            "right" => SplitEdge::Right,
+                            "top" => SplitEdge::Top,
+                            _ => SplitEdge::Bottom,
+                        },
+                    })
+                }
+                "dock" => Some(DropTarget::Dock {
+                    side: DockSide::from_name(rest)?,
+                }),
+                _ => None,
+            }
+        })() else {
+            return;
+        };
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| {
+                if canvas.host.drop_sheet(sheet, target)
+                    == crate::workspace::canvas_host::CanvasAction::Applied
+                {
+                    canvas.prune_after_edit(cx);
+                }
+            });
+        }
+    }
+
+    /// The zoom toggle (the track double-click / context-menu / ⌘⇧↵ path),
+    /// for the gesture matrix.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_toggle_zoom(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| canvas.toggle_zoom(sheet, cx));
+        }
+    }
+
+    /// The canvas's measured size (the visual scenes aim staged drags with
+    /// it). `(0, 0)` before the first paint.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_size(&self, cx: &App) -> (f32, f32) {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| canvas.read(cx).measured_size())
+            .unwrap_or((0., 0.))
+    }
+
+    /// Stages a drag for the visual scenes (canvas-local pointer), without a
+    /// pointer and without a commit.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_stage_drag(
+        &mut self,
+        sheet: &str,
+        x: f32,
+        y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| canvas.stage_drag(sheet, x, y, cx));
+        }
+    }
+
+    /// The zoomed sheet, if any.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_zoomed(&self, cx: &App) -> Option<String> {
+        self.canvas_view
+            .as_ref()
+            .and_then(|canvas| canvas.read(cx).host.zoomed().map(str::to_string))
+    }
+
+    /// The live drag's sheet, if any (the source-fade assertion).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_dragging(&self, cx: &App) -> Option<String> {
+        self.canvas_view
+            .as_ref()
+            .and_then(|canvas| canvas.read(cx).dragging_id().map(str::to_string))
+    }
+
+    /// The dock toggle, through the REAL host-hook path (an open of an empty
+    /// bottom dock asks for a terminal), for the gesture matrix.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_toggle_dock(&mut self, side: &str, cx: &mut Context<Self>) {
+        self.toggle_canvas_dock(side, cx);
+    }
+
+    /// The canvas's dock regions: (side, open, panels), for the gesture
+    /// matrix.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_regions(&self, cx: &App) -> Vec<(String, bool, Vec<String>)> {
+        use steer_canvas::layout::{DockSide, panels_in_region};
+        let Some(canvas) = &self.canvas_view else {
+            return Vec::new();
+        };
+        let canvas = canvas.read(cx);
+        DockSide::ALL
+            .iter()
+            .filter_map(|side| {
+                let region = canvas.host.layout().region(*side)?;
+                Some((
+                    side.name().to_string(),
+                    region.open,
+                    panels_in_region(canvas.host.layout(), *side)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ))
+            })
+            .collect()
+    }
+
+    /// The center root's split sizes (`None` = equal shares).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_center_sizes(&self, cx: &App) -> Option<Option<Vec<f32>>> {
+        use steer_canvas::DockNode;
+        let Some(canvas) = &self.canvas_view else {
+            return None;
+        };
+        match &canvas.read(cx).host.layout().center {
+            DockNode::Split { sizes, .. } => Some(sizes.clone()),
+            _ => None,
+        }
+    }
+
+    /// Sets the center split's sizes (the handle drag's write face).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_set_split_sizes(
+        &mut self,
+        sizes: Option<Vec<f32>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| {
+                if canvas.host.set_split_sizes(&[], sizes)
+                    == crate::workspace::canvas_host::CanvasAction::Applied
+                {
+                    canvas.prune_after_edit(cx);
+                }
+            });
+        }
+    }
+
+    /// Sets a dock's size (the dock band drag's write face).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_set_dock_size(
+        &mut self,
+        side: &str,
+        size: f32,
+        cx: &mut Context<Self>,
+    ) {
+        use steer_canvas::layout::DockSide;
+        let Some(side) = DockSide::from_name(side) else {
+            return;
+        };
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| {
+                if canvas.host.set_dock_size(side, size)
+                    == crate::workspace::canvas_host::CanvasAction::Applied
+                {
+                    canvas.prune_after_edit(cx);
+                }
+            });
+        }
+    }
+
+    /// A dock's cross-edge size as the projection clamps it at the current
+    /// canvas size (`None` when the region is absent).
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_dock_size(&self, side: &str, cx: &App) -> Option<f32> {
+        use steer_canvas::layout::DockSide;
+        let side = DockSide::from_name(side)?;
+        let canvas = self.canvas_view.as_ref()?;
+        let canvas = canvas.read(cx);
+        canvas
+            .host
+            .layout()
+            .region(side)
+            .and_then(|region| region.size)
     }
 }

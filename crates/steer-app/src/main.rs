@@ -242,6 +242,12 @@ fn main() {
             // fresh empty thread in the same project — the explicit "background
             // this task" gesture. No-op when idle.
             gpui::KeyBinding::new("ctrl-b", agent_ui::BackgroundCurrentThread, None),
+            // Zoom the foreground center group (or leave zoom) — the canvas's
+            // "one sheet, full center" gesture.
+            #[cfg(target_os = "macos")]
+            gpui::KeyBinding::new("cmd-shift-enter", agent_ui::CanvasToggleZoom, None),
+            #[cfg(not(target_os = "macos"))]
+            gpui::KeyBinding::new("ctrl-shift-enter", agent_ui::CanvasToggleZoom, None),
             // Pop the last follow-up parked above the composer while a turn is
             // running (mirrors the per-item Remove affordance for the tail).
             #[cfg(target_os = "macos")]

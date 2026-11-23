@@ -28,7 +28,7 @@ use gpui::{
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use gpui_component::WindowExt as _;
 use steer_agent_chrome_ui::right_pane::{TabStore, ToolTab, ToolTabFactory};
-use steer_agent_chrome_ui::theme::{FG_DIM, IconAsset, icon, icons};
+use steer_agent_chrome_ui::theme::{FG_DIM, icon, icons};
 use steer_ext_agents::cx_session::CxProcess;
 
 static INSTANCE: AtomicU64 = AtomicU64::new(0);
@@ -1192,28 +1192,6 @@ fn brand_icon(svg_path: &'static str) -> AnyElement {
         .path(svg_path)
         .small()
         .into_any_element()
-}
-
-/// The bottom dock's terminal surface for the chrome assembly: each spawn
-/// roots at the FOREGROUND CONTAINER's attrs cwd (D6 inheritance), so the
-/// dock follows the conversation — or the external session holding the main
-/// column.
-pub struct ThreadTerminalPanelSurface;
-
-impl steer_agent_chrome_ui::PanelSurface for ThreadTerminalPanelSurface {
-    fn title(&self) -> SharedString {
-        steer_i18n::t("chrome-tab-ghostty").into()
-    }
-
-    fn icon(&self) -> IconAsset {
-        icons::TERMINAL
-    }
-
-    fn open(&self, _window: &mut Window, cx: &mut App) -> Result<gpui::AnyView, String> {
-        let attrs = thread_attrs_for_spawn(cx);
-        let view = spawn_standalone_terminal(&attrs.cwd, &attrs, cx)?;
-        Ok(gpui::AnyView::from(view))
-    }
 }
 
 /// The full registry for the chrome assembly's right pane (quick-action
