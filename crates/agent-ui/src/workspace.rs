@@ -69,6 +69,7 @@ mod chat_column;
 pub mod gallery;
 use chat_column::ChatColumn;
 use steer_agent_chat_ui::ask_card::AskCardSnapshot;
+mod chat_access;
 mod chips;
 mod composer_render;
 mod exit;
@@ -924,16 +925,16 @@ impl Workspace {
         self.chat.read(cx).store.clone()
     }
     pub(crate) fn chat_conversation(&self, cx: &App) -> Entity<ConversationState> {
-        self.chat.read(cx).conversation.clone()
+        chat_access::conversation(&self.chat, cx)
     }
     pub(crate) fn chat_input(&self, cx: &App) -> Entity<TextareaState> {
-        self.chat.read(cx).input_state.clone()
+        chat_access::input(&self.chat, cx)
     }
     pub(crate) fn chat_list_state(&self, cx: &App) -> ListState {
         self.chat.read(cx).list_state.clone()
     }
     pub(crate) fn chat_rail(&self, cx: &App) -> Entity<crate::views::context_rail::ContextRail> {
-        self.chat.read(cx).context_rail.clone()
+        chat_access::rail(&self.chat, cx)
     }
 
     /// The conversation column view, created on first use. It is a projection
