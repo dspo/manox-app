@@ -225,6 +225,10 @@ fn provenance_rows() -> Vec<InfoRow> {
     push("rustc", pins::rustc_version().map(SharedString::from));
     push("manox runtime", pins::manox_commit().map(short));
     push(
+        "pi distro",
+        pins::pi_distro_version().map(SharedString::from),
+    );
+    push(
         "gpui-component",
         pins::gpui_kit_pin().map(SharedString::from),
     );
@@ -450,6 +454,9 @@ mod tests {
         }
         if pins::manox_commit().is_some() {
             expected.push("manox runtime");
+        }
+        if pins::pi_distro_version().is_some() {
+            expected.push("pi distro");
         }
         expected.extend(["gpui-component", "gpui-pre"]);
         assert_eq!(labels, expected);
