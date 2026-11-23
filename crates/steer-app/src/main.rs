@@ -21,6 +21,7 @@ use std::borrow::Cow;
 
 mod about;
 mod badge;
+mod instance;
 mod pins;
 mod tray;
 
@@ -115,6 +116,10 @@ fn main() {
     if let Err(err) = steer_paths::install() {
         eprintln!("steer: state-root install failed: {err}");
     }
+
+    // A second launch focuses the running instance and exits (it would
+    // otherwise contend for the same state root, sessions and window).
+    instance::guard();
 
     tracing_subscriber::fmt()
         .with_env_filter(
