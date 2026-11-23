@@ -107,6 +107,7 @@ impl Workspace {
 }
 
 impl Workspace {
+    /// The running sub-agent rows of the foreground session's fold.
     pub(crate) fn running_subagents(
         &self,
         cx: &App,
