@@ -3417,6 +3417,21 @@ impl Workspace {
             .unwrap_or_default()
     }
 
+    /// The canvas's groups (each one's sheet ids, in tab order), for the
+    /// gesture matrix. Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_groups(&self, cx: &App) -> Vec<Vec<String>> {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| {
+                steer_canvas::layout::group_panels(canvas.read(cx).host.layout())
+                    .into_iter()
+                    .map(|group| group.into_iter().map(str::to_string).collect())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The canvas's terminal gesture (the strip's terminal ＋), for the
     /// gesture matrix.
     #[cfg(feature = "test-support")]

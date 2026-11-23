@@ -118,6 +118,28 @@ pub fn panel_ids(layout: &DockLayout) -> Vec<&str> {
     ids
 }
 
+/// Every tab group's sheet ids, in tree order (empty groups excluded).
+pub fn group_panels(layout: &DockLayout) -> Vec<Vec<&str>> {
+    let mut groups = Vec::new();
+    collect_groups(&layout.center, &mut groups);
+    groups
+}
+
+fn collect_groups<'a>(node: &'a DockNode, out: &mut Vec<Vec<&'a str>>) {
+    match node {
+        DockNode::Tabs { panels, .. } => {
+            if !panels.is_empty() {
+                out.push(panels.iter().map(String::as_str).collect());
+            }
+        }
+        DockNode::Split { children, .. } => {
+            for child in children {
+                collect_groups(child, out);
+            }
+        }
+    }
+}
+
 fn collect_panels<'a>(node: &'a DockNode, out: &mut Vec<&'a str>) {
     match node {
         DockNode::Tabs { panels, .. } => out.extend(panels.iter().map(String::as_str)),

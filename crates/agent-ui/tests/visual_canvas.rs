@@ -114,6 +114,12 @@ mod macos {
             shot.width(),
             shot.height()
         );
+        // The shot's container id is per-run, but the save pump may have landed
+        // its layout under the real state root during the settle passes: it is
+        // this harness's only trace, so remove it.
+        if let Some(layout) = steer_canvas::persist::layout_path(&container) {
+            let _ = std::fs::remove_file(layout);
+        }
     }
 
     fn settle(cx: &mut VisualTestAppContext) {
