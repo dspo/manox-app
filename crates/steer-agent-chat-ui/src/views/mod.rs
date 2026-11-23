@@ -4,6 +4,7 @@ pub mod activity_chain;
 pub mod completion;
 pub mod context_rail;
 pub mod message;
+pub mod pi;
 pub mod popup_menu;
 pub mod subagents;
 pub mod tool_cards;

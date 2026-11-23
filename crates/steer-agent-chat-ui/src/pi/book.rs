@@ -36,6 +36,26 @@ impl PiBook {
         self.sessions.get(id)
     }
 
+    /// The mutable view, for the store's own lifecycle writes.
+    pub fn view_mut(&mut self, id: &str) -> Option<&mut PiSessionView> {
+        self.sessions.get_mut(id)
+    }
+
+    /// Sets the follow-up queue depth the composer strip shows.
+    pub fn set_queued(&mut self, id: &str, queued: usize) {
+        if let Some(view) = self.sessions.get_mut(id) {
+            view.queued = queued;
+        }
+    }
+
+    /// Records an error without changing the lifecycle face (a config call
+    /// that failed leaves the session usable).
+    pub fn note_error(&mut self, id: &str, reason: &str) {
+        if let Some(view) = self.sessions.get_mut(id) {
+            view.error = Some(reason.to_owned());
+        }
+    }
+
     /// Every open session, in id order.
     pub fn sessions(&self) -> impl Iterator<Item = &PiSessionView> {
         self.sessions.values()

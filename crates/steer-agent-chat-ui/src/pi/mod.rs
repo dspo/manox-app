@@ -23,6 +23,7 @@
 pub mod book;
 pub mod runtime;
 pub mod session;
+pub mod store;
 pub mod transcript;
 
 pub use book::PiBook;
@@ -31,6 +32,7 @@ pub use session::{
     PendingRequest, PiBanner, PiBannerEntry, PiBannerWarning, PiCommand, PiConfigChoice,
     PiConfigOption, PiMode, PiSessionState, PiSessionView, PiUsage,
 };
+pub use store::{AcpStore, fallback_title};
 pub use transcript::{
     AssistantEntry, DiffBlock, Draft, Entry, NoteEntry, PiMeta, PiModel, ToolEntry, ToolMeta,
     ToolStatus, Transcript, UserEntry,
