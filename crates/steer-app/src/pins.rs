@@ -38,6 +38,13 @@ pub fn gpui_kit_pin() -> Option<String> {
     )
 }
 
+/// The pi harness's distro pin (`@earendil-works/pi-coding-agent`), read from
+/// `pi-harness/package.json` at build time — the same number the sidecar's
+/// check-version keeps aligned with its `src/version.ts`.
+pub fn pi_distro_version() -> Option<&'static str> {
+    non_empty(option_env!("STEER_PI_DISTRO_VERSION"))
+}
+
 /// The pinned `gpui-pre` snapshot (the `gpui` package alias), as the About row
 /// shows it.
 pub fn gpui_pin() -> Option<String> {

@@ -9882,6 +9882,7 @@ dependencies = [
  "steer-acp",
  "steer-components",
  "steer-i18n",
+ "steer-paths",
  "tokio",
  "tracing",
  "uuid",
