@@ -184,8 +184,14 @@ debug = "line-tables-only"
 # gpui needs opt-level 3 even in debug, or rendering crawls. Profile keys use
 # the real package names (gpui-pre*), not the workspace alias.
 [profile.dev.package]
+# Dependencies at O1: inlining collapses their debug-build function count,
+# keeping __eh_frame below ld64's 16MB compact-unwind offset ceiling — past
+# it, panic unwinding in dev falls back to the slow DWARF walk. Named
+# entries below still win over the wildcard.
+"*" = { opt-level = 1 }
 gpui-pre = { opt-level = 3 }
 gpui-pre-platform = { opt-level = 3 }
 # Mermaid's parser/layout runs during markdown conversion (including every
 # streamed append), so unoptimized code shows up as a slow diagram.
 mermaid-rs-renderer = { opt-level = 3 }
+
