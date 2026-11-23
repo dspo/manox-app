@@ -497,6 +497,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
             },
             "DeepSeek".into(),
             0,
+            steer_agent_chat_ui::transcript::ItemKey::Optimistic(0),
             steer_agent_chat_ui::host::noop_host(),
         )
     });
@@ -512,6 +513,7 @@ async fn list_remeasures_real_message_item_when_markdown_child_grows(cx: &mut Te
             },
             "DeepSeek".into(),
             1,
+            steer_agent_chat_ui::transcript::ItemKey::Optimistic(1),
             steer_agent_chat_ui::host::noop_host(),
         )
     });
@@ -625,6 +627,7 @@ fn production_rows(cx: &mut TestAppContext) -> Vec<gpui::Entity<MessageItem>> {
                 kind,
                 "deepseek-v4-flash".into(),
                 ix,
+                steer_agent_chat_ui::transcript::ItemKey::Optimistic(ix),
                 steer_agent_chat_ui::host::noop_host(),
             )
         });

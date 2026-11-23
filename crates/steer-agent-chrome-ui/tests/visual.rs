@@ -36,6 +36,7 @@ mod macos {
     use steer_agent_chat_ui::ask_card::{AskCardOption, AskCardQuestion, AskCardSnapshot};
     use steer_agent_chat_ui::conversation::{ConvItem, ToolCallItem};
     use steer_agent_chat_ui::host::noop_host;
+    use steer_agent_chat_ui::transcript::ItemKey;
     use steer_agent_chat_ui::views::message::MessageItem;
     use steer_agent_chrome_ui::right_pane::TabStore;
     use steer_agent_chrome_ui::session_list::{SessionRowKind, SessionStatus};
@@ -483,7 +484,15 @@ mod macos {
     impl ChatPreviewStub {
         fn new(cx: &mut gpui::Context<Self>) -> Self {
             let mk = |cx: &mut gpui::Context<Self>, item: ConvItem, role: &str| {
-                cx.new(|_| MessageItem::new(item, role.to_string(), 0, noop_host()))
+                cx.new(|_| {
+                    MessageItem::new(
+                        item,
+                        role.to_string(),
+                        0,
+                        ItemKey::Optimistic(0),
+                        noop_host(),
+                    )
+                })
             };
             // `CHROME_ASK=<page>` swaps the seeded transcript for a pending
             // `AskUserQuestion` card on that page (0-based), `CHROME_ASK=answered`
@@ -581,6 +590,7 @@ mod macos {
                     }),
                     "GLM-5.3".into(),
                     0,
+                    ItemKey::Optimistic(0),
                     noop_host(),
                 )
             });
@@ -598,6 +608,7 @@ mod macos {
                         },
                         String::new(),
                         0,
+                        ItemKey::Optimistic(0),
                         noop_host(),
                     )
                 }),
@@ -645,6 +656,7 @@ mod macos {
                     }),
                     "GLM-5.3".into(),
                     0,
+                    ItemKey::Optimistic(0),
                     noop_host(),
                 )
             });
@@ -658,6 +670,7 @@ mod macos {
                         },
                         String::new(),
                         1,
+                        ItemKey::Optimistic(1),
                         noop_host(),
                     )
                 }),
