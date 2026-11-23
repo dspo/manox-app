@@ -1274,6 +1274,30 @@ fn session_row(
                 ),
         );
 
+    // The selected row's brand edge (plan 04 §3.5): a 3px accent bar hugging
+    // the card's left edge. It is an absolutely-positioned overlay with a
+    // transparent twin in every other state, so selection never shifts the
+    // row's content.
+    let row = row.relative().child(
+        gpui::div()
+            .absolute()
+            .left_0()
+            .top_1()
+            .bottom_1()
+            .w(gpui::px(3.))
+            .rounded(gpui::px(1.5))
+            .bg(if selected {
+                ACCENT
+            } else {
+                gpui::Rgba {
+                    r: 0.,
+                    g: 0.,
+                    b: 0.,
+                    a: 0.,
+                }
+            }),
+    );
+
     // Row surface (checked / selected card / hover / rest) + the 1px stroke
     // kept transparent in the unselected states so all share one height.
     if checked {
