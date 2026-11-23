@@ -3353,12 +3353,13 @@ impl Workspace {
         // the canvas paints inside the workspace's own update, so a title
         // read through `self` would take a second lease.
         let titles = crate::workspace::canvas_view::sheet_titles(self.chat.clone());
-        let view = cx.new(|_| {
+        let view = cx.new(|cx| {
             crate::workspace::canvas_view::CanvasView::new(
                 crate::workspace::canvas_host::CanvasHost::new(
                     crate::workspace::canvas_view::registry(titles, pi_store.clone()),
                 ),
                 pi_store,
+                cx,
             )
         });
         view.update(cx, |view, cx| view.set_column(column, cx));
@@ -3584,6 +3585,17 @@ impl Workspace {
                 keys
             })
             .unwrap_or_default()
+    }
+
+    /// Drops the canvas entity (the workspace held its last strong
+    /// reference). The release-flush regression drives the entity-gone path
+    /// the debounced task cannot serve. Test-support gesture face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_release_canvas(&mut self) {
+        self.canvas_view = None;
+        // The event subscription holds the canvas only weakly; dropping it
+        // too keeps the release unambiguous.
+        self._canvas_events = None;
     }
 
     /// The multiplexer's shared AHP store, for tests that plant fold state

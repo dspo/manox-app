@@ -22,6 +22,7 @@ use gpui_component::{ElementExt as _, Icon, Sizable as _, h_flex, v_flex};
 
 use steer_canvas::id::{home_sheet_id, sheet_kind, terminal_resource, terminal_sheet_id};
 use steer_canvas::projection::{self, GroupFrame};
+use steer_canvas::state::CanvasSnapshot;
 
 use crate::views::centered;
 use crate::workspace::canvas_host::{CanvasAction, CanvasHost};
@@ -66,6 +67,14 @@ pub struct CanvasView {
     /// never reads the workspace itself — that would take a second lease while
     /// the shell is updating it).
     cwd: std::path::PathBuf,
+    /// The newest edit not known to be on disk: the host's pending save,
+    /// kept here so the debounce is not the only writer. A container leaving
+    /// the foreground lands it before its canvas parks, an archive retires
+    /// it, and the view's release lands whatever is left.
+    pending_save: Option<(u64, String, CanvasSnapshot)>,
+    /// The release face of [`Self::pending_save`] — dropping the entity must
+    /// not drop its last unsaved edit. Held so the listener stays live.
+    _release_flush: gpui::Subscription,
     /// The card's interior size, measured at prepaint (the first frame of a
     /// fresh window falls back to the window's).
     size: Rc<std::cell::Cell<Option<Size<Pixels>>>>,
@@ -201,7 +210,15 @@ fn glyph_icon(glyph: &str) -> gpui_kit_assets::IconName {
 }
 
 impl CanvasView {
-    pub(crate) fn new(host: CanvasHost, pi_store: Entity<AcpStore>) -> Self {
+    pub(crate) fn new(
+        host: CanvasHost,
+        pi_store: Entity<AcpStore>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // The entity's last flush: when it is released (app exit, workspace
+        // teardown) the debounced task dies with it, so the pending save
+        // lands here instead of never.
+        let release_flush = cx.on_release(|view, _| view.flush_pending_save());
         Self {
             host,
             column: None,
@@ -209,6 +226,8 @@ impl CanvasView {
             pi_views: HashMap::new(),
             pi_store,
             cwd: std::env::current_dir().unwrap_or_default(),
+            pending_save: None,
+            _release_flush: release_flush,
             size: Rc::new(std::cell::Cell::new(None)),
         }
     }
@@ -228,6 +247,10 @@ impl CanvasView {
         cx: &mut Context<Self>,
     ) {
         self.cwd = cwd;
+        // The container leaving the foreground lands its newest edit before
+        // its canvas parks: the switch's generation bump would otherwise
+        // retire the debounced write and lose the edit.
+        self.flush_pending_save();
         let saved = persist::read_canvas(container_id).map(|file| file.snapshot());
         let alive = |_sheet: &str| true;
         self.host.switch_container(container_id, saved, alive);
@@ -355,31 +378,51 @@ impl CanvasView {
 
     /// Shows the scratch canvas (the shell's pre-container surface).
     pub(crate) fn show_scratch(&mut self, cx: &mut Context<Self>) {
+        // The container leaving the foreground parks here; its newest edit
+        // lands before the park (the switch retires the debounced write).
+        self.flush_pending_save();
         self.host.show_scratch();
         cx.notify();
     }
 
-    /// Schedules the debounced layout write (the newest edit wins).
+    /// Schedules the debounced layout write (the newest edit wins). The
+    /// pending save is kept on the view so the newest edit can land even when
+    /// its debounce window is cut short — a container switch flushes it
+    /// before parking, an archive retires it, and the view's release flushes
+    /// whatever is left.
     fn after_edit(&mut self, cx: &mut Context<Self>) {
-        let Some((generation, container_id, snapshot)) = self.host.pending_save() else {
+        let Some(pending) = self.host.pending_save() else {
             return;
         };
+        let generation = pending.0;
+        self.pending_save = Some(pending);
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(super::canvas_host::SAVE_DEBOUNCE)
                 .await;
             let _ = this.update(cx, |view, _| {
+                // A newer edit replaced this one's pending save (its own task
+                // lands it); the switch / forget / release faces own the rest.
                 if view.host.save_generation() != generation {
                     return;
                 }
-                let file: persist::CanvasFile =
-                    persist::CanvasFile::new(container_id, snapshot.layout, snapshot.zoom);
-                if let Err(error) = persist::write_canvas(&file) {
-                    tracing::warn!(%error, "canvas layout write failed");
-                }
+                view.flush_pending_save();
             });
         })
         .detach();
+    }
+
+    /// Writes the pending save now. The generation guard keeps a superseded
+    /// snapshot from ever overwriting a newer write — the newest edit for a
+    /// container wins, whichever face landed it.
+    fn flush_pending_save(&mut self) {
+        let Some((generation, container_id, snapshot)) = self.pending_save.take() else {
+            return;
+        };
+        if generation != self.host.save_generation() {
+            return;
+        }
+        write_layout_snapshot(&container_id, &snapshot);
     }
 
     /// The canvas page: every group's tab strip and content area.
@@ -749,6 +792,20 @@ impl CanvasView {
     /// ONE archive landing (`Workspace::archive_containers`) is the caller,
     /// so a container forgotten here can never come back through a gesture.
     pub(crate) fn forget_container(&mut self, container_id: &str, cx: &mut Context<Self>) {
+        // A pending save naming the archived container retires — an archive
+        // must not leave its file behind. One naming a survivor (a batch
+        // archive of parked containers while the shown canvas is dirty) lands
+        // now: the forget's generation bump below would otherwise retire it
+        // unlanded.
+        let pending_container = self
+            .pending_save
+            .as_ref()
+            .map(|(_, pending, _)| pending.clone());
+        match pending_container.as_deref() {
+            Some(pending) if pending == container_id => self.pending_save = None,
+            Some(_) => self.flush_pending_save(),
+            None => {}
+        }
         // The container's pi sessions must be read before the state forgets
         // the layouts that name them.
         let pi_sheets = self.container_pi_sheets(container_id);
@@ -831,4 +888,14 @@ fn pi_kind(pi_store: Entity<AcpStore>) -> steer_canvas::SheetKindSpec {
 /// The session a `pi-session:` sheet id names.
 fn pi_session_of_sheet(sheet: &str) -> &str {
     sheet.strip_prefix("pi-session:").unwrap_or(sheet)
+}
+
+/// Writes one canvas snapshot to its container's layout file (the save
+/// pump's only write, debounced or flushed).
+fn write_layout_snapshot(container_id: &str, snapshot: &CanvasSnapshot) {
+    let file: persist::CanvasFile =
+        persist::CanvasFile::new(container_id, snapshot.layout.clone(), snapshot.zoom.clone());
+    if let Err(error) = persist::write_canvas(&file) {
+        tracing::warn!(%error, "canvas layout write failed");
+    }
 }

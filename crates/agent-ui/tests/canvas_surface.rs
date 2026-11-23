@@ -156,8 +156,14 @@ async fn closing_the_last_tab_by_click_archives_the_container(cx: &mut TestAppCo
         vec!["home:scratch".to_string()],
         "the shell rests on the scratch start page"
     );
-    // The debounced layout write must never leave the archived container's
-    // file behind (the harness writes under the real state root).
+    // The pending save the last close scheduled (the start page reopen) is
+    // retired with the archive: no layout file haunts the container's
+    // revival (the harness writes under the real state root).
+    assert_eq!(
+        steer_canvas::persist::read_canvas(container),
+        None,
+        "the archive leaves no layout file behind"
+    );
     if let Some(path) = steer_canvas::persist::layout_path(container) {
         let _ = std::fs::remove_file(path);
     }
@@ -491,4 +497,86 @@ async fn switching_containers_parks_and_restores_the_layout(cx: &mut TestAppCont
     draw(&mut visual);
     let restored = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx));
     assert_eq!(restored, before, "the parked layout comes back as it was");
+}
+
+/// The save pump's park leg: an edit inside the debounce window lands when
+/// its container leaves the foreground. The switch's generation bump would
+/// otherwise retire the debounced write and the just-opened tab would come
+/// back after a restart.
+#[gpui::test]
+async fn an_edit_inside_the_debounce_window_lands_when_the_container_parks(
+    cx: &mut TestAppContext,
+) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let first = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(first, "save-alpha", cx);
+    });
+    draw(&mut visual);
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_open_terminal(cx)
+    });
+
+    // The switch happens well inside the 400ms debounce window.
+    let second = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(second, "save-beta", cx);
+    });
+    draw(&mut visual);
+
+    let saved = steer_canvas::persist::read_canvas("save-alpha")
+        .expect("the parked container's newest edit landed on disk");
+    let sheets: Vec<String> = steer_canvas::layout::panel_ids(&saved.layout)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        sheets.iter().any(|sheet| sheet.starts_with("terminal:")),
+        "the edit that opened a terminal is in the file, got {sheets:?}"
+    );
+    if let Some(path) = steer_canvas::persist::layout_path("save-alpha") {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(path) = steer_canvas::persist::layout_path("save-beta") {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The save pump's release leg: the entity's last pending save lands when the
+/// entity is released, even though its debounced task dies with it.
+#[gpui::test]
+async fn releasing_the_canvas_flushes_its_pending_save(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let container = "save-release";
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, container, cx);
+    });
+    draw(&mut visual);
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_open_terminal(cx)
+    });
+
+    // Dropping the workspace's handle releases the canvas; the release
+    // listener fires at the next effect flush.
+    workspace.update(&mut visual.cx, |ws, _| ws.diagnostic_release_canvas());
+    visual.cx.run_until_parked();
+
+    let saved = steer_canvas::persist::read_canvas(container)
+        .expect("the released canvas flushed its pending save");
+    let sheets: Vec<String> = steer_canvas::layout::panel_ids(&saved.layout)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        sheets.iter().any(|sheet| sheet.starts_with("terminal:")),
+        "the edit that opened a terminal is in the file, got {sheets:?}"
+    );
+    if let Some(path) = steer_canvas::persist::layout_path(container) {
+        let _ = std::fs::remove_file(path);
+    }
 }
