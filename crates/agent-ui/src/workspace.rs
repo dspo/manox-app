@@ -387,9 +387,17 @@ pub struct Workspace {
     /// the session-scoped surface a canvas mounts as a sheet body. Created on
     /// the first frame — it is a view over `chat`, not a state owner.
     pub(crate) column_view: Option<Entity<crate::workspace::column_view::ChatColumnView>>,
-    /// The container canvas (plan β). Created on first open; a projection over
+    /// The container canvas. Created on first open; a projection over
     /// the canvas host's state, never a state owner.
     pub(crate) canvas_view: Option<Entity<crate::workspace::canvas_view::CanvasView>>,
+    /// The canvas's archive requests (the event face: a canvas gesture holds
+    /// the canvas's lease, so the workspace serves the request from the
+    /// subscription, where the canvas is no longer leased).
+    _canvas_events: Option<gpui::Subscription>,
+    /// The window this workspace renders in. The canvas event handler runs
+    /// inside the workspace's own lease, so the confirm dialog an archive
+    /// request may need opens at the effect boundary through this handle.
+    window: gpui::AnyWindowHandle,
     /// The pi harness's session store (sheet data plane). Created with the
     /// canvas — the `pi-session` sheets' state and processes live here, not in
     /// a view.
@@ -974,6 +982,7 @@ impl Workspace {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let window_handle = window.window_handle();
         // The launch directory is the conversation's anchor: a terminal
         // launch from a project dir (e.g. `cargo run` inside the repo)
         // starts a conversation that belongs to that project — the claim's
@@ -1113,6 +1122,7 @@ impl Workspace {
         let mut ws = Self {
             cwd: cwd.clone(),
             nav: NavHistory::default(),
+            window: window_handle,
             multiplexer,
             unsent: crate::unsent::UnsentOutbox::new(),
             attached_sessions: std::collections::HashSet::new(),
@@ -1142,6 +1152,7 @@ impl Workspace {
             dialog: None,
             column_view: None,
             canvas_view: None,
+            _canvas_events: None,
             pi_store: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
@@ -3319,34 +3330,9 @@ fn wire_commands_has(commands: &serde_json::Value, name: &str, kind: &str) -> bo
         })
 }
 
-#[cfg(test)]
-mod tests;
-
 impl Workspace {
     pub(crate) fn model_label(&self, cx: &App) -> String {
         chat_access::model_label(&self.chat, cx)
-    }
-}
-
-impl Workspace {
-    /// The canvas asked for an archive: the container lost its last sheet.
-    ///
-    /// The canvas only reports the fact; the archive is the workspace's write
-    /// (confirm-or-direct, the same path the sidebar's archive gesture takes).
-    pub(crate) fn canvas_auto_archive(
-        &mut self,
-        container_id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // The canvas state drops the gone container's bookkeeping first, so a
-        // revived container never inherits a stale parked canvas.
-        if let Some(canvas) = &self.canvas_view {
-            canvas.update(cx, |canvas, _| {
-                canvas.host.forget_container(container_id);
-            });
-        }
-        self.confirm_archive_containers(vec![container_id.to_string()], None, window, cx);
     }
 }
 
@@ -3363,7 +3349,6 @@ impl Workspace {
         }
         let column = self.ensure_column_view(cx);
         let pi_store = self.ensure_pi_store(cx);
-        let workspace = cx.weak_entity();
         // Titles come from the conversation entity, not from this workspace:
         // the canvas paints inside the workspace's own update, so a title
         // read through `self` would take a second lease.
@@ -3373,11 +3358,19 @@ impl Workspace {
                 crate::workspace::canvas_host::CanvasHost::new(
                     crate::workspace::canvas_view::registry(titles, pi_store.clone()),
                 ),
-                workspace,
                 pi_store,
             )
         });
         view.update(cx, |view, cx| view.set_column(column, cx));
+        // The archive requests ride the event face: the canvas emits while a
+        // gesture holds its lease, and this subscription is where the canvas
+        // is no longer leased — the one context from which the workspace may
+        // re-enter it for the teardown.
+        self._canvas_events = Some(cx.subscribe(&view, |this, _, event, cx| match event {
+            crate::workspace::canvas_view::CanvasEvent::AutoArchive(container_id) => {
+                this.canvas_archive_requested(container_id, cx);
+            }
+        }));
         self.canvas_view = Some(view.clone());
         view
     }
@@ -3385,7 +3378,28 @@ impl Workspace {
     /// Keeps the canvas on the foreground container. The container view is the
     /// canvas: this runs on every column render, and is a no-op unless the
     /// foreground changed.
+    ///
+    /// A dead foreground owns no canvas. The live case is the canvas's own
+    /// last-close archive: the container stays bound as the foreground while
+    /// the archive lands, and the forget below keeps the death from being
+    /// undone — without it, the first frame after the archive would re-open
+    /// the container the archive path just erased, and the frame after the
+    /// receipt echo would park that ghost layout behind a container that no
+    /// longer exists. The forget is idempotent (it also reclaims the
+    /// container's PTY views and pi sessions, in case a frame raced the
+    /// archive landing). The chat binding itself is left alone — the leaving
+    /// gestures land the launcher, and the archive is reversible.
     pub(crate) fn sync_canvas(&mut self, cx: &mut Context<Self>) {
+        let dead = self
+            .foreground_container_id(cx)
+            .filter(|id| !self.container_alive(id, cx));
+        if let Some(dead) = dead {
+            let canvas = self.ensure_canvas_view(cx);
+            if canvas.read(cx).holds_container(&dead) {
+                canvas.update(cx, |canvas, cx| canvas.forget_container(&dead, cx));
+            }
+            return;
+        }
         let foreground = self.foreground_container_id(cx);
         let session = self.chat_store(cx).map(|(_, sid)| sid);
         let cwd = foreground
@@ -3506,4 +3520,97 @@ impl Workspace {
             });
         }
     }
+
+    /// The canvas's pi gesture (the strip's pi ＋), for the pi close-order
+    /// regression. Test-support read/gesture face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_open_pi(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.cwd.clone();
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| canvas.open_pi_session(cwd, cx));
+        }
+    }
+
+    /// The shown container (or the scratch canvas), the layout and the parked
+    /// set taken together: the sheets the canvas still holds anywhere. The
+    /// archive-cleanup regressions assert against this union. Test-support
+    /// read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_held_sheet_ids(&self, cx: &App) -> Vec<String> {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| {
+                let canvas = canvas.read(cx);
+                steer_canvas::projection::open_sheet_ids(canvas.host.layout(), canvas.host.held())
+            })
+            .unwrap_or_default()
+    }
+
+    /// The container whose canvas is shown (`None` = the scratch surface).
+    /// Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_active_container(&self, cx: &App) -> Option<String> {
+        self.canvas_view
+            .as_ref()
+            .and_then(|canvas| canvas.read(cx).host.active_container())
+            .map(str::to_string)
+    }
+
+    /// The terminal sheets' live PTY views, keyed by sheet id. Test-support
+    /// read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_terminal_views(&self, cx: &App) -> Vec<String> {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| {
+                let mut keys: Vec<String> =
+                    canvas.read(cx).host_terminals().keys().cloned().collect();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default()
+    }
+
+    /// The pi sheets' live body views, keyed by sheet id. Test-support read
+    /// face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_pi_views(&self, cx: &App) -> Vec<String> {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| {
+                let mut keys: Vec<String> =
+                    canvas.read(cx).host_pi_views().keys().cloned().collect();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default()
+    }
+
+    /// The multiplexer's shared AHP store, for tests that plant fold state
+    /// (the archive confirm gate's live dependents). Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_mux_store(
+        &self,
+        cx: &App,
+    ) -> gpui::Entity<steer_agent_chat_ui::ahp_store::AhpStore> {
+        self.multiplexer.read(cx).store()
+    }
+
+    /// THE container archive landing, for the archive-cleanup regressions
+    /// (the sidebar gestures reach it through the confirm-or-direct entry,
+    /// which integration tests cannot name). Test-support gesture face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_archive_containers(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        self.archive_containers(&ids, cx);
+    }
+
+    /// The pi harness's session store, for the pi close-order regression.
+    /// Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_pi_store(&self) -> Option<gpui::Entity<steer_agent_chat_ui::pi::AcpStore>> {
+        self.pi_store.clone()
+    }
 }
+
+#[cfg(test)]
+mod tests;

@@ -151,8 +151,15 @@ impl CanvasHost {
 
     /// Drops everything kept for a gone container. Answers whether it was shown
     /// (the caller then switches somewhere else).
+    ///
+    /// The generation bump retires every save scheduled before the forget:
+    /// an archive request opens the start page and schedules a write, so a
+    /// confirmed archive must not leave that container a home-page-only
+    /// layout file behind (it would haunt the container's revival).
     pub fn forget_container(&mut self, container_id: &str) -> bool {
-        self.state.forget_container(container_id)
+        let shown = self.state.forget_container(container_id);
+        self.save_generation += 1;
+        shown
     }
 
     /// The shown canvas as it would be saved.

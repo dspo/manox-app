@@ -144,15 +144,46 @@ impl Workspace {
         });
     }
 
-    /// THE container archive path (plan A6): every archive gesture's effects
-    /// ride this one sequence, replacing the three retired optimistic-drop
-    /// sites. 1. the `x-manox/teardown` archive command — the path itself —
-    /// with the store's optimistic whole-tree row drop and the object rows'
-    /// archived bits (the draft refill must never resurrect a retired
-    /// container); 2. the thread-store mirror's bit (the badge/mirror
-    /// faces); 3. the sidebar's shell-side row drop; 4. the predicate-flip
-    /// event and the resource reclaim under each container's key (the A2
-    /// teardown).
+    /// The canvas's archive request (the shown canvas lost its last sheet).
+    /// The canvas only reports the fact — the archive is the workspace's
+    /// write, on the confirm-or-direct entry the sidebar's gesture takes.
+    /// This handler runs from the canvas-event subscription, so the canvas is
+    /// no longer leased and `archive_containers`' canvas landing may re-enter
+    /// it.
+    pub(crate) fn canvas_archive_requested(&mut self, container_id: &str, cx: &mut Context<Self>) {
+        let ids = vec![container_id.to_string()];
+        if self.live_dependent_lines(&ids, cx).is_empty() {
+            self.archive_containers(&ids, cx);
+            return;
+        }
+        // Live dependents gate the archive behind the confirm dialog, which
+        // needs the window. This callback holds the workspace's lease, so the
+        // dialog opens at the effect boundary (the same face `defer_shell`
+        // uses), where the workspace is updatable again. A cancel here keeps
+        // the container — the canvas is sitting on its start page, the state
+        // the request put it in before asking.
+        let ws = cx.entity();
+        let window = self.window;
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.confirm_archive_containers(ids, None, window, cx);
+                });
+            });
+        });
+    }
+
+    /// THE container archive path: every archive gesture's effects ride this
+    /// one sequence, replacing the three retired optimistic-drop sites. 1.
+    /// the `x-manox/teardown` archive command — the path itself — with the
+    /// store's optimistic whole-tree row drop and the object rows' archived
+    /// bits (the draft refill must never resurrect a retired container); 2.
+    /// the thread-store mirror's bit (the badge/mirror faces); 3. the
+    /// sidebar's shell-side row drop; 4. the predicate-flip event and the
+    /// ONE resource teardown under each container's key; 5. the canvas
+    /// forget — the layout (shown and parked), the terminal PTY views
+    /// and the pi sessions die with the container, and the debounced save a
+    /// trailing edit scheduled is retired with it.
     pub(crate) fn archive_containers(&mut self, ids: &[String], cx: &mut Context<Self>) {
         self.multiplexer.update(cx, |mux, cx| {
             mux.archive_containers(ids, cx);
@@ -171,6 +202,20 @@ impl Workspace {
             // explicit call here is the reclaim, not a duplicate.
             cx.emit(container::ContainerEvent::Died(id.clone()));
             self.teardown_container(id, cx);
+        }
+        // The canvas forgets the gone containers (same landing for every
+        // archive gesture — the sidebar's, the canvas's own, /exit's). Every
+        // caller runs outside the canvas's lease: the row-menu and batch
+        // callbacks enter through `ws.update` from the shell, the keybindings
+        // and slash commands through the workspace's own handlers, the dialog
+        // and the canvas event through effect-boundary subscriptions.
+        if let Some(canvas) = &self.canvas_view {
+            let ids = ids.to_vec();
+            canvas.update(cx, |canvas, cx| {
+                for id in ids {
+                    canvas.forget_container(&id, cx);
+                }
+            });
         }
         cx.notify();
     }

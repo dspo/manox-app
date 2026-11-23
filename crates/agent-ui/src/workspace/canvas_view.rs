@@ -23,7 +23,6 @@ use gpui_component::{ElementExt as _, Icon, Sizable as _, h_flex, v_flex};
 use steer_canvas::id::{home_sheet_id, sheet_kind, terminal_resource, terminal_sheet_id};
 use steer_canvas::projection::{self, GroupFrame};
 
-use crate::Workspace;
 use crate::views::centered;
 use crate::workspace::canvas_host::{CanvasAction, CanvasHost};
 use crate::workspace::chat_column::ChatColumn;
@@ -34,6 +33,18 @@ use steer_canvas::persist;
 
 /// The tab strip's height (the sheet frames start below it).
 pub const TAB_STRIP_H: f32 = 34.;
+
+/// The canvas's cross-entity requests. Every gesture runs inside the canvas's
+/// own lease, so a request the workspace must serve — one that re-enters the
+/// canvas for the teardown — crosses the boundary as an event: the
+/// subscription runs when the canvas is no longer leased.
+pub(crate) enum CanvasEvent {
+    /// The shown canvas lost its last sheet: the container must go through
+    /// the workspace's archive entry (confirm-or-direct).
+    AutoArchive(String),
+}
+
+impl gpui::EventEmitter<CanvasEvent> for CanvasView {}
 
 /// The canvas surface of one container.
 pub struct CanvasView {
@@ -55,7 +66,6 @@ pub struct CanvasView {
     /// never reads the workspace itself — that would take a second lease while
     /// the shell is updating it).
     cwd: std::path::PathBuf,
-    workspace: WeakEntity<Workspace>,
     /// The card's interior size, measured at prepaint (the first frame of a
     /// fresh window falls back to the window's).
     size: Rc<std::cell::Cell<Option<Size<Pixels>>>>,
@@ -165,8 +175,8 @@ fn v1_registry(titles: SheetTitles, pi_store: Entity<AcpStore>) -> steer_canvas:
             Arc::new(move |id, cx| {
                 titles(id, cx).unwrap_or_else(|| crate::i18n::t("canvas-tab-new-chat"))
             }),
-            // The tab-only projection (PLAN-ABSORB-02): a program's OSC title
-            // renames its tab, never the container.
+            // The tab-only projection: a program's OSC title renames its tab,
+            // never the container.
             Some(Arc::new(|id, _| {
                 let session = steer_canvas::id::session_of_sheet(id)?;
                 crate::title_store::TitleStore::global()
@@ -191,11 +201,7 @@ fn glyph_icon(glyph: &str) -> gpui_kit_assets::IconName {
 }
 
 impl CanvasView {
-    pub(crate) fn new(
-        host: CanvasHost,
-        workspace: WeakEntity<Workspace>,
-        pi_store: Entity<AcpStore>,
-    ) -> Self {
+    pub(crate) fn new(host: CanvasHost, pi_store: Entity<AcpStore>) -> Self {
         Self {
             host,
             column: None,
@@ -203,7 +209,6 @@ impl CanvasView {
             pi_views: HashMap::new(),
             pi_store,
             cwd: std::env::current_dir().unwrap_or_default(),
-            workspace,
             size: Rc::new(std::cell::Cell::new(None)),
         }
     }
@@ -234,8 +239,10 @@ impl CanvasView {
         cx.notify();
     }
 
-    /// Opens the container's next terminal sheet (its PTY spawns on first
-    /// show, so a restored layout re-attaches to a fresh shell).
+    /// Opens the container's next terminal sheet. The PTY view spawns here and
+    /// only here (`ensure_terminal` has no other caller): a layout restored
+    /// from disk carries the tab but no shell, and its body stays blank until
+    /// a fresh terminal opens under that sheet id.
     pub(crate) fn open_terminal(&mut self, cx: &mut Context<Self>) {
         let Some(container) = self.host.active_container().map(str::to_string) else {
             return;
@@ -518,8 +525,8 @@ impl CanvasView {
                         .px_1()
                         .rounded(theme.radius)
                         .hover(|this| this.bg(theme.muted))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.close_sheet(&close_id, window, cx);
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_sheet(&close_id, cx);
                         }))
                         .child(
                             gpui_component::Icon::from(gpui_kit_assets::IconName::Close).xsmall(),
@@ -667,30 +674,116 @@ impl CanvasView {
         view.into_any_element()
     }
 
-    fn close_sheet(&mut self, sheet: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if sheet_kind(sheet) == "pi-session" {
-            self.pi_views.remove(sheet);
-            let session_id = pi_session_of_sheet(sheet).to_owned();
-            self.pi_store
-                .update(cx, |store, cx| store.close_session(&session_id, cx));
-        }
+    fn close_sheet(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        let is_pi = sheet_kind(sheet) == "pi-session";
         match self.host.close_sheet(sheet) {
             CanvasAction::Applied => {
+                // The layout commit landed: the sheet is gone, so a pi sheet's
+                // session closes with it. On a dropped commit (`Stale`) the
+                // sheet stays shown — closing its session would strand it on a
+                // dead store.
+                if is_pi {
+                    self.close_pi_sheet(sheet, cx);
+                }
                 self.prune_terminals();
                 self.after_edit(cx);
                 cx.notify();
             }
             CanvasAction::Stale => {}
             CanvasAction::AutoArchive(container_id) => {
-                // The archive itself is the workspace's write (the canvas never
-                // tears down another entity); it lands on the effect boundary.
-                if let Some(workspace) = self.workspace.upgrade() {
-                    workspace.update(cx, |workspace, cx| {
-                        workspace.canvas_auto_archive(&container_id, window, cx);
-                    });
+                if is_pi {
+                    self.close_pi_sheet(sheet, cx);
                 }
+                // The canvas is never empty: the start page reopens in place,
+                // so a refused archive leaves the container on its home page.
+                if self.host.open_sheet(&home_sheet_id(&container_id), None)
+                    == CanvasAction::Applied
+                {
+                    self.after_edit(cx);
+                }
+                // The archive itself is the workspace's write, and its landing
+                // re-enters this canvas (`archive_containers` forgets the
+                // container) — the request crosses on the event face, because
+                // this gesture runs inside the canvas's own lease.
+                cx.emit(CanvasEvent::AutoArchive(container_id));
+                cx.notify();
             }
         }
+    }
+
+    /// Closes a pi sheet's body and its session: the view is dropped and the
+    /// store tears the session and its process down.
+    fn close_pi_sheet(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        self.pi_views.remove(sheet);
+        let session_id = pi_session_of_sheet(sheet).to_owned();
+        self.pi_store
+            .update(cx, |store, cx| store.close_session(&session_id, cx));
+    }
+
+    /// The pi-session sheets a container's canvas holds: its shown layout (if
+    /// this is the shown canvas) plus its parked copy.
+    fn container_pi_sheets(&self, container_id: &str) -> Vec<String> {
+        let mut sheets = Vec::new();
+        if self.host.active_container() == Some(container_id) {
+            sheets.extend(
+                steer_canvas::layout::panel_ids(self.host.layout())
+                    .into_iter()
+                    .map(str::to_string),
+            );
+        }
+        if let Some(snapshot) = self.host.held().get(container_id) {
+            sheets.extend(
+                steer_canvas::layout::panel_ids(&snapshot.layout)
+                    .into_iter()
+                    .map(str::to_string),
+            );
+        }
+        sheets.retain(|sheet| sheet_kind(sheet) == "pi-session");
+        sheets.sort();
+        sheets.dedup();
+        sheets
+    }
+
+    /// Drops everything the canvas keeps for a gone container: its layout
+    /// (shown or parked), its terminal PTY views and its pi sessions. The
+    /// ONE archive landing (`Workspace::archive_containers`) is the caller,
+    /// so a container forgotten here can never come back through a gesture.
+    pub(crate) fn forget_container(&mut self, container_id: &str, cx: &mut Context<Self>) {
+        // The container's pi sessions must be read before the state forgets
+        // the layouts that name them.
+        let pi_sheets = self.container_pi_sheets(container_id);
+        let shown = self.host.forget_container(container_id);
+        self.prune_terminals();
+        for sheet in pi_sheets {
+            self.close_pi_sheet(&sheet, cx);
+        }
+        if shown {
+            // The archived container owned the shown canvas; the shell falls
+            // back to the scratch surface until the workspace lands elsewhere.
+            self.show_scratch(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Whether the canvas holds any state for `container_id` — its shown
+    /// canvas or a parked copy. The workspace's dead-foreground sync consults
+    /// this before forgetting, so an idle frame does no work.
+    pub(crate) fn holds_container(&self, container_id: &str) -> bool {
+        self.host.active_container() == Some(container_id)
+            || self.host.held().contains(container_id)
+    }
+
+    /// The terminal sheets' live PTY views (test-support read face).
+    #[cfg(feature = "test-support")]
+    pub(crate) fn host_terminals(&self) -> &HashMap<String, Entity<steer_ghostty::GhosttyView>> {
+        &self.terminals
+    }
+
+    /// The pi sheets' live body views (test-support read face).
+    #[cfg(feature = "test-support")]
+    pub(crate) fn host_pi_views(&self) -> &HashMap<String, Entity<PiSessionView>> {
+        &self.pi_views
     }
 }
 
