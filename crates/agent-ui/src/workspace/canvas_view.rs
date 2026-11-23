@@ -92,7 +92,7 @@ pub(crate) type SheetTitles =
 /// The v1 title source: a session sheet is titled by its session's fold title
 /// (live state first, then the catalogue summary); every other kind is named
 /// statically by its registry entry.
-pub(crate) fn sheet_titles(chat: Entity<ChatColumn>) -> SheetTitles {
+fn sheet_titles(chat: Entity<ChatColumn>) -> SheetTitles {
     std::sync::Arc::new(move |sheet: &str, cx: &App| {
         let session = steer_canvas::id::session_of_sheet(sheet)?;
         let chat = chat.read(cx);
@@ -128,15 +128,24 @@ fn static_title(key: &'static str) -> steer_canvas::registry::TitleFn {
 /// already holds, so a kind owns existence/title/closability and the last mile
 /// of painting is the host's. A kind whose own store builds the view (the pi
 /// sheet) registers a factory instead.
-fn v1_registry(titles: SheetTitles, pi_store: Entity<AcpStore>) -> steer_canvas::SheetRegistry {
+fn v1_registry(
+    chat: Entity<ChatColumn>,
+    pi_store: Entity<AcpStore>,
+) -> steer_canvas::SheetRegistry {
     use std::sync::Arc;
     use steer_canvas::{ParsedSheet, SheetKindSpec};
 
+    let titles = sheet_titles(chat.clone());
+    let session_restore: steer_canvas::registry::RestoreFn = {
+        let chat = chat.clone();
+        Arc::new(move |sheet, cx| session_sheet_resource_alive(&chat, sheet, cx))
+    };
     let kind = |kind: &'static str,
                 glyph: &'static str,
                 names_container: bool,
                 title: steer_canvas::registry::TitleFn,
                 tab_title: Option<steer_canvas::registry::TabTitleFn>,
+                restore: Option<steer_canvas::registry::RestoreFn>,
                 parse: Option<steer_canvas::registry::ParseFn>|
      -> SheetKindSpec {
         SheetKindSpec {
@@ -146,7 +155,7 @@ fn v1_registry(titles: SheetTitles, pi_store: Entity<AcpStore>) -> steer_canvas:
             glyph,
             closable: true,
             names_container,
-            restore: None,
+            restore,
             parse,
             // The canvas renders these bodies inline from the entities it
             // holds; the kind still owns existence, title and closability.
@@ -162,12 +171,16 @@ fn v1_registry(titles: SheetTitles, pi_store: Entity<AcpStore>) -> steer_canvas:
             static_title("canvas-tab-home"),
             None,
             None,
+            None,
         ))
         .with(kind(
             "terminal",
             "terminal",
             false,
             static_title("canvas-tab-terminal"),
+            None,
+            // A terminal's PTY is re-attached on restore (`open_container`
+            // re-spawns a fresh shell per sheet), so the layout is the fact.
             None,
             Some(Arc::new(|id| {
                 let resource = terminal_resource(id);
@@ -192,6 +205,7 @@ fn v1_registry(titles: SheetTitles, pi_store: Entity<AcpStore>) -> steer_canvas:
                     .program_title(session)
                     .map(SharedString::from)
             })),
+            Some(session_restore),
             Some(Arc::new(|id| ParsedSheet::workspace_wide(id))),
         ))
 }
@@ -239,6 +253,15 @@ impl CanvasView {
 
     /// Shows `container_id`'s canvas, seeding its start page and — when the
     /// container is a session — that session's sheet.
+    ///
+    /// The restore verdicts come from the registry's restore face, evaluated
+    /// up front as plain data (the predicate must not borrow the host
+    /// mid-switch); a sheet the registry cannot check reads alive — the
+    /// layout is the fact. After the switch, the restored layout's resources
+    /// come back before the first render: a terminal sheet re-attaches a
+    /// fresh shell (the old one died with the process), and a pi sheet
+    /// re-opens its session in the store so the tab never paints the
+    /// closed-session empty state.
     pub(crate) fn open_container(
         &mut self,
         container_id: &str,
@@ -252,8 +275,46 @@ impl CanvasView {
         // retire the debounced write and lose the edit.
         self.flush_pending_save();
         let saved = persist::read_canvas(container_id).map(|file| file.snapshot());
-        let alive = |_sheet: &str| true;
+        let verdicts: HashMap<String, bool> = saved
+            .as_ref()
+            .map(|snapshot| {
+                steer_canvas::layout::panel_ids(&snapshot.layout)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .chain(self.host.sheet_order(container_id).iter().cloned())
+            .map(|sheet| {
+                let alive = self.host.registry().restore(&sheet, cx);
+                (sheet, alive)
+            })
+            .collect();
+        let alive = move |sheet: &str| verdicts.get(sheet).copied().unwrap_or(true);
         self.host.switch_container(container_id, saved, alive);
+        // Both re-attachments are idempotent, so a canvas returning from its
+        // park (its resources never left) does no work here.
+        let pi_cwd = self.cwd.clone();
+        let sheets: Vec<String> = steer_canvas::layout::panel_ids(self.host.layout())
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for sheet in &sheets {
+            match sheet_kind(sheet) {
+                "terminal" => self.ensure_terminal(sheet, cx),
+                "pi-session" => {
+                    let session_id = pi_session_of_sheet(sheet).to_owned();
+                    // The store keeps no per-session cwd; the container's
+                    // stands in for the re-open (a session the harness lost
+                    // is rebuilt under the same id, living here).
+                    self.pi_store.update(cx, |store, cx| {
+                        store.open_existing(&session_id, pi_cwd.clone(), true, cx);
+                    });
+                }
+                _ => {}
+            }
+        }
         self.host.open_sheet(&home_sheet_id(container_id), None);
         if let Some(session_id) = session_id {
             let sheet = steer_canvas::id::session_sheet_id(session_id);
@@ -262,10 +323,10 @@ impl CanvasView {
         cx.notify();
     }
 
-    /// Opens the container's next terminal sheet. The PTY view spawns here and
-    /// only here (`ensure_terminal` has no other caller): a layout restored
-    /// from disk carries the tab but no shell, and its body stays blank until
-    /// a fresh terminal opens under that sheet id.
+    /// Opens the container's next terminal sheet. A terminal's PTY view
+    /// exists only while its sheet does: `ensure_terminal` spawns it at the
+    /// sheet's first appearance — a fresh tab here, or a restored layout
+    /// re-attaching a fresh shell to a tab that came back from disk.
     pub(crate) fn open_terminal(&mut self, cx: &mut Context<Self>) {
         let Some(container) = self.host.active_container().map(str::to_string) else {
             return;
@@ -850,12 +911,48 @@ impl Render for CanvasView {
     }
 }
 
-/// The v1 sheet registry, wired with the host's title source.
+/// The v1 sheet registry, wired with the conversation entity (session titles
+/// and the session restore check read its folded book) and the pi store.
 pub(crate) fn registry(
-    titles: SheetTitles,
+    chat: Entity<ChatColumn>,
     pi_store: Entity<AcpStore>,
 ) -> steer_canvas::SheetRegistry {
-    v1_registry(titles, pi_store)
+    v1_registry(chat, pi_store)
+}
+
+/// The session kind's restore face: a session sheet survives a layout restore
+/// unless its session is POSITIVELY known retired. The read mirrors the
+/// container death predicate's fold half, deliberately conservative — a
+/// session the fold, the catalogue and the host's thread row have all not met
+/// yet (a restore racing the catalogue's first walk) reads alive, so a
+/// not-yet-loaded book never prunes a live session's sheet.
+fn session_sheet_resource_alive(chat: &Entity<ChatColumn>, sheet: &str, cx: &App) -> bool {
+    use ahp_types::state::SessionStatus;
+
+    let Some(session) = steer_canvas::id::session_of_sheet(sheet) else {
+        return true;
+    };
+    let archived = |status: u32| status & SessionStatus::IsArchived.bits() != 0;
+    let chat = chat.read(cx);
+    if let Some((store, _)) = chat.store.as_ref() {
+        let book = &store.read(cx).book;
+        if let Some(state) = book.sessions.get(session)
+            && state.status != 0
+        {
+            return !archived(state.status);
+        }
+        if let Some(summary) = book.summaries.get(session)
+            && summary.status != 0
+        {
+            return !archived(summary.status);
+        }
+    }
+    // The host's own thread row (the catalogue's local mirror): a session
+    // archived in a row this client wrote is retired even before the fold
+    // meets it again.
+    !manox_agent::thread_store::try_global()
+        .and_then(|store| store.read(|state| state.summary_by_id(session).map(|row| row.archived)))
+        .unwrap_or(false)
 }
 
 /// The pi session kind: existence, title and closability; the body is painted

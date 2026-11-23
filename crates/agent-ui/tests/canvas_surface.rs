@@ -580,3 +580,123 @@ async fn releasing_the_canvas_flushes_its_pending_save(cx: &mut TestAppContext) 
         let _ = std::fs::remove_file(path);
     }
 }
+
+/// Writes a container's layout file with `sheets` (a one-group tabs canvas),
+/// as a previous run of the app would have left it. The harness writes under
+/// the real state root; callers remove the file when they finish with it.
+fn seed_layout(container: &str, sheets: &[String]) {
+    let file = steer_canvas::persist::CanvasFile::new(
+        container,
+        steer_canvas::DockLayout::for_sheets(sheets.to_vec()),
+        None,
+    );
+    steer_canvas::persist::write_canvas(&file).expect("the layout file writes");
+}
+
+/// Removes a container's layout file (the tests share the real state root).
+fn drop_layout(container: &str) {
+    if let Some(path) = steer_canvas::persist::layout_path(container) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// A restart's restore leg: a layout that came back from disk carries a
+/// terminal tab, and that tab gets its PTY back — the view is the sheet's
+/// resource, so `open_container` re-attaches a fresh shell per restored
+/// sheet (the old one died with the process; the body never paints blank).
+/// The next terminal the user opens is a fresh index, not the restored one.
+#[gpui::test]
+async fn a_restored_terminal_sheet_gets_its_pty_back(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let container = "restore-term";
+    let restored_sheet = steer_canvas::id::terminal_sheet_id(container, 1);
+    seed_layout(
+        container,
+        &[
+            steer_canvas::id::home_sheet_id(container),
+            restored_sheet.clone(),
+        ],
+    );
+
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, container, cx);
+    });
+    draw(&mut visual);
+
+    let views = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_terminal_views(cx));
+    assert_eq!(
+        views,
+        vec![restored_sheet.clone()],
+        "the restored terminal tab holds its PTY view"
+    );
+    let sheets = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx));
+    assert!(
+        sheets.contains(&restored_sheet),
+        "the restored tab is on the canvas, got {sheets:?}"
+    );
+
+    // The next terminal skips the restored index.
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_open_terminal(cx)
+    });
+    let views = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_terminal_views(cx));
+    assert_eq!(
+        views,
+        vec![
+            restored_sheet.clone(),
+            steer_canvas::id::terminal_sheet_id(container, 2),
+        ],
+        "a fresh terminal opens at the next free index"
+    );
+    drop_layout(container);
+}
+
+/// A restart's restore leg for pi: the restored tab's session is re-opened in
+/// the store BEFORE the body view is created, so the tab never paints the
+/// closed-session empty state (the session file being gone is acceptable —
+/// the store rebuilds an empty session under the same id).
+#[gpui::test]
+async fn a_restored_pi_sheet_reopens_its_session(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let container = "restore-pi";
+    let session = "01990000-0000-7000-8000-000000000001";
+    let pi_sheet = format!("pi-session:{session}");
+    seed_layout(
+        container,
+        &[steer_canvas::id::home_sheet_id(container), pi_sheet.clone()],
+    );
+
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, container, cx);
+    });
+    draw(&mut visual);
+
+    // The re-open happened at restore time, before any body rendered.
+    let pi_store = workspace
+        .read_with(&visual.cx, |ws, _| ws.diagnostic_pi_store())
+        .expect("the canvas created the pi store");
+    let open = visual
+        .cx
+        .update(|cx| pi_store.read(cx).book().contains(session));
+    assert!(open, "the restored tab's session is open in the store");
+
+    // The tab click shows the body: the view entity is created on the
+    // sheet's first show, against a session the store already holds.
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_activate(&pi_sheet, cx);
+    });
+    draw(&mut visual);
+    let views = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_pi_views(cx));
+    assert_eq!(
+        views,
+        vec![pi_sheet],
+        "the restored pi tab holds its body view"
+    );
+    drop_layout(container);
+}

@@ -3349,14 +3349,15 @@ impl Workspace {
         }
         let column = self.ensure_column_view(cx);
         let pi_store = self.ensure_pi_store(cx);
-        // Titles come from the conversation entity, not from this workspace:
-        // the canvas paints inside the workspace's own update, so a title
-        // read through `self` would take a second lease.
-        let titles = crate::workspace::canvas_view::sheet_titles(self.chat.clone());
+        // Titles (and the session restore check) come from the conversation
+        // entity, not from this workspace: the canvas paints inside the
+        // workspace's own update, so a read through `self` would take a
+        // second lease.
+        let chat = self.chat.clone();
         let view = cx.new(|cx| {
             crate::workspace::canvas_view::CanvasView::new(
                 crate::workspace::canvas_host::CanvasHost::new(
-                    crate::workspace::canvas_view::registry(titles, pi_store.clone()),
+                    crate::workspace::canvas_view::registry(chat.clone(), pi_store.clone()),
                 ),
                 pi_store,
                 cx,

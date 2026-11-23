@@ -86,6 +86,12 @@ impl CanvasHost {
         self.state.held()
     }
 
+    /// A container's remembered sheet order (creation order), for evaluating
+    /// restore verdicts ahead of a switch.
+    pub fn sheet_order(&self, container_id: &str) -> &[String] {
+        self.state.sheet_order(container_id).unwrap_or(&[])
+    }
+
     /// The zoomed sheet, if any.
     pub fn zoomed(&self) -> Option<&str> {
         self.state.zoomed()
