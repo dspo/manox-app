@@ -24,7 +24,7 @@ fn request_id(r: &ahp_types::state::SessionInputRequest) -> &str {
 }
 
 /// The canonical effort string → the display enum.
-fn parse_effort(raw: &str) -> Option<manox_agent::language_model::ReasoningEffort> {
+pub(super) fn parse_effort(raw: &str) -> Option<manox_agent::language_model::ReasoningEffort> {
     match raw {
         "high" => Some(manox_agent::language_model::ReasoningEffort::High),
         "max" => Some(manox_agent::language_model::ReasoningEffort::Max),
@@ -37,7 +37,7 @@ use gpui::{Anchor, Window};
 /// The goal chip as a [`Popover`] trigger. `Selectable` is the library's hook
 /// for pushing open-state styling into its own components; the chip paints its
 /// open state (the chevron) from workspace state, so the impl is a no-op.
-struct GoalChipTrigger(gpui::AnyElement);
+pub(super) struct GoalChipTrigger(pub(super) gpui::AnyElement);
 
 impl gpui::IntoElement for GoalChipTrigger {
     type Element = gpui::AnyElement;

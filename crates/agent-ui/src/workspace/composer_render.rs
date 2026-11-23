@@ -1471,16 +1471,6 @@ impl Workspace {
             )
             .into_any_element()
     }
-
-    /// Register a bound project on the active variant's thread store — the
-    /// runtime WORKSPACES catalogue's consistency leg (persisted; survives
-    /// restarts and archives). Sidebar grouping does NOT read this: the
-    /// project registry's membership is the only grouping fact, so this is
-    /// bookkeeping for the host's own project faces, nothing more.
-    pub(super) fn register_project_in_store(path: &std::path::Path, _cx: &mut Context<Self>) {
-        let path = path.to_string_lossy().into_owned();
-        manox_agent::thread_store_global().with_mut(|s| s.register_project(path));
-    }
 }
 
 /// The 14×14 occupancy ring canvas: a border-tone track circle plus the
