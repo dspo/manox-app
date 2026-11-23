@@ -32,6 +32,8 @@ pub use session::{
     PendingRequest, PiBanner, PiBannerEntry, PiBannerWarning, PiCommand, PiConfigChoice,
     PiConfigOption, PiMode, PiSessionState, PiSessionView, PiUsage,
 };
+/// The host mints pi's session id (a UUID pi's pairing extension requires).
+pub use steer_acp::mint_session_id;
 pub use store::{AcpStore, fallback_title};
 pub use transcript::{
     AssistantEntry, DiffBlock, Draft, Entry, NoteEntry, PiMeta, PiModel, ToolEntry, ToolMeta,

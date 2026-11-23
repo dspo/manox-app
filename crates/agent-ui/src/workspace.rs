@@ -390,6 +390,10 @@ pub struct Workspace {
     /// The container canvas (plan β). Created on first open; a projection over
     /// the canvas host's state, never a state owner.
     pub(crate) canvas_view: Option<Entity<crate::workspace::canvas_view::CanvasView>>,
+    /// The pi harness's session store (sheet data plane). Created with the
+    /// canvas — the `pi-session` sheets' state and processes live here, not in
+    /// a view.
+    pub(crate) pi_store: Option<Entity<steer_agent_chat_ui::pi::AcpStore>>,
     /// User turns that have not reached the journal yet (durable across a
     /// restart; see [`crate::unsent`]).
     pub(crate) unsent: crate::unsent::UnsentOutbox,
@@ -934,6 +938,20 @@ impl Workspace {
         chat_access::rail(&self.chat, cx)
     }
 
+    /// The pi store, created on first need (canvas or launcher). It owns the
+    /// harness processes; the canvas only paints its views.
+    pub(crate) fn ensure_pi_store(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<steer_agent_chat_ui::pi::AcpStore> {
+        if let Some(store) = &self.pi_store {
+            return store.clone();
+        }
+        let store = cx.new(steer_agent_chat_ui::pi::AcpStore::from_environment);
+        self.pi_store = Some(store.clone());
+        store
+    }
+
     /// The conversation column view, created on first use. It is a projection
     /// over `chat` (which owns every piece of state), so creating it late costs
     /// nothing and keeps `new()` free of a second entity dependency.
@@ -1124,6 +1142,7 @@ impl Workspace {
             dialog: None,
             column_view: None,
             canvas_view: None,
+            pi_store: None,
             chat: cx.new(|_cx| ChatColumn {
                 host: chat_host,
                 thread,
@@ -3343,6 +3362,7 @@ impl Workspace {
             return view.clone();
         }
         let column = self.ensure_column_view(cx);
+        let pi_store = self.ensure_pi_store(cx);
         let workspace = cx.weak_entity();
         // Titles come from the conversation entity, not from this workspace:
         // the canvas paints inside the workspace's own update, so a title
@@ -3351,9 +3371,10 @@ impl Workspace {
         let view = cx.new(|_| {
             crate::workspace::canvas_view::CanvasView::new(
                 crate::workspace::canvas_host::CanvasHost::new(
-                    crate::workspace::canvas_view::registry(titles),
+                    crate::workspace::canvas_view::registry(titles, pi_store.clone()),
                 ),
                 workspace,
+                pi_store,
             )
         });
         view.update(cx, |view, cx| view.set_column(column, cx));
