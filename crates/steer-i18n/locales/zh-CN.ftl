@@ -1040,3 +1040,6 @@ pi-ask-title = 问题
 pi-ask-note-placeholder = 补充说明（可选）
 pi-context-used = 上下文 { $pct }%
 pi-banner-version = pi { $version }
+canvas-empty = 这张画布还没有 sheet
+canvas-home-hint = 起始页——在这里打开新的会话或终端
+canvas-sheet-unavailable = 这种 sheet 还没有可用的内容

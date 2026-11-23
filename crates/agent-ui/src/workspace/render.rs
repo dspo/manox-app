@@ -76,6 +76,20 @@ impl Render for Workspace {
                 .child(launcher);
             return self.apply_chat_actions(root, window, cx);
         }
+        // The container canvas (plan β): the layout tree and the sheet bodies
+        // on it. The page is produced in the canvas entity, which owns the
+        // layout state; the frame only mounts it.
+        if matches!(self.view_mode, ViewMode::Canvas) {
+            let canvas = self.ensure_canvas_view(cx);
+            let page: gpui::AnyElement =
+                canvas.update(cx, |view, cx| view.render_canvas(window, cx));
+            let root = gpui::div()
+                .id("canvas-main")
+                .debug_selector(|| "canvas-main".to_string())
+                .size_full()
+                .child(page);
+            return self.apply_chat_actions(root, window, cx);
+        }
         // A blocking overlay owns the page: the turn navigator cannot stay
         // mounted under it.
         if self.blocking_overlay_active(cx) && self.chat.read(cx).turn_navigator.is_some() {

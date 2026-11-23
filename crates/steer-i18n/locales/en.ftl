@@ -1066,3 +1066,6 @@ pi-ask-title = Question
 pi-ask-note-placeholder = Add a note (optional)
 pi-context-used = Context { $pct }%
 pi-banner-version = pi { $version }
+canvas-empty = This canvas has no sheet yet
+canvas-home-hint = Start page — open a conversation or terminal here
+canvas-sheet-unavailable = No content for this sheet kind yet
