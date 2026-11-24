@@ -4,11 +4,8 @@
 //! What the host supplies here:
 //! - session rows from the real `<manox-home>` thread store (project grouping,
 //!   pinned/unread state, recency order, live refresh pump);
-//! - tool-tab kinds for the right pane (an integrated browser, the user's
-//!   shell, and three CLI-agent terminals);
-//! - a PTY terminal as the bottom-dock surface;
-//! - a placeholder main surface (the chat column lands with
-//!   steer-agent-chat-ui in a later stage).
+//! - a placeholder main surface (the real canvas lives in agent-ui's
+//!   chrome assembly; this example wires the shell alone).
 //!
 //! Run: `cargo run -p steer-agent-chrome-ui --example shell`
 
@@ -20,8 +17,6 @@ use gpui::{
     AnyView, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ListAlignment,
     ListState, ParentElement, Render, SharedString, Styled, Window, div, px,
 };
-// Serve the example browser tab, which is compiled out on Linux/FreeBSD.
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use gpui_component::Root;
 use steer_agent_chat_ui::conversation::{ConvItem, ToolCallItem};
 use steer_agent_chat_ui::host::noop_host;
