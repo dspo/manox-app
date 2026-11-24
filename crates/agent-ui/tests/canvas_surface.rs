@@ -751,6 +751,7 @@ async fn an_untitled_session_does_not_name_its_container(cx: &mut TestAppContext
         "a titled session names the container again"
     );
     drop_layout(container);
+}
 
 // ── the 08A gesture matrix ────────────────────────────────────────────────
 // Drags run the REAL pointer sequence (down → move → up) through the shell's
@@ -1008,6 +1009,13 @@ async fn a_dock_drag_sizes_and_collapses_below_the_floor(cx: &mut TestAppContext
 #[gpui::test]
 async fn a_zoom_toggles_and_survives_a_container_switch(cx: &mut TestAppContext) {
     init_harness(cx);
+    // The tests share the real state root: a stale zoom-alpha file (a
+    // previous run's save pump) would restore a zoom the toggle then clears.
+    for container in ["zoom-alpha", "zoom-beta"] {
+        if let Some(path) = steer_canvas::persist::layout_path(container) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     let (window, workspace) = open_workspace(cx);
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     let alpha = visual.cx.new(|_| AhpStore::detached());
@@ -1021,9 +1029,17 @@ async fn a_zoom_toggles_and_survives_a_container_switch(cx: &mut TestAppContext)
         .find(|sheet| sheet.starts_with("session:"))
         .expect("the session sheet");
 
+    let groups = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_groups(cx));
+    println!("DEBUG zoom groups: {groups:?} session: {session:?}");
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_canvas_toggle_zoom(&session, cx);
     });
+    println!(
+        "DEBUG zoomed after toggle: {:?} sheets: {:?} groups: {:?}",
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx)),
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx)),
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_groups(cx))
+    );
     assert_eq!(
         workspace
             .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx))
@@ -1035,6 +1051,11 @@ async fn a_zoom_toggles_and_survives_a_container_switch(cx: &mut TestAppContext)
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_canvas_toggle_dock("bottom", cx);
     });
+    println!(
+        "DEBUG after dock toggle: zoomed={:?} regions={:?}",
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx)),
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx))
+    );
     let terminal = workspace
         .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx))
         .iter()
@@ -1068,6 +1089,11 @@ async fn a_zoom_toggles_and_survives_a_container_switch(cx: &mut TestAppContext)
         ws.diagnostic_bind_store(alpha, "zoom-alpha", cx);
     });
     draw(&mut visual);
+    println!(
+        "DEBUG rebind-back zoomed: {:?} sheets: {:?}",
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx)),
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx))
+    );
     assert_eq!(
         workspace
             .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx))

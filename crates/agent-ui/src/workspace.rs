@@ -3452,7 +3452,28 @@ impl Workspace {
     /// Keeps the canvas on the foreground container. The container view is the
     /// canvas: this runs on every column render, and is a no-op unless the
     /// foreground changed.
+    ///
+    /// A dead foreground owns no canvas. The live case is the canvas's own
+    /// last-close archive: the container stays bound as the foreground while
+    /// the archive lands, and the forget below keeps the death from being
+    /// undone — without it, the first frame after the archive would re-open
+    /// the container the archive path just erased, and the frame after the
+    /// receipt echo would park that ghost layout behind a container that no
+    /// longer exists. The forget is idempotent (it also reclaims the
+    /// container's PTY views and pi sessions, in case a frame raced the
+    /// archive landing). The chat binding itself is left alone — the leaving
+    /// gestures land the launcher, and the archive is reversible.
     pub(crate) fn sync_canvas(&mut self, cx: &mut Context<Self>) {
+        let dead = self
+            .foreground_container_id(cx)
+            .filter(|id| !self.container_alive(id, cx));
+        if let Some(dead) = dead {
+            let canvas = self.ensure_canvas_view(cx);
+            if canvas.read(cx).holds_container(&dead) {
+                canvas.update(cx, |canvas, cx| canvas.forget_container(&dead, cx));
+            }
+            return;
+        }
         let foreground = self.foreground_container_id(cx);
         let session = self.chat_store(cx).map(|(_, sid)| sid);
         let cwd = foreground
@@ -3773,5 +3794,117 @@ impl Workspace {
             .layout()
             .region(side)
             .and_then(|region| region.size)
+    }
+    /// THE container archive landing, for the archive-cleanup regressions
+    /// (the sidebar gestures reach it through the confirm-or-direct entry,
+    /// which integration tests cannot name). Test-support gesture face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_archive_containers(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        self.archive_containers(&ids, cx);
+    }
+
+    /// The container whose canvas is shown (`None` = the scratch surface).
+    /// Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_active_container(&self, cx: &App) -> Option<String> {
+        self.canvas_view
+            .as_ref()
+            .and_then(|canvas| canvas.read(cx).host.active_container())
+            .map(str::to_string)
+    }
+
+    /// The shown container (or the scratch canvas), the layout and the parked
+    /// set taken together: the sheets the canvas still holds anywhere. The
+    /// archive-cleanup regressions assert against this union. Test-support
+    /// read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_held_sheet_ids(&self, cx: &App) -> Vec<String> {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| {
+                let canvas = canvas.read(cx);
+                steer_canvas::projection::open_sheet_ids(canvas.host.layout(), canvas.host.held())
+            })
+            .unwrap_or_default()
+    }
+
+    /// The canvas's pi gesture (the strip's pi ＋), for the pi close-order
+    /// regression. Test-support read/gesture face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_open_pi(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.cwd.clone();
+        if let Some(canvas) = &self.canvas_view {
+            canvas.update(cx, |canvas, cx| canvas.open_pi_session(cwd, cx));
+        }
+    }
+
+    /// The pi sheets' live body views, keyed by sheet id. Test-support read
+    /// face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_pi_views(&self, cx: &App) -> Vec<String> {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| {
+                let mut keys: Vec<String> =
+                    canvas.read(cx).host_pi_views().keys().cloned().collect();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default()
+    }
+
+    /// The container's canvas row facts (sheet count + the container-title
+    /// projection), as the sidebar consumes them through the chrome assembly.
+    /// Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_row_facts(
+        &self,
+        container_id: &str,
+        cx: &App,
+    ) -> Option<crate::sidebar_projection::CanvasRowFacts> {
+        self.canvas_row_facts(container_id, cx)
+    }
+
+    /// The terminal sheets' live PTY views, keyed by sheet id. Test-support
+    /// read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_canvas_terminal_views(&self, cx: &App) -> Vec<String> {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| {
+                let mut keys: Vec<String> =
+                    canvas.read(cx).host_terminals().keys().cloned().collect();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default()
+    }
+
+    /// The multiplexer's shared AHP store, for tests that plant fold state
+    /// (the archive confirm gate's live dependents). Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_mux_store(
+        &self,
+        cx: &App,
+    ) -> gpui::Entity<steer_agent_chat_ui::ahp_store::AhpStore> {
+        self.multiplexer.read(cx).store()
+    }
+
+    /// The pi harness's session store, for the pi close-order regression.
+    /// Test-support read face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_pi_store(&self) -> Option<gpui::Entity<steer_agent_chat_ui::pi::AcpStore>> {
+        self.pi_store.clone()
+    }
+
+    /// Drops the canvas entity (the workspace held its last strong
+    /// reference). The release-flush regression drives the entity-gone path
+    /// the debounced task cannot serve. Test-support gesture face.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_release_canvas(&mut self) {
+        self.canvas_view = None;
+        // The event subscription holds the canvas only weakly; dropping it
+        // too keeps the release unambiguous.
+        self._canvas_events = None;
     }
 }

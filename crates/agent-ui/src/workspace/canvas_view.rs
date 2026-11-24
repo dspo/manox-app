@@ -728,13 +728,13 @@ impl CanvasView {
                 },
             ))
             // The drop commits once: the whole drag wrote nothing before it.
-            .on_drop::<DraggedSheet>(cx.listener(|this, dragged: &DraggedSheet, window, cx| {
+            .on_drop::<DraggedSheet>(cx.listener(|this, dragged: &DraggedSheet, _, cx| {
                 let target = this.drop.take().map(|preview| preview.target);
                 this.dragging = None;
                 let Some(target) = target else {
                     return;
                 };
-                this.commit_drop(&dragged.id, target, window, cx);
+                this.commit_drop(&dragged.id, target, cx);
             }))
             // A split handle's drag: one ticket per move (real geometry), the
             // save debounce converges behind it.
@@ -864,13 +864,7 @@ impl CanvasView {
 
     /// Commits a drag's drop through the one writer, then runs the standard
     /// post-edit faces (PTY pruning, debounced save, repaint).
-    fn commit_drop(
-        &mut self,
-        sheet: &str,
-        target: DropTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn commit_drop(&mut self, sheet: &str, target: DropTarget, cx: &mut Context<Self>) {
         match self.host.drop_sheet(sheet, target) {
             CanvasAction::Applied => {
                 self.prune_terminals();
@@ -1210,7 +1204,7 @@ impl CanvasView {
                     .px_1()
                     .rounded(theme.radius)
                     .hover(|this| this.bg(theme.muted))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.close_sheet(&close_id, cx);
                     }))
@@ -1455,7 +1449,8 @@ impl CanvasView {
     /// Zooms (or unzooms) one sheet — the track's empty-area double-click and
     /// the context menu's item.
     pub(crate) fn toggle_zoom(&mut self, sheet: &str, cx: &mut Context<Self>) {
-        if self.host.toggle_zoom(sheet) == CanvasAction::Applied {
+        let applied = self.host.toggle_zoom(sheet);
+        if applied == CanvasAction::Applied {
             self.after_edit(cx);
             cx.notify();
         }
@@ -1504,7 +1499,7 @@ impl CanvasView {
             if closable {
                 built = built.item(
                     PopupMenuItem::new(crate::i18n::t("canvas-close-sheet")).on_click(
-                        move |_, window, cx| {
+                        move |_, _, cx| {
                             close_this.update(cx, |this, cx| {
                                 this.close_sheet(&close_sheet_id, cx);
                             });

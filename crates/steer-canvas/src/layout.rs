@@ -814,7 +814,9 @@ pub fn prune_layout(layout: &DockLayout, keep: &HashSet<String>) -> DockLayout {
         ..layout.clone()
     };
     for side in DockSide::ALL {
-        let Some(region) = layout.region(side) else { continue };
+        let Some(region) = layout.region(side) else {
+            continue;
+        };
         let pruned =
             prune_node(&region.layout, keep, &mut seen).unwrap_or_else(DockNode::empty_tabs);
         *next.region_or_create(side) = DockRegion {
@@ -1147,7 +1149,10 @@ mod tests {
                 DockNode::tabs(["a".to_string(), "c".to_string()]),
             ],
         );
-        let layout = DockLayout { center: split };
+        let layout = DockLayout {
+            center: split,
+            ..DockLayout::default()
+        };
         let pruned = prune_layout(&layout, &keep(&["a", "b", "c"]));
         assert_eq!(ids(&pruned), ["a", "b", "c"]);
     }
