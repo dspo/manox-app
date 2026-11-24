@@ -81,6 +81,7 @@ impl CanvasPaneStore {
         Self {
             ws,
             mux,
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             notify: None,
             webviews: HashMap::new(),
             editors: HashMap::new(),
@@ -369,10 +370,17 @@ impl CanvasPaneStore {
     /// IPC route and webview go with it), the CLI's kill handle fires, the
     /// editor/panel entities drop.
     pub fn reclaim(&mut self, sheet: &str, cx: &mut App) {
+        // The webview slot's fields ride the browser platform; the Linux twin
+        // is the unit type, so the map entry is dropped without reading it.
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         if let Some(slot) = self.webviews.remove(sheet) {
             slot.ticker_alive
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             self.close_webview_tab(&slot, cx);
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            let _ = self.webviews.remove(sheet);
         }
         if self.agents.remove(sheet).is_some() {
             // The picker may have spawned: the kill handle rides the
