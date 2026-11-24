@@ -45,7 +45,7 @@ pub(crate) struct ActivityChain {
     open: bool,
     on_toggle: Option<ToggleHandler>,
     header: Option<ActivityChainHeader>,
-    steps: Vec<ActivityStep>,
+    steps: Vec<AnyElement>,
 }
 
 impl ActivityChain {
@@ -79,8 +79,12 @@ impl ActivityChain {
         self
     }
 
-    pub(crate) fn step(mut self, step: ActivityStep) -> Self {
-        self.steps.push(step);
+    /// One step, as an element. Callers pass either a freshly built
+    /// [`ActivityStep`] or a cached step-view entity (`ActivityStepView`) —
+    /// the entity is how a running segment's settled siblings stay off the
+    /// spinner-tick rebuild path (#320).
+    pub(crate) fn step(mut self, step: impl IntoElement) -> Self {
+        self.steps.push(step.into_any_element());
         self
     }
 }
@@ -95,10 +99,6 @@ impl RenderOnce for ActivityChain {
             steps,
         } = self;
         let generation = toggle_generation(window, cx, &id, open);
-        let steps: Vec<AnyElement> = steps
-            .into_iter()
-            .map(|step| step.into_any_element())
-            .collect();
 
         // No height cap: `overflow_y_scroll` never established its scroll
         // frame inside the animation wrapper, so a cap only clipped — the

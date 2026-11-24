@@ -246,8 +246,8 @@ impl SubagentPanel {
 }
 
 impl Render for SubagentPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
         let status = if self.running(cx) {
             ToolCallStatus::Running
         } else {
@@ -263,8 +263,14 @@ impl Render for SubagentPanel {
             .py_2()
             .border_b_1()
             .border_color(theme.border)
-            .child(status_indicator(status, theme))
-            .children(self.access_mode.map(|mode| access_mode_badge(mode, theme)))
+            .child(status_indicator(
+                status,
+                &theme,
+                "subagent-panel",
+                window,
+                cx,
+            ))
+            .children(self.access_mode.map(|mode| access_mode_badge(mode, &theme)))
             .child(
                 gpui::div()
                     .flex_1()

@@ -184,7 +184,7 @@ impl PluginManagerView {
 }
 
 impl Render for PluginManagerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let tab_ix = match self.tab {
             PluginManagerTab::Marketplace => 0,
@@ -256,7 +256,12 @@ impl Render for PluginManagerView {
                         .items_center()
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child(BrailleSpinner::new().small().color(theme.muted_foreground))
+                        .child(
+                            BrailleSpinner::new()
+                                .small()
+                                .color(theme.muted_foreground)
+                                .view("plugins-busy", window, cx),
+                        )
                         .child(i18n::t("plugins-busy")),
                 )
             })

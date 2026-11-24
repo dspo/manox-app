@@ -565,6 +565,8 @@ impl Gallery {
         muted: gpui::Hsla,
         border: gpui::Hsla,
         foreground: gpui::Hsla,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         // The two states a session status renders in, in VS Code's palette:
         // link blue for working, warning yellow for waiting.
@@ -587,17 +589,27 @@ impl Gallery {
                     .gap_10()
                     .child(spinner_cell(
                         muted,
-                        PixelSpinner::new().color(accent),
+                        PixelSpinner::new()
+                            .color(accent)
+                            .view("px-demo-grid-1x", window, cx),
                         "1× (16 px)",
                     ))
                     .child(spinner_cell(
                         muted,
-                        PixelSpinner::new().color(accent).zoom(8.),
+                        PixelSpinner::new().color(accent).zoom(8.).view(
+                            "px-demo-grid-8x",
+                            window,
+                            cx,
+                        ),
                         "8× · steps(6)",
                     ))
                     .child(spinner_cell(
                         muted,
-                        PixelSpinner::new().color(accent).zoom(8.).sharp(),
+                        PixelSpinner::new().color(accent).zoom(8.).sharp().view(
+                            "px-demo-grid-8x-sharp",
+                            window,
+                            cx,
+                        ),
                         "8× · square dots",
                     )),
             )
@@ -617,14 +629,16 @@ impl Gallery {
                         PixelSpinner::new()
                             .variant(PixelSpinnerVariant::Ring)
                             .color(warning)
-                            .zoom(8.),
+                            .zoom(8.)
+                            .view("px-demo-ring-8x", window, cx),
                         "8× · clockwise",
                     ))
                     .child(spinner_cell(
                         muted,
                         PixelSpinner::new()
                             .variant(PixelSpinnerVariant::Ring)
-                            .color(warning),
+                            .color(warning)
+                            .view("px-demo-ring-1x", window, cx),
                         "1× (16 px)",
                     )),
             )
@@ -642,7 +656,11 @@ impl Gallery {
                     .gap_10()
                     .child(spinner_cell(
                         muted,
-                        PixelSpinner::new().color(accent).zoom(6.).speed(0.25),
+                        PixelSpinner::new().color(accent).zoom(6.).speed(0.25).view(
+                            "px-demo-grid-slow",
+                            window,
+                            cx,
+                        ),
                         "grid ×6 · speed ¼",
                     ))
                     .child(spinner_cell(
@@ -651,12 +669,17 @@ impl Gallery {
                             .variant(PixelSpinnerVariant::Ring)
                             .color(warning)
                             .zoom(6.)
-                            .speed(0.25),
+                            .speed(0.25)
+                            .view("px-demo-ring-slow", window, cx),
                         "ring ×6 · speed ¼",
                     ))
                     .child(spinner_cell(
                         muted,
-                        PixelSpinner::new().color(muted).zoom(8.).smooth(),
+                        PixelSpinner::new().color(muted).zoom(8.).smooth().view(
+                            "px-demo-linear",
+                            window,
+                            cx,
+                        ),
                         "8× · linear",
                     )),
             )
@@ -675,12 +698,12 @@ impl Gallery {
                     .gap_10()
                     .child(spinner_cell(
                         muted,
-                        PixelSpinner::new().frozen().color(unread_green),
+                        PixelSpinner::new().color(unread_green),
                         "1× (16 px)",
                     ))
                     .child(spinner_cell(
                         muted,
-                        PixelSpinner::new().frozen().color(unread_green).zoom(8.),
+                        PixelSpinner::new().color(unread_green).zoom(8.),
                         "8× · frozen",
                     )),
             )
@@ -1463,7 +1486,7 @@ impl Gallery {
 }
 
 impl Render for Gallery {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx);
         let (muted, border, background, foreground, secondary) = (
             theme.muted_foreground,
@@ -1477,7 +1500,9 @@ impl Render for Gallery {
             Component::Reasoning => (0..self.reasoning.len())
                 .map(|ix| self.demo_row(ix, muted, border, foreground, cx))
                 .collect(),
-            Component::PixelSpinner => self.pixel_spinner_rows(muted, border, foreground),
+            Component::PixelSpinner => {
+                self.pixel_spinner_rows(muted, border, foreground, window, cx)
+            }
             Component::HistoryLoading => self.history_loading_rows(muted, border, foreground),
             Component::ToolText => self.tool_text_rows(muted, border, foreground, cx),
             Component::ToolShell => self.tool_shell_rows(muted, border, foreground),

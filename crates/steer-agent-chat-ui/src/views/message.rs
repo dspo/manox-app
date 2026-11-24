@@ -256,6 +256,13 @@ pub struct MessageItem {
     /// copy flash lives in the card state, and a flash has to reach the
     /// message. Held here because a `Subscription` dies with its holder.
     card_subs: Vec<gpui::Subscription>,
+    /// Per-step entity views for the activity segment's visible entries,
+    /// synced by signature (`sync_activity_steps`): a spinner tick inside a
+    /// step re-renders that step alone instead of rebuilding the whole
+    /// chain (#320). Empty for non-thinking rows.
+    activity_steps: Vec<Entity<ActivityStepView>>,
+    /// The entries signature those views were last synced against.
+    activity_steps_sig: u64,
     markdown: Option<ChatDocument>,
     /// Mounted body for a completed Preview call (`None` for every other
     /// kind, and for image previews which keep no state). See
@@ -340,6 +347,8 @@ impl MessageItem {
             confirmation: None,
             copied: CopiedRegistry::default(),
             card_subs: Vec::new(),
+            activity_steps: Vec::new(),
+            activity_steps_sig: 0,
             live_entrance: false,
             entrance_clock: None,
         }
@@ -713,6 +722,77 @@ impl MessageItem {
     /// entry across all activity segments (and each top-level `ToolCall`),
     /// so selection works on reloaded history and finalized output renders as a
     /// terminal panel rather than a per-frame fallback.
+    /// Align the per-step entity views with the segment's entries. The
+    /// signature check makes this a no-op on frames that only re-render (a
+    /// spinner tick up the ancestor chain); an entry change re-syncs the
+    /// affected view in place and notifies it.
+    ///
+    /// The notify lands inside this render (draw phase), where gpui records
+    /// the invalidation without waking the platform: it is the NEXT frame
+    /// that repaints the step. That is why the entry mutations this reacts
+    /// to always ride their own `cx.notify` on the item — the sync alone
+    /// depends on some other clock driving a later frame (today: the shared
+    /// glyph clock). If this ever runs where no other beat exists, notify
+    /// the item instead.
+    fn sync_activity_steps(&mut self, cx: &mut gpui::Context<Self>) {
+        let ConvItem::Thinking(t) = &self.kind else {
+            self.activity_steps.clear();
+            self.activity_steps_sig = 0;
+            return;
+        };
+        let layout = segment_layout(t);
+        let sig = activity_entries_signature(t, &layout.visible);
+        if sig == self.activity_steps_sig && self.activity_steps.len() == layout.visible.len() {
+            return;
+        }
+        let host = Some(self.host.clone());
+        let owner = Some(cx.entity().downgrade());
+        let host_changed =
+            |v: &ActivityStepView, host: &Option<ChatHostHandle>| match (&v.host, host) {
+                (None, None) => false,
+                (Some(a), Some(b)) => !std::sync::Arc::ptr_eq(a, b),
+                _ => true,
+            };
+        let mut kept: Vec<Entity<ActivityStepView>> = Vec::with_capacity(layout.visible.len());
+        for &eix in &layout.visible {
+            let entry = t.entries[eix].clone();
+            let sig = activity_entry_signature(&entry);
+            let id = entry.id().to_string();
+            let existing = self
+                .activity_steps
+                .iter()
+                .position(|v| v.read(cx).entry_id() == id);
+            let view = match existing {
+                Some(at) => self.activity_steps.remove(at),
+                None => cx.new(|_| {
+                    ActivityStepView::new(
+                        entry.clone(),
+                        sig,
+                        eix,
+                        self.id,
+                        host.clone(),
+                        owner.clone(),
+                    )
+                }),
+            };
+            view.update(cx, |v, cx| {
+                // Notify only what actually changed — a sibling's update must
+                // not wake an identical step's subtree. `host` rides along:
+                // a late-attaching host must not leave hostless steps stuck.
+                if v.eix != eix || v.sig != sig || host_changed(v, &host) {
+                    v.entry = entry.clone();
+                    v.sig = sig;
+                    v.eix = eix;
+                    v.host = host.clone();
+                    cx.notify();
+                }
+            });
+            kept.push(view);
+        }
+        self.activity_steps = kept;
+        self.activity_steps_sig = sig;
+    }
+
     pub fn rebuild_tool_panels(&mut self, cwd: Option<SharedString>, cx: &mut gpui::Context<Self>) {
         // Gather entry indices through an immutable borrow first, then drive the
         // mutable `sync_tool_*_panel` calls — otherwise `&mut self.kind` and
@@ -734,6 +814,142 @@ impl MessageItem {
     }
 }
 
+/// One activity segment step as its own entity view.
+///
+/// The step's element tree (a tool card with its output panel, a reasoning
+/// round's document) is rebuilt only when this entity renders — which, on
+/// the shared glyph clock, is only when a spinner inside THIS step ticks or
+/// the entry's synced data changed. The settled siblings along a running
+/// turn stay cached: their subtree replays from gpui's view cache while the
+/// ticking step repaints (the #320 amplifier removed per step).
+pub struct ActivityStepView {
+    /// The synced snapshot; replaced wholesale by the owner's signature
+    /// sync. Every render rebuilds the element tree from it.
+    entry: ActivityEntry,
+    /// The entry's own signature at sync time — the change test the sync
+    /// compares (cheaper than entry equality, no PartialEq over documents).
+    sig: u64,
+    /// The entry's position inside the container (the element-id namespace
+    /// the builders have always used).
+    eix: usize,
+    /// The container's row index (same namespace).
+    cix: usize,
+    /// The chat host (fold toggles, copy decoration) — `None` renders the
+    /// inert, hostless shape.
+    host: Option<ChatHostHandle>,
+    /// The owning row, for copy feedback and body decorations.
+    owner: Option<WeakEntity<MessageItem>>,
+}
+
+impl ActivityStepView {
+    fn new(
+        entry: ActivityEntry,
+        sig: u64,
+        eix: usize,
+        cix: usize,
+        host: Option<ChatHostHandle>,
+        owner: Option<WeakEntity<MessageItem>>,
+    ) -> Self {
+        Self {
+            entry,
+            sig,
+            eix,
+            cix,
+            host,
+            owner,
+        }
+    }
+
+    /// The synced entry's stable id (the sync aligns views by it).
+    fn entry_id(&self) -> &str {
+        self.entry.id()
+    }
+}
+
+impl Render for ActivityStepView {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let owner = self.owner.clone();
+        render_activity_entry(
+            &self.entry,
+            self.eix,
+            self.cix,
+            &theme,
+            self.host.clone(),
+            owner,
+            cx,
+        )
+    }
+}
+
+/// A cheap change signal over a segment's entries, folded with the visible
+/// layout. Lengths, statuses and flags cover every mutation the streaming
+/// sync and the fold toggles make; a same-length in-place substitution (none
+/// of the sync paths do one) would be missed — documented, accepted.
+fn activity_entries_signature(t: &ThinkingContainer, visible: &[usize]) -> u64 {
+    use std::hash::{Hash as _, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    visible.len().hash(&mut h);
+    for &eix in visible {
+        activity_entry_signature(&t.entries[eix]).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// One entry's change signal (see [`activity_entries_signature`]).
+fn activity_entry_signature(e: &ActivityEntry) -> u64 {
+    use std::hash::{Hash as _, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    match e {
+        ActivityEntry::Reasoning {
+            id,
+            text,
+            streaming,
+            collapsed,
+            user_toggled,
+            markdown,
+            duration_ms,
+        } => {
+            0u8.hash(&mut h);
+            id.hash(&mut h);
+            text.len().hash(&mut h);
+            streaming.hash(&mut h);
+            collapsed.hash(&mut h);
+            user_toggled.hash(&mut h);
+            markdown.is_some().hash(&mut h);
+            duration_ms.hash(&mut h);
+        }
+        ActivityEntry::Tool(e) => {
+            1u8.hash(&mut h);
+            e.id.hash(&mut h);
+            e.name.len().hash(&mut h);
+            e.title.len().hash(&mut h);
+            e.output.len().hash(&mut h);
+            match e.status {
+                ToolCallStatus::PendingApproval => 0u8,
+                ToolCallStatus::Running => 1,
+                ToolCallStatus::Success => 2,
+                ToolCallStatus::Continued => 3,
+                ToolCallStatus::Error => 4,
+                ToolCallStatus::Denied => 5,
+                ToolCallStatus::Cancelled => 6,
+            }
+            .hash(&mut h);
+            e.is_error.hash(&mut h);
+            e.streaming.hash(&mut h);
+            e.collapsed.hash(&mut h);
+            e.user_toggled.hash(&mut h);
+            e.card.as_ref().map(|c| c.entity_id()).hash(&mut h);
+            e.panel.as_ref().map(|p| p.entity_id()).hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
 impl Render for MessageItem {
     fn render(
         &mut self,
@@ -748,6 +964,9 @@ impl Render for MessageItem {
         // manual open/close lands on the card (see `sync_card_mirrors`), and an
         // answered ask mounts the card's settled phase.
         self.sync_card_mirrors(cx);
+        // Align the per-step views with the segment's entries (signature
+        // check — a no-op on every frame that did not change an entry).
+        self.sync_activity_steps(cx);
         self.ensure_ask_settled(cx);
         let agent_ctx = Some(AgentTaskCtx {
             host: self.host.clone(),
@@ -784,11 +1003,13 @@ impl Render for MessageItem {
             &theme,
             agent_ctx.as_ref(),
             tool_ctx.as_ref(),
+            Some(self.activity_steps.as_slice()),
             body,
             notice_panel,
             preview_body.as_ref(),
             Some(self.host.clone()),
             &copy,
+            window,
             cx,
         ))
         .debug_selector(|| format!("message-item-body-{}", self.id))
@@ -859,11 +1080,13 @@ pub fn render_item(
     theme: &Theme,
     agent_ctx: Option<&AgentTaskCtx>,
     tool_ctx: Option<&ToolCallCtx>,
+    activity_steps: Option<&[Entity<ActivityStepView>]>,
     body: Option<ChatDocument>,
     notice_panel: Option<Entity<TerminalPanel>>,
     preview_body: Option<&PreviewBody>,
     host: Option<ChatHostHandle>,
     copy: &CopyFeedback,
+    window: &mut gpui::Window,
     cx: &mut App,
 ) -> gpui::AnyElement {
     match item {
@@ -905,9 +1128,19 @@ pub fn render_item(
             copy,
             cx,
         ),
-        ConvItem::Thinking(t) => {
-            render_thinking(t, ix, key, model, model_repeats, theme, tool_ctx, copy, cx)
-        }
+        ConvItem::Thinking(t) => render_thinking(
+            t,
+            ix,
+            key,
+            model,
+            model_repeats,
+            theme,
+            tool_ctx,
+            activity_steps,
+            copy,
+            window,
+            cx,
+        ),
         ConvItem::TurnProcess {
             secs,
             outcome,
@@ -926,7 +1159,7 @@ pub fn render_item(
                 render_tool_call(t, ix, theme, tool_ctx, copy, cx)
             }
         }
-        ConvItem::AgentTask(t) => render_agent_task(t, ix, theme, agent_ctx, tool_ctx, cx),
+        ConvItem::AgentTask(t) => render_agent_task(t, ix, theme, agent_ctx, tool_ctx, window, cx),
         ConvItem::Error(msg) => render_error(msg, ix, theme, body, copy, cx),
         ConvItem::Notice(msg) => render_notice(msg, ix, theme, notice_panel, copy, cx),
     }
@@ -1668,7 +1901,9 @@ pub fn render_thinking(
     model_repeats: bool,
     theme: &Theme,
     tool_ctx: Option<&ToolCallCtx>,
+    activity_steps: Option<&[Entity<ActivityStepView>]>,
     copy: &CopyFeedback,
+    window: &mut gpui::Window,
     cx: &mut App,
 ) -> gpui::AnyElement {
     if t.entries.is_empty() {
@@ -1682,16 +1917,32 @@ pub fn render_thinking(
     // under it); the chevron, the content fade, and each step's entrance are
     // layout-neutral and stay on.
     let mut chain = ActivityChain::new(("activity-tree", ix)).open(layout.expanded);
-    for &eix in &layout.visible {
-        chain = chain.step(render_activity_entry(
-            &t.entries[eix],
-            eix,
-            ix,
-            theme,
-            tool_ctx,
-            copy.owner.clone(),
-            cx,
-        ));
+    let host = tool_ctx.map(|c| c.host.clone());
+    match activity_steps {
+        // The production path: steps are cached entity views. A spinner tick
+        // marks this view (an ancestor of the glyph) dirty, but the settled
+        // siblings' entities are untouched, so their whole subtree is
+        // reused and only the ticking step rebuilds (#320).
+        Some(views) => {
+            for view in views {
+                chain = chain.step(view.clone());
+            }
+        }
+        // Hostless renders (overflow probes, tests) build the steps inline,
+        // exactly as the entity views do.
+        None => {
+            for &eix in &layout.visible {
+                chain = chain.step(render_activity_entry(
+                    &t.entries[eix],
+                    eix,
+                    ix,
+                    theme,
+                    host.clone(),
+                    copy.owner.clone(),
+                    cx,
+                ));
+            }
+        }
     }
 
     if !layout.cover {
@@ -1715,7 +1966,6 @@ pub fn render_thinking(
     } else {
         t.frozen_secs
     };
-    let host = tool_ctx.map(|c| c.host.clone());
     let interactive = tool_ctx.is_some();
 
     // The header's label is the model display name — the segment is the single
@@ -1728,6 +1978,7 @@ pub fn render_thinking(
             BrailleSpinner::new()
                 .xsmall()
                 .color(theme.muted_foreground)
+                .view((("activity-cover", ix).into(), "spinner"), window, cx)
                 .into_any_element(),
         );
     }
@@ -1806,7 +2057,7 @@ fn render_activity_entry(
     eix: usize,
     cix: usize,
     theme: &Theme,
-    tool_ctx: Option<&ToolCallCtx>,
+    host: Option<ChatHostHandle>,
     owner: Option<WeakEntity<MessageItem>>,
     cx: &mut App,
 ) -> ActivityStep {
@@ -1832,10 +2083,10 @@ fn render_activity_entry(
             eix,
             cix,
             theme,
-            tool_ctx,
+            host,
             cx,
         ),
-        ActivityEntry::Tool(tool) => tool_step(id, tool, eix, cix, theme, tool_ctx, owner, cx),
+        ActivityEntry::Tool(tool) => tool_step(id, tool, eix, cix, theme, host, owner, cx),
     }
 }
 
@@ -2024,10 +2275,9 @@ fn reasoning_step(
     eix: usize,
     cix: usize,
     theme: &Theme,
-    tool_ctx: Option<&ToolCallCtx>,
+    host: Option<ChatHostHandle>,
     cx: &mut App,
 ) -> ActivityStep {
-    let host = tool_ctx.map(|c| c.host.clone());
     let toggle = reasoning_round_toggle(host, entry_id);
 
     let first_line = text
@@ -2102,7 +2352,7 @@ fn tool_step(
     eix: usize,
     cix: usize,
     theme: &Theme,
-    tool_ctx: Option<&ToolCallCtx>,
+    host: Option<ChatHostHandle>,
     owner: Option<WeakEntity<MessageItem>>,
     cx: &mut App,
 ) -> ActivityStep {
@@ -2124,15 +2374,14 @@ fn tool_step(
     if crate::views::tool_cards::card_family(&e.name).is_some()
         && let Some(state) = e.card.clone()
     {
-        let on_toggle =
-            crate::views::tool_cards::entry_toggle(tool_ctx.map(|c| c.host.clone()), e.id.clone());
+        let on_toggle = crate::views::tool_cards::entry_toggle(host.clone(), e.id.clone());
         let card = crate::views::tool_cards::build_tool_card(
             e,
             &state,
             e.cwd.clone(),
             theme,
             Some(Box::new(on_toggle)),
-            tool_ctx.map(|c| c.host.clone()),
+            host.clone(),
         );
         return ActivityStep::new(id).content(card);
     }
@@ -2142,7 +2391,6 @@ fn tool_step(
     // entry's arrival, or the delayed auto-collapse after a terminal status.
     let show_output = !e.collapsed || title.is_none();
     let id_for_toggle = e.id.clone();
-    let host = tool_ctx.map(|c| c.host.clone());
 
     let mut step = ActivityStep::new(id);
     if let Some(title) = title {
@@ -3133,7 +3381,13 @@ fn agent_terminal_icon(status: ToolCallStatus) -> Icon {
 
 /// Status indicator for a sub-agent task row. Running/Pending get a braille
 /// spinner; terminal states get a static icon.
-fn agent_status_indicator(status: ToolCallStatus, theme: &Theme) -> gpui::AnyElement {
+fn agent_status_indicator(
+    status: ToolCallStatus,
+    theme: &Theme,
+    key: impl Into<gpui::ElementId>,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
     use manox_agent::ToolCallStatus;
     let color = match status {
         ToolCallStatus::Running | ToolCallStatus::PendingApproval => theme.accent_foreground,
@@ -3149,6 +3403,7 @@ fn agent_status_indicator(status: ToolCallStatus, theme: &Theme) -> gpui::AnyEle
         BrailleSpinner::new()
             .xsmall()
             .color(color)
+            .view((key.into(), "spinner"), window, cx)
             .into_any_element()
     } else {
         agent_terminal_icon(status)
@@ -3171,9 +3426,10 @@ pub fn render_agent_task(
     theme: &Theme,
     agent_ctx: Option<&AgentTaskCtx>,
     _tool_ctx: Option<&ToolCallCtx>,
-    _cx: &mut App,
+    window: &mut gpui::Window,
+    cx: &mut App,
 ) -> gpui::AnyElement {
-    let icon_el = agent_status_indicator(item.status, theme);
+    let icon_el = agent_status_indicator(item.status, theme, ("agent-status", ix), window, cx);
 
     // "Type(topic)"; the call id is the last resort when both are empty.
     let display_title =
@@ -3879,7 +4135,7 @@ mod tests {
     impl Render for MessageOverflowProbe {
         fn render(
             &mut self,
-            _window: &mut Window,
+            window: &mut Window,
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             let mut thinking = ThinkingContainer::new();
@@ -3965,7 +4221,9 @@ mod tests {
                             None,
                             None,
                             None,
+                            None,
                             &copy,
+                            window,
                             cx,
                         ))
                         .child(render_item(
@@ -3981,7 +4239,9 @@ mod tests {
                             None,
                             None,
                             None,
+                            None,
                             &copy,
+                            window,
                             cx,
                         )),
                 )
@@ -4073,7 +4333,7 @@ mod tests {
     impl Render for PreviewCardProbe {
         fn render(
             &mut self,
-            _window: &mut Window,
+            window: &mut Window,
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             let theme = cx.theme().clone();
@@ -4096,9 +4356,11 @@ mod tests {
                             None,
                             None,
                             None,
+                            None,
                             body.as_ref(),
                             None,
                             &copy,
+                            window,
                             cx,
                         ))
                 }))
