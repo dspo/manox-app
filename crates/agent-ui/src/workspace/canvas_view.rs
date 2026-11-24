@@ -1,5 +1,5 @@
-//! The canvas renderer: the container's layout tree, its tab strips and the
-//! sheet bodies placed on it.
+//! The canvas renderer: the container's dock regions, its layout tree, the
+//! tab strips and the sheet bodies placed on them.
 //!
 //! Layout geometry comes from `steer_canvas::projection` (pure); this module
 //! only draws what that reports and turns pointer gestures into [`CanvasHost`]
@@ -7,23 +7,37 @@
 //! stale reply from a canvas that is no longer shown is dropped by the state,
 //! not by the renderer remembering to check.
 //!
+//! The four interaction disciplines (PLAN-ABSORB-08):
+//!
+//! - **the layout has one writer**: drags, sizes, dock toggles and zoom all
+//!   commit through the host; the renderer reads back whatever landed;
+//! - **placement is a pure function**: `projection::drop_target` resolves a
+//!   pointer against the projected frame — no per-element hover state;
+//! - **the canvas never reads the workspace**: titles/cwd arrive injected;
+//! - **a move-drag writes nothing until the drop**; size drags commit a
+//!   ticket per move (real rubber-band geometry) and let the save debounce
+//!   converge.
+//!
 //! Bodies: a sheet's content is produced by the entity that owns it — the
 //! conversation column's own view for `session:` sheets, the launcher's for
-//! `home:`. The canvas never builds another entity's page, so it can never take
-//! a second lease on the workspace while the shell is rendering.
+//! `home:`. The canvas never builds another entity's page, so it can never
+//! take a second lease on the workspace while the shell is rendering.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::*;
+use gpui_base::InteractiveElementExt as _;
 use gpui_component::ActiveTheme;
 use gpui_component::{ElementExt as _, Icon, Sizable as _, h_flex, v_flex};
 
 use steer_canvas::id::{home_sheet_id, sheet_kind, terminal_resource, terminal_sheet_id};
-use steer_canvas::projection::{self, GroupFrame};
+use steer_canvas::layout::{DockSide, DropTarget, SplitEdge};
+use steer_canvas::projection::{self, GroupFrame, Indicator, Point, SplitHandle, TabBarBox};
 use steer_canvas::state::CanvasSnapshot;
 
+use crate::CanvasToggleZoom;
 use crate::views::centered;
 use crate::workspace::canvas_host::{CanvasAction, CanvasHost};
 use crate::workspace::chat_column::ChatColumn;
@@ -33,7 +47,74 @@ use steer_agent_chat_ui::views::pi::PiSessionView;
 use steer_canvas::persist;
 
 /// The tab strip's height (the sheet frames start below it).
-pub const TAB_STRIP_H: f32 = 34.;
+pub const TAB_STRIP_H: f32 = projection::TAB_STRIP_H;
+
+/// The switcher's travel: the gallery's `motion.move` spring, expressed as
+/// the duration + easing the pane's indicator already uses.
+const SLIDE_DURATION: std::time::Duration = std::time::Duration::from_millis(504);
+
+/// The ghost card a tab drag carries (the tab's shape, DESIGN §3.7).
+const GHOST_WIDTH: f32 = 240.;
+const GHOST_OPACITY: f32 = 0.92;
+/// How faint the source tab sits while its ghost follows the pointer.
+const SOURCE_FADE: f32 = 0.35;
+
+/// A center split's minimum slot: a drag never squeezes a group below this.
+const SPLIT_MIN: f32 = 80.;
+
+/// The tab-drag payload: the dragged sheet's identity and its label/glyph,
+/// so the ghost needs nothing from the canvas while it follows the pointer.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DraggedSheet {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) glyph: &'static str,
+}
+
+impl Render for DraggedSheet {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        h_flex()
+            .w(px(GHOST_WIDTH))
+            .h(px(TAB_STRIP_H))
+            .px_2()
+            .gap_1()
+            .items_center()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .shadow_md()
+            .opacity(GHOST_OPACITY)
+            .child(Icon::from(glyph_icon(self.glyph)).small())
+            .child(gpui::div().text_sm().truncate().child(self.label.clone()))
+    }
+}
+
+/// A center split's resize payload (the path names the split; the drag move
+/// resolves it against the current frame).
+#[derive(Clone, PartialEq)]
+pub(crate) struct DraggedSplit {
+    pub(crate) path: Vec<usize>,
+}
+
+impl Render for DraggedSplit {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// A dock edge's resize payload.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct DraggedDock {
+    pub(crate) side: DockSide,
+}
+
+impl Render for DraggedDock {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
 
 /// The canvas's cross-entity requests. Every gesture runs inside the canvas's
 /// own lease, so a request the workspace must serve — one that re-enters the
@@ -78,6 +159,20 @@ pub struct CanvasView {
     /// The card's interior size, measured at prepaint (the first frame of a
     /// fresh window falls back to the window's).
     size: Rc<std::cell::Cell<Option<Size<Pixels>>>>,
+    /// The live drag's target + indicator, from `projection::drop_target`.
+    /// `None` when the pointer is over nothing droppable.
+    drop: Option<projection::DropPreview>,
+    /// The sheet being dragged (its tab fades while the ghost flies).
+    dragging: Option<String>,
+    /// Each group's last displayed sheet, keyed by group key: the slide
+    /// animation's "from" place (only a one-place turn slides).
+    last_active: HashMap<String, String>,
+    /// The open tab context menu (sheet id, menu entity) and its dismissal
+    /// subscription.
+    tab_menu: Option<(String, Entity<gpui_component::menu::PopupMenu>)>,
+    /// The menu's anchor, in window coordinates.
+    tab_menu_anchor: Option<gpui::Point<Pixels>>,
+    _tab_menu_sub: Option<gpui::Subscription>,
 }
 
 /// Resolves a sheet's display title from the host's data face.
@@ -243,6 +338,12 @@ impl CanvasView {
             pending_save: None,
             _release_flush: release_flush,
             size: Rc::new(std::cell::Cell::new(None)),
+            drop: None,
+            dragging: None,
+            last_active: HashMap::new(),
+            tab_menu: None,
+            tab_menu_anchor: None,
+            _tab_menu_sub: None,
         }
     }
 
@@ -339,6 +440,23 @@ impl CanvasView {
         }
     }
 
+    /// Opens the container's next terminal sheet straight into the bottom
+    /// dock — opening the dock is asking for a terminal there.
+    pub(crate) fn open_terminal_into_dock(&mut self, cx: &mut Context<Self>) {
+        let Some(container) = self.host.active_container().map(str::to_string) else {
+            return;
+        };
+        let sheet = terminal_sheet_id(&container, self.next_terminal_index(&container));
+        self.ensure_terminal(&sheet, cx);
+        let target = DropTarget::Dock {
+            side: DockSide::Bottom,
+        };
+        if self.host.drop_sheet(&sheet, target) == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
     /// Opens a fresh pi conversation as a sheet of the shown container. The
     /// process starts immediately; the body appears on the sheet's first show.
     pub(crate) fn open_pi_session(&mut self, cwd: std::path::PathBuf, cx: &mut Context<Self>) {
@@ -384,6 +502,78 @@ impl CanvasView {
                 tracing::warn!(%error, "canvas terminal spawn failed");
             }
         }
+    }
+
+    /// The container's terminal sheets still open anywhere on its canvas
+    /// (shown or parked) — the `/exit` teardown's read.
+    pub(crate) fn terminal_sheets(&self, container_id: &str) -> Vec<String> {
+        steer_canvas::projection::open_sheet_ids(self.host.layout(), self.host.held())
+            .into_iter()
+            .filter(|sheet| {
+                sheet_kind(sheet) == "terminal"
+                    && terminal_resource(sheet)
+                        .is_some_and(|resource| resource.container_id == container_id)
+            })
+            .collect()
+    }
+
+    /// Closes sheets without a window (the `/exit` leg): an AutoArchive the
+    /// close would ask for is dropped — the caller is tearing the container
+    /// down itself.
+    pub(crate) fn close_sheets_detached(&mut self, sheets: &[String], cx: &mut Context<Self>) {
+        for sheet in sheets {
+            if sheet_kind(sheet) == "pi-session" {
+                self.pi_views.remove(sheet);
+                let session_id = pi_session_of_sheet(sheet).to_owned();
+                self.pi_store
+                    .update(cx, |store, cx| store.close_session(&session_id, cx));
+            }
+            if self.host.close_sheet(sheet) == CanvasAction::Applied {
+                self.prune_terminals();
+                self.after_edit(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The card's measured interior size, in points.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn measured_size(&self) -> (f32, f32) {
+        self.canvas_size()
+    }
+
+    /// The sheet being dragged, if any (the source-fade read).
+    #[cfg(feature = "test-support")]
+    pub(crate) fn dragging_id(&self) -> Option<&str> {
+        self.dragging.as_deref()
+    }
+
+    /// Stages a drag WITHOUT a pointer (the visual scenes' stand-in for a
+    /// held mouse): the same pure hit test a real drag move runs, with the
+    /// source tab's fade and the indicator layer rendered from the result.
+    /// Nothing commits — the layout is only ever written by a drop.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn stage_drag(&mut self, sheet: &str, x: f32, y: f32, cx: &mut Context<Self>) {
+        let (width, height) = self.canvas_size();
+        if width <= 0. || height <= 0. {
+            return;
+        }
+        let layout = self.host.layout().clone();
+        let zoomed = self.host.zoomed().map(str::to_string);
+        let frame = projection::canvas_frame(&layout, width, height, zoomed.as_deref());
+        let boxes = projection::tab_bar_boxes(&layout, width, height, zoomed.as_deref());
+        self.dragging = Some(sheet.to_string());
+        self.drop = projection::drop_target(&frame, &boxes, Point { x, y });
+        cx.notify();
+    }
+
+    /// The post-edit faces a host-routed gesture needs (PTY pruning, the
+    /// debounced save, repaint).
+    #[cfg(feature = "test-support")]
+    pub(crate) fn prune_after_edit(&mut self, cx: &mut Context<Self>) {
+        self.prune_terminals();
+        self.after_edit(cx);
+        cx.notify();
     }
 
     /// Drops the PTY views of sheets no canvas holds any more (closed here, or
@@ -472,7 +662,9 @@ impl CanvasView {
         })
         .detach();
     }
+}
 
+impl CanvasView {
     /// Writes the pending save now. The generation guard keeps a superseded
     /// snapshot from ever overwriting a newer write — the newest edit for a
     /// container wins, whichever face landed it.
@@ -486,7 +678,8 @@ impl CanvasView {
         write_layout_snapshot(&container_id, &snapshot);
     }
 
-    /// The canvas page: every group's tab strip and content area.
+    /// The canvas page: the dock regions, the center's groups, the drag bands,
+    /// the live drop indicator and the tab menu.
     pub(crate) fn render_canvas(
         &mut self,
         window: &mut Window,
@@ -496,16 +689,75 @@ impl CanvasView {
         let size = self.size.get().unwrap_or_else(|| window.bounds().size);
         let (width, height) = (f32::from(size.width), f32::from(size.height));
         let layout = self.host.layout().clone();
-        let boxes = projection::tab_bar_boxes(&layout, width, height, self.host.zoomed());
+        let zoomed = self.host.zoomed().map(str::to_string);
+        let frame = projection::canvas_frame(&layout, width, height, zoomed.as_deref());
+        let boxes = projection::tab_bar_boxes(&layout, width, height, zoomed.as_deref());
         let groups = projection::group_frames(&boxes, TAB_STRIP_H);
-        let sheet_id = self.host.active_container().map(str::to_string);
-        let scratch = sheet_id.is_none();
+        let scratch = self.host.active_container().is_none();
 
         let mut root = v_flex()
             .size_full()
             .relative()
             .bg(theme.background)
-            .track_focus(&cx.focus_handle());
+            .track_focus(&cx.focus_handle())
+            .on_action(cx.listener(|this, _: &CanvasToggleZoom, _, cx| {
+                this.zoom_foreground(cx);
+            }))
+            // The move-drag's hit test: the pure projection resolves the
+            // pointer against the frame; the layout stays untouched until the
+            // drop commits.
+            .on_drag_move::<DraggedSheet>(cx.listener(
+                |this, ev: &DragMoveEvent<DraggedSheet>, _, cx| {
+                    let drag = ev.drag(cx);
+                    let Some((pointer, _origin)) = this.canvas_pointer(ev.bounds, &ev.event) else {
+                        return;
+                    };
+                    let Some(preview) = this.resolve_drop(pointer) else {
+                        if this.drop.take().is_some() || this.dragging.take().is_some() {
+                            cx.notify();
+                        }
+                        return;
+                    };
+                    let changed = this.drop.as_ref() != Some(&preview)
+                        || this.dragging.as_deref() != Some(drag.id.as_str());
+                    this.drop = Some(preview);
+                    this.dragging = Some(drag.id.clone());
+                    if changed {
+                        cx.notify();
+                    }
+                },
+            ))
+            // The drop commits once: the whole drag wrote nothing before it.
+            .on_drop::<DraggedSheet>(cx.listener(|this, dragged: &DraggedSheet, _, cx| {
+                let target = this.drop.take().map(|preview| preview.target);
+                this.dragging = None;
+                let Some(target) = target else {
+                    return;
+                };
+                this.commit_drop(&dragged.id, target, cx);
+            }))
+            // A split handle's drag: one ticket per move (real geometry), the
+            // save debounce converges behind it.
+            .on_drag_move::<DraggedSplit>(cx.listener(
+                |this, ev: &DragMoveEvent<DraggedSplit>, _, cx| {
+                    let path = ev.drag(cx).path.clone();
+                    let Some((pointer, _)) = this.canvas_pointer(ev.bounds, &ev.event) else {
+                        return;
+                    };
+                    this.drag_split(&path, pointer, cx);
+                },
+            ))
+            // A dock edge's drag: sizes (and, below the floor, collapses) the
+            // region on `side`.
+            .on_drag_move::<DraggedDock>(cx.listener(
+                |this, ev: &DragMoveEvent<DraggedDock>, _, cx| {
+                    let payload = ev.drag(cx);
+                    let Some((pointer, _origin)) = this.canvas_pointer(ev.bounds, &ev.event) else {
+                        return;
+                    };
+                    this.drag_dock(payload.side, pointer, cx);
+                },
+            ));
 
         for (box_, group) in boxes.iter().zip(groups.iter()) {
             root = root.child(self.render_group(box_, group, scratch, &theme, window, cx));
@@ -523,6 +775,42 @@ impl CanvasView {
             );
         }
 
+        // The invisible drag bands: center splits first, then each dock edge.
+        for handle in &frame.handles {
+            root = root.child(split_band(handle, cx));
+        }
+        for handle in &frame.dock_handles {
+            root = root.child(dock_band(handle, cx));
+        }
+
+        // The drop indicator, over the pages (its rects sit between tabs or
+        // inside the content, so nothing it covers is missed).
+        if self.dragging.is_some()
+            && let Some(preview) = &self.drop
+        {
+            root = root.child(indicator_layer(preview, &theme));
+        }
+
+        // The tab context menu: an anchored floating layer the menu itself
+        // dismisses (outside click / item click both fire DismissEvent).
+        if let Some((sheet, menu)) = self.tab_menu.clone() {
+            root = root.child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::TopRight)
+                        .position(self.tab_menu_anchor.unwrap_or_default())
+                        .offset(gpui::point(px(0.), px(2.)))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("canvas-tab-menu-{sheet}")))
+                                .occlude()
+                                .child(menu),
+                        ),
+                )
+                .with_priority(1),
+            );
+        }
+
         let size_cell = self.size.clone();
         root.on_prepaint(move |bounds, window, _| {
             let next = Some(bounds.size);
@@ -534,153 +822,447 @@ impl CanvasView {
         .into_any_element()
     }
 
-    /// One group: its tab strip and the displayed sheet's body.
+    /// The card's measured size, in points.
+    fn canvas_size(&self) -> (f32, f32) {
+        self.size
+            .get()
+            .map(|s| (f32::from(s.width), f32::from(s.height)))
+            .unwrap_or((0., 0.))
+    }
+
+    /// The pointer in canvas coordinates (window position minus the canvas
+    /// root's origin) and the root's window-space origin.
+    ///
+    /// `bounds` is the ROOT's — the drag-move handlers mount on it — so its
+    /// origin is the canvas's own origin in window space.
+    fn canvas_pointer(
+        &self,
+        bounds: Bounds<Pixels>,
+        event: &MouseMoveEvent,
+    ) -> Option<(Point, gpui::Point<Pixels>)> {
+        Some((
+            Point {
+                x: f32::from(event.position.x - bounds.left()),
+                y: f32::from(event.position.y - bounds.top()),
+            },
+            gpui::point(bounds.left(), bounds.top()),
+        ))
+    }
+
+    /// The pure placement: where would this pointer land a drop?
+    fn resolve_drop(&self, pointer: Point) -> Option<projection::DropPreview> {
+        let (width, height) = self.canvas_size();
+        if width <= 0. || height <= 0. {
+            return None;
+        }
+        let layout = self.host.layout().clone();
+        let zoomed = self.host.zoomed().map(str::to_string);
+        let frame = projection::canvas_frame(&layout, width, height, zoomed.as_deref());
+        let boxes = projection::tab_bar_boxes(&layout, width, height, zoomed.as_deref());
+        projection::drop_target(&frame, &boxes, pointer)
+    }
+
+    /// Commits a drag's drop through the one writer, then runs the standard
+    /// post-edit faces (PTY pruning, debounced save, repaint).
+    fn commit_drop(&mut self, sheet: &str, target: DropTarget, cx: &mut Context<Self>) {
+        match self.host.drop_sheet(sheet, target) {
+            CanvasAction::Applied => {
+                self.prune_terminals();
+                self.after_edit(cx);
+                cx.notify();
+            }
+            CanvasAction::Stale => {}
+            CanvasAction::AutoArchive(container_id) => {
+                cx.emit(crate::workspace::canvas_view::CanvasEvent::AutoArchive(
+                    container_id,
+                ));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Live split sizing: the pointer's coordinate along the split's axis is
+    /// the first slot's size (clamped), the second slot takes the rest.
+    fn drag_split(&mut self, path: &[usize], pointer: Point, cx: &mut Context<Self>) {
+        let (width, height) = self.canvas_size();
+        if width <= 0. {
+            return;
+        }
+        let layout = self.host.layout().clone();
+        let zoomed = self.host.zoomed().map(str::to_string);
+        let frame = projection::canvas_frame(&layout, width, height, zoomed.as_deref());
+        let Some(handle) = frame.handles.iter().find(|h| h.path == path) else {
+            return;
+        };
+        let horizontal = handle.axis == steer_canvas::layout::Axis::Horizontal;
+        let total = if horizontal {
+            handle.span.width
+        } else {
+            handle.span.height
+        };
+        let at = if horizontal {
+            pointer.x - handle.span.x
+        } else {
+            pointer.y - handle.span.y
+        };
+        let first = at.clamp(
+            SPLIT_MIN,
+            (total - SPLIT_HANDLE_GAP - SPLIT_MIN).max(SPLIT_MIN),
+        );
+        let sizes = vec![first, (total - SPLIT_HANDLE_GAP - first).max(SPLIT_MIN)];
+        if self.host.set_split_sizes(path, Some(sizes)) == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
+    /// Live dock sizing: the pointer's distance from the dock's outer edge is
+    /// the region's cross-edge size; below the floor the drag collapses the
+    /// dock (collapsible semantics), past the floor a closed dock reopens.
+    fn drag_dock(&mut self, side: DockSide, pointer: Point, cx: &mut Context<Self>) {
+        let (width, height) = self.canvas_size();
+        if width <= 0. {
+            return;
+        }
+        let size = match side {
+            DockSide::Left => pointer.x,
+            DockSide::Right => width - pointer.x,
+            DockSide::Bottom => height - pointer.y,
+        };
+        let was_open = self
+            .host
+            .layout()
+            .region(side)
+            .is_some_and(|region| region.open);
+        let action = if size < steer_canvas::layout::DOCK_MIN_SIZE {
+            if was_open {
+                self.host.set_dock_open(side, false)
+            } else {
+                CanvasAction::Stale
+            }
+        } else if !was_open {
+            let opened = self.host.set_dock_open(side, true);
+            if opened == CanvasAction::Applied {
+                self.host.set_dock_size(side, size)
+            } else {
+                opened
+            }
+        } else {
+            self.host.set_dock_size(side, size)
+        };
+        if action == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
+    /// Zooms the foreground center group (the `⌘⇧↵` action's face): the
+    /// center's first group's displayed sheet.
+    pub(crate) fn zoom_foreground(&mut self, cx: &mut Context<Self>) {
+        let Some(sheet) = steer_canvas::layout::first_center_active(self.host.layout()) else {
+            return;
+        };
+        if self.host.toggle_zoom(&sheet) == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+}
+
+/// The 1pt seam a split band straddles.
+const SPLIT_HANDLE_GAP: f32 = projection::SPLIT_HANDLE;
+
+/// The tab strip's content inset: the pill floats 2pt inside the track.
+const SWITCHER_INSET: f32 = 2.;
+
+impl CanvasView {
+    /// One group: its switcher track (the single traveling pill), its
+    /// persistent pages (shown + near slide; far stay empty frames), and the
+    /// sheet bodies.
     fn render_group(
         &mut self,
-        box_: &projection::TabBarBox,
+        box_: &TabBarBox,
         group: &GroupFrame,
         scratch: bool,
         theme: &gpui_component::Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rect = group.rect;
-        // The strip is positioned inside the group's own box (which is itself
-        // absolute), so its origin is the group's, not the canvas's.
-        let mut strip = h_flex()
-            .id(ElementId::Name(
-                format!("canvas-strip-{}", group.key).into(),
-            ))
+        let rect = box_.rect;
+        let track = self.render_track(box_, theme, cx);
+        let pages = self.render_pages(box_, group, window, cx);
+
+        v_flex()
+            .absolute()
+            .left(px(rect.x))
+            .top(px(rect.y))
+            .w(px(rect.width))
+            .h(px(rect.height))
+            .overflow_hidden()
+            .child(pages)
+            .child(track)
+            .when(scratch && box_.region.is_none(), |this| this)
+            .into_any_element()
+    }
+
+    /// The switcher: a track of equal-share cells (one per tab) and ONE pill
+    /// that travels under the displayed tab — a sibling of the cells inside a
+    /// relative wrapper, so gpui's child-then-border paint order cannot cover
+    /// it (the same rule the pane's indicator obeys).
+    fn render_track(
+        &mut self,
+        box_: &TabBarBox,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let count = box_.panels.len().max(1) as f32;
+        let track_width = box_.rect.width;
+        let share = track_width / count;
+
+        // The pill's target: the displayed tab's share. A one-place turn
+        // travels (the 504/38 spring as duration + quint easing); a jump or a
+        // first frame lands directly.
+        let active_id = box_.panels.get(box_.active).cloned();
+        let target_left = box_.active as f32 * share + SWITCHER_INSET;
+        let target_width = (share - SWITCHER_INSET * 2.).max(0.);
+        let from_left = self
+            .last_active
+            .get(&box_.key)
+            .and_then(|last| box_.panels.iter().position(|panel| panel == last))
+            .map(|last_index| last_index as f32 * share + SWITCHER_INSET);
+        let travel = match from_left {
+            Some(from) if (from - target_left).abs() > share * 1.5 => None,
+            Some(from) => Some((from, target_left)),
+            None => None,
+        };
+        if let Some(id) = &active_id {
+            self.last_active.insert(box_.key.clone(), id.clone());
+        }
+
+        let mut cells = h_flex().w_full().h_full();
+        for (index, sheet) in box_.panels.iter().enumerate() {
+            cells = cells.child(self.render_tab_cell(box_, index, sheet, theme, cx));
+        }
+
+        let pill_id = format!(
+            "canvas-pill-{}-{}",
+            box_.key,
+            active_id.clone().unwrap_or_default()
+        );
+        let pill_base = || {
+            div()
+                .absolute()
+                .top(px((TAB_STRIP_H - 26.) / 2.))
+                .h(px(26.))
+                .rounded(px(13.))
+                .bg(theme.background)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_sm()
+        };
+        let pill = match travel {
+            Some((from, to)) => pill_base()
+                .with_animation(
+                    ElementId::Name(pill_id.into()),
+                    gpui::Animation::new(SLIDE_DURATION).with_easing(ease_out_quint()),
+                    move |this, delta| {
+                        this.left(px(from + (to - from) * delta))
+                            .w(px(target_width))
+                    },
+                )
+                .into_any_element(),
+            None => pill_base()
+                .left(px(target_left))
+                .w(px(target_width))
+                .into_any_element(),
+        };
+
+        // The wrapper exists so the pill can be a SIBLING of the cells (gpui
+        // paints a parent's border after its children; a nested pill would be
+        // half-covered by the strip's own bottom hairline).
+        div()
+            .id(ElementId::Name(format!("canvas-strip-{}", box_.key).into()))
             .debug_selector({
-                let key = group.key.clone();
+                let key = box_.key.clone();
                 move || format!("canvas-strip-{key}")
             })
-            .absolute()
-            .left_0()
-            .top_0()
+            .relative()
             .w_full()
             .h(px(TAB_STRIP_H))
+            .flex_shrink_0()
+            .bg(theme.title_bar)
+            .border_b_1()
+            .border_color(theme.border)
+            // A double-click on the track's EMPTY area zooms the group; the
+            // tab cells swallow their own double-clicks (the split entry).
+            .on_double_click(cx.listener({
+                let active = active_id.clone();
+                move |this, _: &ClickEvent, _, cx| {
+                    if let Some(sheet) = active.clone() {
+                        this.toggle_zoom(&sheet, cx);
+                    }
+                }
+            }))
+            .child(cells)
+            .child(pill)
+            // The action cluster floats above the track's right end (the same
+            // "+ overlay above the bar" layering nsh-pi uses): its own wash
+            // keeps it legible over a long tab row.
+            .child(self.render_track_actions(theme, cx))
+            .into_any_element()
+    }
+
+    /// One switcher cell: the tab's label (equal share, the pill paints the
+    /// active state), its drag face, click/double-click faces and its close.
+    fn render_tab_cell(
+        &mut self,
+        box_: &TabBarBox,
+        index: usize,
+        sheet: &str,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active = index == box_.active;
+        let label = self
+            .host
+            .registry()
+            .tab_title(sheet, cx)
+            .unwrap_or_else(|| SharedString::from(sheet.to_string()));
+        let glyph = self.host.registry().glyph(sheet);
+        let closable = self.host.registry().closable(sheet);
+        let id = sheet.to_string();
+
+        let ghost = DraggedSheet {
+            id: id.clone(),
+            label: label.to_string(),
+            glyph: glyph.unwrap_or("file"),
+        };
+        let menu_id = id.clone();
+        let faded = self.dragging.as_deref() == Some(sheet);
+
+        let mut cell = h_flex()
+            .id(ElementId::Name(format!("canvas-tab-{id}").into()))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("canvas-tab-{id}")
+            })
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .px_2()
+            .gap_1()
+            .items_center()
+            .overflow_hidden()
+            .cursor_pointer()
+            .text_color(if active {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            })
+            .when(faded, |this| this.opacity(SOURCE_FADE))
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                // A double-click opens the start page in a new group beside
+                // this tab (the 04 split entry, now a placement drop); the
+                // propagation stops so the strip's zoom gesture never fires.
+                if event.click_count() >= 2 {
+                    cx.stop_propagation();
+                    this.split_home(&id, cx);
+                    return;
+                }
+                if this.host.activate_sheet(&id) == CanvasAction::Applied {
+                    this.after_edit(cx);
+                    cx.notify();
+                }
+            }))
+            .on_drag(ghost, |payload: &DraggedSheet, _, _, cx| {
+                cx.new(|_| payload.clone())
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_tab_menu(&menu_id, event.position, window, cx);
+                }),
+            );
+
+        if let Some(glyph) = glyph {
+            cell = cell.child(Icon::from(glyph_icon(glyph)).small());
+        }
+        cell = cell.child(gpui::div().text_sm().truncate().child(label));
+
+        if closable {
+            let close_id = sheet.to_string();
+            cell = cell.child(
+                gpui::div()
+                    .id(ElementId::Name(
+                        format!("canvas-tab-close-{close_id}").into(),
+                    ))
+                    .debug_selector({
+                        let close_id = close_id.clone();
+                        move || format!("canvas-tab-close-{close_id}")
+                    })
+                    .px_1()
+                    .rounded(theme.radius)
+                    .hover(|this| this.bg(theme.muted))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_sheet(&close_id, cx);
+                    }))
+                    .child(gpui_component::Icon::from(gpui_kit_assets::IconName::Close).xsmall()),
+            );
+        }
+        cell.into_any_element()
+    }
+
+    /// The strip's floating action cluster: terminal, pi session, start page.
+    fn render_track_actions(
+        &mut self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let in_container = self.host.active_container().is_some();
+        let mut actions = h_flex()
+            .absolute()
+            .right_0()
+            .top_0()
+            .h_full()
             .items_center()
             .gap_1()
             .px_2()
-            .bg(theme.title_bar)
-            .border_b_1()
-            .border_color(theme.border);
-
-        for (index, sheet) in box_.panels.iter().enumerate() {
-            let active = index == box_.active;
-            // The tab's label is the kind's tab title (a program-renamed tab,
-            // else the sheet's title); an unowned id shows its raw id (the
-            // shell never strands a tab it cannot name).
-            let label = self
-                .host
-                .registry()
-                .tab_title(sheet, cx)
-                .unwrap_or_else(|| SharedString::from(sheet.clone()));
-            let id = sheet.clone();
-            let glyph = self.host.registry().glyph(sheet);
-            let closable = self.host.registry().closable(sheet);
-
-            let mut tab = h_flex()
-                .id(ElementId::Name(format!("canvas-tab-{id}").into()))
-                .debug_selector({
-                    let id = id.clone();
-                    move || format!("canvas-tab-{id}")
-                })
-                .h(px(TAB_STRIP_H - 8.))
-                .px_2()
-                .gap_1()
-                .items_center()
-                .rounded(theme.radius)
-                .cursor_pointer()
-                .when(active, |this| {
-                    this.bg(theme.background).text_color(theme.foreground)
-                })
-                .when(!active, |this| this.text_color(theme.muted_foreground))
-                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                    // A double-click opens the start page in a new group
-                    // beside this tab (the v1 split entry).
-                    if event.click_count() >= 2 {
-                        this.split_home(&id, cx);
-                        return;
-                    }
-                    if this.host.activate_sheet(&id) == CanvasAction::Applied {
-                        this.after_edit(cx);
-                        cx.notify();
-                    }
-                }));
-
-            if let Some(glyph) = glyph {
-                tab = tab.child(Icon::from(glyph_icon(glyph)).small());
-            }
-            tab = tab.child(gpui::div().text_sm().child(label));
-
-            if closable {
-                let close_id = sheet.clone();
-                tab = tab.child(
+            .bg(theme.title_bar);
+        if in_container {
+            actions = actions
+                .child(
                     gpui::div()
-                        .id(ElementId::Name(
-                            format!("canvas-tab-close-{close_id}").into(),
-                        ))
-                        .debug_selector({
-                            let close_id = close_id.clone();
-                            move || format!("canvas-tab-close-{close_id}")
-                        })
+                        .id("canvas-open-terminal")
+                        .debug_selector(|| "canvas-open-terminal".to_string())
                         .px_1()
                         .rounded(theme.radius)
+                        .cursor_pointer()
                         .hover(|this| this.bg(theme.muted))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.close_sheet(&close_id, cx);
+                        .on_click(cx.listener(|this, _, _, cx| this.open_terminal(cx)))
+                        .child(Icon::from(gpui_kit_assets::IconName::SquareTerminal).xsmall()),
+                )
+                .child(
+                    gpui::div()
+                        .id("canvas-open-pi")
+                        .debug_selector(|| "canvas-open-pi".to_string())
+                        .px_1()
+                        .rounded(theme.radius)
+                        .cursor_pointer()
+                        .hover(|this| this.bg(theme.muted))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let cwd = this.cwd.clone();
+                            this.open_pi_session(cwd, cx);
                         }))
-                        .child(
-                            gpui_component::Icon::from(gpui_kit_assets::IconName::Close).xsmall(),
-                        ),
+                        .child(Icon::from(gpui_kit_assets::IconName::Sparkles).xsmall()),
                 );
-            }
-            strip = strip.child(tab);
         }
-
-        // The group's terminal "+": opens the container's next terminal sheet.
-        if self.host.active_container().is_some() {
-            strip = strip.child(
-                gpui::div()
-                    .id(ElementId::Name(
-                        format!("canvas-open-terminal-{}", group.key).into(),
-                    ))
-                    .debug_selector(|| "canvas-open-terminal".to_string())
-                    .px_1()
-                    .rounded(theme.radius)
-                    .cursor_pointer()
-                    .hover(|this| this.bg(theme.muted))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_terminal(cx)))
-                    .child(Icon::from(gpui_kit_assets::IconName::SquareTerminal).xsmall()),
-            );
-            strip = strip.child(
-                gpui::div()
-                    .id(ElementId::Name(
-                        format!("canvas-open-pi-{}", group.key).into(),
-                    ))
-                    .debug_selector(|| "canvas-open-pi".to_string())
-                    .px_1()
-                    .rounded(theme.radius)
-                    .cursor_pointer()
-                    .hover(|this| this.bg(theme.muted))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let cwd = this.cwd.clone();
-                        this.open_pi_session(cwd, cx);
-                    }))
-                    .child(Icon::from(gpui_kit_assets::IconName::Sparkles).xsmall()),
-            );
-        }
-
-        // The group's own "+": the container's start page.
         if let Some(container) = self.host.active_container().map(str::to_string) {
             let home = home_sheet_id(&container);
-            strip = strip.child(
+            actions = actions.child(
                 gpui::div()
-                    .id(ElementId::Name(
-                        format!("canvas-open-home-{}", group.key).into(),
-                    ))
+                    .id("canvas-open-home")
                     .debug_selector(|| "canvas-open-home".to_string())
                     .px_1()
                     .rounded(theme.radius)
@@ -695,26 +1277,108 @@ impl CanvasView {
                     .child(Icon::from(gpui_kit_assets::IconName::Plus).xsmall()),
             );
         }
-        let _ = scratch;
-
-        let active_sheet = box_.panels.get(box_.active).cloned();
-        let body = active_sheet
-            .as_deref()
-            .map(|sheet| self.render_sheet_body(sheet, window, cx))
-            .unwrap_or_else(|| gpui::div().into_any_element());
-
-        v_flex()
-            .absolute()
-            .left(px(rect.x))
-            .top(px(rect.y))
-            .w(px(rect.width))
-            .h(px(rect.height))
-            .overflow_hidden()
-            .child(gpui::div().flex_1().min_h_0().w_full().h_full().child(body))
-            .child(strip)
-            .into_any_element()
+        actions.into_any_element()
     }
 
+    /// The group's persistent pages: shown and near (±1) render real bodies
+    /// (a webview or a diff is not built for a tab two places away), the far
+    /// ones empty frames; the row translates so the displayed sheet sits at
+    /// rest, and a ONE-place turn slides (the animation's reachable set and
+    /// the body build set stay equal — a far jump would slide over blanks).
+    fn render_pages(
+        &mut self,
+        box_: &TabBarBox,
+        group: &GroupFrame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let width = group.rect.width;
+        let count = box_.panels.len().max(1);
+        let rest = -(box_.active as f32 * width);
+
+        let mut pages = h_flex().h_full();
+        for (index, sheet) in box_.panels.iter().enumerate() {
+            let place = index as i32 - box_.active as i32;
+            let body = if place.abs() <= 1 {
+                self.render_sheet_body(sheet, window, cx)
+            } else {
+                gpui::div().into_any_element()
+            };
+            pages = pages.child(
+                div()
+                    .w(px(width))
+                    .h_full()
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .child(body),
+            );
+        }
+        pages = pages.w(px(width * count as f32));
+
+        // The slide: from the previously displayed sheet's place, only when
+        // it is exactly one place away.
+        let slide = self
+            .last_active
+            .get(&box_.key)
+            .and_then(|last| box_.panels.iter().position(|panel| panel == last))
+            .map(|last_index| -(last_index as i32 - box_.active as i32))
+            .filter(|from_place| from_place.abs() == 1)
+            .map(|from_place| from_place as f32 * width);
+        if let Some(id) = active_id_of(box_) {
+            self.last_active.insert(box_.key.clone(), id);
+        }
+
+        let row = match slide {
+            Some(from) => {
+                let to = rest;
+                pages
+                    .absolute()
+                    .top_0()
+                    .left(px(from))
+                    .h_full()
+                    .with_animation(
+                        ElementId::Name(
+                            format!(
+                                "canvas-pages-{}-{}",
+                                box_.key,
+                                active_id_of(box_).unwrap_or_default()
+                            )
+                            .into(),
+                        ),
+                        gpui::Animation::new(SLIDE_DURATION).with_easing(ease_out_quint()),
+                        move |this, delta| this.left(px(from + (to - from) * delta)),
+                    )
+                    .into_any_element()
+            }
+            None => pages
+                .absolute()
+                .top_0()
+                .left(px(rest))
+                .h_full()
+                .into_any_element(),
+        };
+
+        // Anchored top AND bottom: an absolutely positioned container without
+        // a bottom edge has no height to flex into, and the column inside
+        // collapses to its content height (the footer rides up with it).
+        div()
+            .absolute()
+            .left_0()
+            .top(px(TAB_STRIP_H))
+            .bottom_0()
+            .w_full()
+            .overflow_hidden()
+            .child(row)
+            .into_any_element()
+    }
+}
+
+/// A box's displayed sheet id, if it has one.
+fn active_id_of(box_: &TabBarBox) -> Option<String> {
+    box_.panels.get(box_.active).cloned()
+}
+
+impl CanvasView {
     /// One sheet's content, produced by the entity that owns it.
     fn render_sheet_body(
         &mut self,
@@ -752,19 +1416,6 @@ impl CanvasView {
         }
     }
 
-    /// The v1 split gesture: the container's start page opens in a new group
-    /// beside `beside`.
-    pub(crate) fn split_home(&mut self, beside: &str, cx: &mut Context<Self>) {
-        let Some(container) = self.host.active_container().map(str::to_string) else {
-            return;
-        };
-        let home = home_sheet_id(&container);
-        if self.host.split_right(beside, &home) == CanvasAction::Applied {
-            self.after_edit(cx);
-            cx.notify();
-        }
-    }
-
     /// The pi sheet's body entity, created on first show and kept for the
     /// sheet's life (a tab switch must not rebuild a running conversation).
     fn pi_view(&mut self, sheet: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -776,6 +1427,97 @@ impl CanvasView {
         let view = cx.new(|cx| PiSessionView::new(store, session_id, window, cx));
         self.pi_views.insert(sheet.to_owned(), view.clone());
         view.into_any_element()
+    }
+
+    /// The v1 split gesture: the container's start page opens in a new group
+    /// beside `beside` — a placement drop, like every other move.
+    pub(crate) fn split_home(&mut self, beside: &str, cx: &mut Context<Self>) {
+        let Some(container) = self.host.active_container().map(str::to_string) else {
+            return;
+        };
+        let home = home_sheet_id(&container);
+        let target = DropTarget::Split {
+            anchor: beside.to_string(),
+            side: SplitEdge::Right,
+        };
+        if self.host.drop_sheet(&home, target) == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
+    /// Zooms (or unzooms) one sheet — the track's empty-area double-click and
+    /// the context menu's item.
+    pub(crate) fn toggle_zoom(&mut self, sheet: &str, cx: &mut Context<Self>) {
+        let applied = self.host.toggle_zoom(sheet);
+        if applied == CanvasAction::Applied {
+            self.after_edit(cx);
+            cx.notify();
+        }
+    }
+
+    /// The tab's right-click menu: zoom toggle, split right, close.
+    fn open_tab_menu(
+        &mut self,
+        sheet: &str,
+        anchor: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_component::menu::{PopupMenu, PopupMenuItem};
+
+        let zoomed = self.host.zoomed() == Some(sheet);
+        let closable = self.host.registry().closable(sheet);
+        let this = cx.entity();
+        let zoom_sheet = sheet.to_string();
+        let zoom_label = if zoomed {
+            crate::i18n::t("canvas-tab-unzoom")
+        } else {
+            crate::i18n::t("canvas-tab-zoom")
+        };
+        let split_sheet = sheet.to_string();
+        let close_sheet_id = sheet.to_string();
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+            let zoom_this = this.clone();
+            let split_this = this.clone();
+            let close_this = this.clone();
+            let mut built = menu
+                .item(PopupMenuItem::new(zoom_label).on_click(move |_, _, cx| {
+                    zoom_this.update(cx, |this, cx| {
+                        this.toggle_zoom(&zoom_sheet, cx);
+                    });
+                }))
+                .item(
+                    PopupMenuItem::new(crate::i18n::t("canvas-split-right")).on_click(
+                        move |_, _, cx| {
+                            split_this.update(cx, |this, cx| {
+                                this.split_home(&split_sheet, cx);
+                            });
+                        },
+                    ),
+                );
+            if closable {
+                built = built.item(
+                    PopupMenuItem::new(crate::i18n::t("canvas-close-sheet")).on_click(
+                        move |_, _, cx| {
+                            close_this.update(cx, |this, cx| {
+                                this.close_sheet(&close_sheet_id, cx);
+                            });
+                        },
+                    ),
+                );
+            }
+            built
+        });
+        let sub = cx.subscribe(&menu, |this, _menu, _: &gpui::DismissEvent, cx| {
+            this.tab_menu = None;
+            this._tab_menu_sub = None;
+            cx.notify();
+        });
+        self._tab_menu_sub = Some(sub);
+        self.tab_menu_anchor = Some(anchor);
+        self.tab_menu = Some((sheet.to_string(), menu));
+        cx.notify();
     }
 
     fn close_sheet(&mut self, sheet: &str, cx: &mut Context<Self>) {
@@ -903,6 +1645,141 @@ impl CanvasView {
     pub(crate) fn host_pi_views(&self) -> &HashMap<String, Entity<PiSessionView>> {
         &self.pi_views
     }
+}
+
+/// The chrome-free resize appearance: nothing. The seams are the card gaps
+/// themselves; the band is a pure hit strip.
+fn invisible_appearance() -> gpui_base::ResizeHandleRenderer {
+    std::rc::Rc::new(|_, _, _| Some(gpui::Empty.into_any_element()))
+}
+
+/// A center split's invisible drag band, with the double-click equal-share
+/// reset.
+fn split_band(handle: &SplitHandle, cx: &mut Context<CanvasView>) -> AnyElement {
+    let axis = match handle.axis {
+        steer_canvas::layout::Axis::Horizontal => gpui::Axis::Horizontal,
+        steer_canvas::layout::Axis::Vertical => gpui::Axis::Vertical,
+    };
+    let joined = handle
+        .path
+        .iter()
+        .map(|step| step.to_string())
+        .collect::<Vec<_>>()
+        .join("-");
+    let name = if joined.is_empty() {
+        "root".to_string()
+    } else {
+        joined
+    };
+    let id = SharedString::from(format!("canvas-split-band-{name}"));
+    div()
+        .absolute()
+        .left(px(handle.rect.x))
+        .top(px(handle.rect.y))
+        .w(px(handle.rect.width))
+        .h(px(handle.rect.height))
+        .debug_selector({
+            let id = id.clone();
+            move || id.to_string()
+        })
+        .child(
+            gpui_base::resize_handle::<DraggedSplit, DraggedSplit>(id, axis)
+                .with_appearance(invisible_appearance())
+                .on_drag(
+                    DraggedSplit {
+                        path: handle.path.clone(),
+                    },
+                    |payload: &DraggedSplit, _, _, cx| {
+                        cx.new(|_| DraggedSplit {
+                            path: payload.path.clone(),
+                        })
+                    },
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .on_double_click(cx.listener({
+                    let path = handle.path.clone();
+                    move |this, _: &ClickEvent, _, cx| {
+                        if this.host.set_split_sizes(&path, None) == CanvasAction::Applied {
+                            this.after_edit(cx);
+                            cx.notify();
+                        }
+                    }
+                })),
+        )
+        .into_any_element()
+}
+
+/// A dock edge's invisible drag band: sizes the region (collapsing below the
+/// floor, reopening a closed one past it); double-click restores the default.
+fn dock_band(handle: &projection::DockHandle, cx: &mut Context<CanvasView>) -> AnyElement {
+    let axis = match handle.side {
+        DockSide::Left | DockSide::Right => gpui::Axis::Horizontal,
+        DockSide::Bottom => gpui::Axis::Vertical,
+    };
+    let side = handle.side;
+    div()
+        .absolute()
+        .left(px(handle.rect.x))
+        .top(px(handle.rect.y))
+        .w(px(handle.rect.width))
+        .h(px(handle.rect.height))
+        .debug_selector({
+            let name = side.name();
+            move || format!("canvas-dock-band-{name}")
+        })
+        .child(
+            gpui_base::resize_handle::<DraggedDock, DraggedDock>(
+                SharedString::from(format!("canvas-dock-band-{}", side.name())),
+                axis,
+            )
+            .with_appearance(invisible_appearance())
+            .on_drag(DraggedDock { side }, |payload: &DraggedDock, _, _, cx| {
+                cx.new(|_| *payload)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_double_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                let opened = this.host.set_dock_open(side, true);
+                if opened == CanvasAction::Applied
+                    && this
+                        .host
+                        .set_dock_size(side, steer_canvas::layout::DOCK_DEFAULT_SIZE)
+                        == CanvasAction::Applied
+                {
+                    this.after_edit(cx);
+                    cx.notify();
+                }
+            })),
+        )
+        .into_any_element()
+}
+
+/// The live drop indicator: a 2pt brand line for a tab slot, a brand-tinted
+/// block with a 1pt border for everything else (DESIGN §3.7).
+fn indicator_layer(preview: &projection::DropPreview, theme: &gpui_component::Theme) -> AnyElement {
+    let (rect, slot) = match preview.indicator {
+        Indicator::Slot(rect) => (rect, true),
+        Indicator::Block(rect) => (rect, false),
+    };
+    let mut el = div()
+        .absolute()
+        .left(px(rect.x))
+        .top(px(rect.y))
+        .w(px(rect.width))
+        .h(px(rect.height))
+        .debug_selector(|| "canvas-drop-indicator".to_string());
+    el = if slot {
+        el.rounded(px(1.)).bg(theme.accent)
+    } else {
+        el.rounded(px(8.))
+            .bg(theme.accent.opacity(0.15))
+            .border_1()
+            .border_color(theme.accent)
+    };
+    el.into_any_element()
 }
 
 impl Render for CanvasView {

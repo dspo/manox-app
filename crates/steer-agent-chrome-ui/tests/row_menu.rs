@@ -52,11 +52,12 @@ fn shell_config(main: gpui::AnyView, set_tag_log: TagLog, title_log: TitleLog) -
     ShellConfig {
         main: Arc::new(StubMain { view: main }),
         tool_kinds: vec![],
-        panel_surface: None,
         brand: None,
         fixed_rows: vec![],
         customizations: vec![],
         hooks: HostHooks {
+            on_toggle_dock: None,
+            dock_open: None,
             on_set_tag: Some(Box::new(move |id, tag, _w, _cx| {
                 set_tag_log.borrow_mut().push((id.to_string(), tag));
             })),

@@ -30,7 +30,7 @@ use steer_agent_chrome_ui::{
 };
 
 use crate::Workspace;
-use crate::tool_tabs::{ThreadTerminalPanelSurface, registry};
+use crate::tool_tabs::registry;
 use crate::views::subagent_panel::SubagentPanel;
 
 /// The live shell, for pane opens that originate OUTSIDE the view tree (an
@@ -127,16 +127,6 @@ pub fn pane_open_tab_ids(cx: &App) -> Vec<String> {
     shell.read(cx).right.read(cx).tab_ids()
 }
 
-/// Take the live dock's panel view and drop it — dropping the terminal view
-/// tears its PTY down (process-tree SIGTERM → SIGKILL), which is how `/exit`
-/// stops the dock's subprocesses. A collapsed dock holds no view: nothing to
-/// take, nothing to kill.
-pub fn stop_dock_terminal(cx: &mut App) {
-    defer_shell(cx, |shell, _window, cx| {
-        drop(shell.take_panel_view(cx));
-    });
-}
-
 /// The distinct tool-tab kinds open in the live pane — `/exit`'s read-only
 /// probe of what owns live processes. Empty when no shell is live.
 pub fn pane_open_kinds(cx: &App) -> Vec<String> {
@@ -151,11 +141,6 @@ pub fn pane_open_kinds(cx: &App) -> Vec<String> {
         .into_iter()
         .map(str::to_string)
         .collect()
-}
-
-/// Whether the bottom dock holds a live view (the `/exit` teardown's probe).
-pub fn dock_terminal_live(cx: &App) -> bool {
-    shell_handle().is_some_and(|shell| shell.read(cx).panel_live())
 }
 
 /// The open observation panel for a sub-agent address, when one is mounted in
@@ -377,39 +362,24 @@ fn project(shell: &Entity<Shell>, ws: &Entity<Workspace>, cx: &mut App) {
             crate::title_store::TitleStore::global().prune(&session_id);
         }
     }
-    let old_id = ws.read(cx).dock_owner();
+    let old_id = ws.read(cx).right_owner();
     if fg != old_id && fg.is_some() {
-        // The outgoing views leave the shell first, land under the
+        // The outgoing pane leaves the shell first, lands under the
         // outgoing container's key, then the incoming container's own
-        // come back (or the pane falls back to its persisted snapshot /
-        // the fresh new-tab page).
-        let taken = shell.update(cx, |shell, cx| shell.take_panel_view(cx));
+        // comes back (or the pane falls back to its persisted snapshot /
+        // the fresh new-tab page). The dock rides the canvas layout — no
+        // shell-side stash.
         let outgoing = shell.update(cx, |shell, cx| shell.stash_right_session(cx));
         ws.update(cx, |ws, _| {
-            ws.set_dock_owner(fg.clone());
             ws.set_right_owner(fg.clone());
-            if let (Some(old_id), Some(view)) = (&old_id, taken) {
-                ws.stash_dock(old_id, view);
-            }
             if let Some(old_id) = &old_id
                 && let Some(session) = outgoing
             {
                 ws.stash_right(old_id, session);
             }
         });
-        let (dock_in, right_in) = ws.update(cx, |ws, _| {
-            (
-                fg.as_ref().and_then(|id| ws.take_dock(id)),
-                fg.as_ref().and_then(|id| ws.take_right(id)),
-            )
-        });
+        let right_in = ws.update(cx, |ws, _| fg.as_ref().and_then(|id| ws.take_right(id)));
         shell.update(cx, |shell, cx| {
-            // No stashed terminal: the slot stays empty — the next
-            // expand spawns at the NEW container's attrs cwd via the
-            // surface. The right pane rides the same switch.
-            if let Some(view) = dock_in {
-                shell.set_panel_view(view, cx);
-            }
             match right_in {
                 Some(session) => shell.restore_right_session(session, cx),
                 None => {
@@ -483,7 +453,6 @@ fn shell_config(
             ws: ws.clone(),
         }),
 
-        panel_surface: Some(Arc::new(ThreadTerminalPanelSurface)),
         // The fixed sidebar rows / Customizations block are still fake
         // surfaces (Automations scheduling, plugin/MCP management pages
         // don't exist here yet) — no fabricated badge/count, the chrome
@@ -513,6 +482,23 @@ fn shell_config(
             },
         ],
         hooks: HostHooks {
+            // The dock toggle (the titlebar's panel button): the canvas owns
+            // the bottom dock, so the flip is a workspace write; the button's
+            // lit state is a render-time read of the canvas layout (no local
+            // mirror — boundary invariant ②).
+            on_toggle_dock: Some(Box::new({
+                let ws = ws.clone();
+                move |side, _w, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.toggle_canvas_dock(side, cx);
+                        cx.notify();
+                    });
+                }
+            })),
+            dock_open: Some(Box::new({
+                let ws = ws.clone();
+                move |cx| ws.read(cx).canvas_dock_open(cx)
+            })),
             // Pin is a client-dispatchable extension action on the thread
             // channel: dispatching journals it host-side (the store row plus
             // sidebar order) and the echo folds back into the sidebar read.
@@ -1029,12 +1015,7 @@ pub fn reclaim_container_panes(container: &str, cx: &mut App) {
     // Belt and braces: the observer may have re-stashed under the dead key
     // between the workspace-side reclaim and this deferred half.
     ws.update(cx, |ws, _| ws.reclaim_stash(container));
-    let dock_mine = ws.read(cx).dock_owner().as_deref() == Some(container);
     let right_mine = ws.read(cx).right_owner().as_deref() == Some(container);
-    if dock_mine {
-        ws.update(cx, |ws, _| ws.set_dock_owner(None));
-        stop_dock_terminal(cx);
-    }
     if right_mine {
         ws.update(cx, |ws, _| ws.set_right_owner(None));
         // The PTY kinds' close never re-enters the workspace; the browser

@@ -89,11 +89,12 @@ fn shell_config(menu_log: MenuLog, main: gpui::AnyView) -> ShellConfig {
     ShellConfig {
         main: Arc::new(StubMain { view: main }),
         tool_kinds: vec![],
-        panel_surface: None,
         brand: None,
         fixed_rows: vec![],
         customizations: vec![],
         hooks: HostHooks {
+            on_toggle_dock: None,
+            dock_open: None,
             on_group_menu: Some(Box::new(move |key, project, _anchor, window, cx| {
                 menu_log
                     .borrow_mut()
@@ -316,11 +317,12 @@ fn nested_window_update_from_a_select_hook(cx: &mut TestAppContext) {
                 ShellConfig {
                     main: Arc::new(StubMain { view: main }),
                     tool_kinds: vec![],
-                    panel_surface: None,
                     brand: None,
                     fixed_rows: vec![],
                     customizations: vec![],
                     hooks: HostHooks {
+                        on_toggle_dock: None,
+                        dock_open: None,
                         on_select: Some(on_select),
                         active_row: Some(Box::new({
                             let selected = selected_for_build.clone();
@@ -384,11 +386,12 @@ fn external_row_menu_closes_the_session(cx: &mut TestAppContext) {
                 ShellConfig {
                     main: Arc::new(StubMain { view: main }),
                     tool_kinds: vec![],
-                    panel_surface: None,
                     brand: None,
                     fixed_rows: vec![],
                     customizations: vec![],
                     hooks: HostHooks {
+                        on_toggle_dock: None,
+                        dock_open: None,
                         on_close_external: Some(Box::new(move |id, _w, _cx| {
                             closed_for_build.borrow_mut().push(id.to_string());
                         })),

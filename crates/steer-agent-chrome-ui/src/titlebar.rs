@@ -53,9 +53,11 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
             cx.notify();
         }
     });
-    let toggle_panel = cx.listener(|this, _: &ClickEvent, window, cx| {
-        this.toggle_panel(window, cx);
-        cx.notify();
+    // The dock toggle is a host action now (the canvas owns the bottom dock):
+    // the button mirrors the host's own dock state and the click lands on the
+    // hook. A host without the faces renders the button dark and inert.
+    let toggle_dock = cx.listener(|this, _: &ClickEvent, window, cx| {
+        this.toggle_bottom_dock(window, cx);
     });
     let toggle_right = cx.listener(|this, _: &ClickEvent, _w, cx| {
         this.right.update(cx, |pane, cx| pane.toggle_visible(cx));
@@ -201,12 +203,12 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
                     "tb-panel",
                     icons::LAYOUT_PANEL,
                     15.,
-                    if shell.show_panel {
+                    if shell.hooks.dock_open.as_ref().is_some_and(|open| open(cx)) {
                         IconButtonState::On
                     } else {
                         IconButtonState::Off
                     },
-                    move |e, w, cx| toggle_panel(e, w, cx),
+                    move |e, w, cx| toggle_dock(e, w, cx),
                 ))
                 // Right-pane toggle.
                 .child(icon_button(

@@ -34,7 +34,7 @@ use steer_agent_chrome_ui::session_list::SessionStatus;
 use steer_agent_chrome_ui::shell::SessionRow;
 use steer_agent_chrome_ui::theme::{self, IconAsset, icon};
 use steer_agent_chrome_ui::{
-    CustomizationRow, FixedRow, HostHooks, MainSurface, PanelSurface, Shell, ShellConfig, ToolTab,
+    CustomizationRow, FixedRow, HostHooks, MainSurface, Shell, ShellConfig, ToolTab,
     ToolTabFactory, icons, register_fonts, window_options,
 };
 
@@ -110,7 +110,6 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
                 "copilot",
             )),
         ],
-        panel_surface: Some(Arc::new(TerminalPanel)),
         fixed_rows: vec![
             FixedRow {
                 icon: icons::CALENDAR,
@@ -146,6 +145,8 @@ fn shell_config(main_view: Entity<ChatPreview>, titles: TitleMap) -> ShellConfig
             },
         ],
         hooks: HostHooks {
+            on_toggle_dock: None,
+            dock_open: None,
             on_group_order: None,
             // No registry behind the example — no ＋, no row-drop face and
             // no membership rows (the hooks' absence is the contract, not a
@@ -868,25 +869,6 @@ fn normalize_url(s: &str) -> String {
         t.to_string()
     } else {
         format!("https://{t}")
-    }
-}
-
-// ── bottom dock: a PTY terminal surface ───────────────────────────────────
-
-struct TerminalPanel;
-
-impl PanelSurface for TerminalPanel {
-    fn title(&self) -> SharedString {
-        steer_i18n::t("chrome-tab-ghostty").into()
-    }
-
-    fn icon(&self) -> IconAsset {
-        icons::TERMINAL
-    }
-
-    fn open(&self, _window: &mut Window, cx: &mut gpui::App) -> Result<AnyView, String> {
-        let view = spawn_terminal(None, &std::env::temp_dir(), cx)?;
-        Ok(AnyView::from(view))
     }
 }
 
