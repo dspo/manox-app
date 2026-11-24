@@ -167,65 +167,21 @@ impl UnsentOutbox {
 /// the developer's real state. A shipped build uses the app-layer home and
 /// carries the pre-split ledger over once.
 ///
-/// The pick is a compile-time constant (`cfg!`, not `#[cfg]` on statements):
-/// both arms and every helper they call stay referenced in every build, so no
-/// feature combination leaves dead code or an unused import behind.
+/// The pick is a compile-time constant (`cfg!`, not `#[cfg]` on statements)
+/// so every helper stays referenced in every build. The ledger lives where the
+/// app layer puts it; nothing is carried from another root.
 fn ledger_location() -> PathBuf {
     if cfg!(any(test, feature = "test-support")) {
         return std::env::temp_dir().join(format!("steer-unsent-{}.jsonl", std::process::id()));
     }
-    let path = steer_paths::steer_home()
+    steer_paths::steer_home()
         .map(|home| ledger_path(&home))
-        .unwrap_or_else(|| PathBuf::from("unsent.jsonl"));
-    carry_over_from_manox_layer(&path);
-    path
+        .unwrap_or_else(|| PathBuf::from("unsent.jsonl"))
 }
 
 /// The ledger file under an app-layer home.
 fn ledger_path(home: &Path) -> PathBuf {
     home.join("unsent.jsonl")
-}
-
-/// The one-time carry-over from the pre-split location: the ledger once
-/// lived under the manox harness layer (`<manox-root>/steer/unsent.jsonl`)
-/// but is app-layer data, so a ledger written there is renamed into the app
-/// root when the app root has none yet. The old root is resolved through the
-/// path authority so an isolated (`STEER_HOME`) instance never reaches into
-/// the real root. A failure logs and starts from an empty ledger — recovery
-/// drafts are never worth a startup blocker.
-fn carry_over_from_manox_layer(new_path: &Path) {
-    let Some(old_path) =
-        steer_paths::manox_root().map(|root| root.join("steer").join("unsent.jsonl"))
-    else {
-        return;
-    };
-    migrate_ledger_at(new_path, &old_path);
-}
-
-/// The path-explicit carry-over core. Idempotent: a live app-root ledger is
-/// never replaced by an old one, and nothing to carry is a no-op.
-fn migrate_ledger_at(new_path: &Path, old_path: &Path) {
-    if new_path.exists() || !old_path.exists() {
-        return;
-    }
-    if let Some(parent) = new_path.parent()
-        && let Err(err) = fs::create_dir_all(parent)
-    {
-        tracing::warn!(
-            error = %err,
-            path = %new_path.display(),
-            "unsent ledger carry-over failed; starting from an empty ledger"
-        );
-        return;
-    }
-    if let Err(err) = fs::rename(old_path, new_path) {
-        tracing::warn!(
-            error = %err,
-            old = %old_path.display(),
-            new = %new_path.display(),
-            "unsent ledger carry-over failed; starting from an empty ledger"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -292,41 +248,5 @@ mod tests {
             ledger_path(Path::new("/home/u/.steer")),
             PathBuf::from("/home/u/.steer/unsent.jsonl")
         );
-    }
-
-    /// The one-time carry-over: a ledger written under the manox layer is
-    /// renamed into the app root with its rows intact; a live app-root
-    /// ledger is never replaced by an old one.
-    #[test]
-    fn a_manox_layer_ledger_is_carried_to_the_app_root_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("manox/steer/unsent.jsonl");
-        let new = dir.path().join("steer/unsent.jsonl");
-        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        UnsentOutbox::at(old.clone()).push(&UnsentTurn::new(
-            "t-1".into(),
-            "s-1".into(),
-            "carried".into(),
-            Vec::new(),
-        ));
-
-        migrate_ledger_at(&new, &old);
-        assert!(!old.exists());
-        assert_eq!(
-            UnsentOutbox::at(new.clone()).take_for_session("s-1").len(),
-            1,
-            "the carried rows survive under the app root"
-        );
-
-        // A live app-root ledger wins: the old file is not carried over it.
-        UnsentOutbox::at(old.clone()).push(&UnsentTurn::new(
-            "t-2".into(),
-            "s-2".into(),
-            "stale".into(),
-            Vec::new(),
-        ));
-        migrate_ledger_at(&new, &old);
-        assert!(old.exists());
-        assert!(UnsentOutbox::at(new).take_for_session("s-2").is_empty());
     }
 }

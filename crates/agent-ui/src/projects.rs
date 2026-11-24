@@ -21,10 +21,8 @@
 //!   external container has no durable record and its death paths include
 //!   ones that skip the teardown, so the key is dead weight by construction.
 //!
-//! The pre-split layout kept these keys on the runtime's settings document
-//! (`<manox_root>/settings.toml`); the first load extracts them into the new
-//! document and deletes them there — one-time, idempotent, skipped when the
-//! new document already exists.
+//! The document is the app layer's own: it carries these keys and nothing
+//! else is read or written for them.
 //!
 //! The write face enforces every invariant (roots exist as directories,
 //! dedup + canonicalization, exactly one primary, primary among the roots);
@@ -119,12 +117,6 @@ fn projects_file() -> Option<PathBuf> {
         }
     }
     steer_paths::steer_home().map(|home| home.join("projects.toml"))
-}
-
-/// The runtime's settings document — the extraction source only; after the
-/// first extraction nothing here reads it again.
-fn legacy_settings_file() -> Option<PathBuf> {
-    steer_paths::manox_root().map(|root| root.join("settings.toml"))
 }
 
 // ── reads ─────────────────────────────────────────────────────────────
@@ -516,57 +508,7 @@ fn load() -> Registry {
     let Some(path) = projects_file() else {
         return Registry::default();
     };
-    if !path.exists()
-        && let Some(legacy) = legacy_settings_file()
-    {
-        extract_legacy_registry_at(&path, &legacy);
-    }
     load_at(&path)
-}
-
-/// One-time extraction of `[[project]]` + `[project_membership]` from the
-/// legacy shared settings document into the app-owned projects document.
-/// The write is the read half's inverse: parse the legacy doc, carry the two
-/// registry keys over verbatim, then delete them there — and refuse to touch
-/// a document that does not parse, since the runtime shares it. Every
-/// failure leaves both files as found and a warning behind; the extraction
-/// retries on the next launch until the new document exists.
-fn extract_legacy_registry_at(new_path: &Path, old_path: &Path) {
-    let Ok(raw) = std::fs::read_to_string(old_path) else {
-        return;
-    };
-    let Ok(mut old_doc) = toml::from_str::<toml::Value>(&raw) else {
-        tracing::warn!(
-            path = %old_path.display(),
-            "legacy settings.toml does not parse; project registry extraction skipped"
-        );
-        return;
-    };
-    let Some(table) = old_doc.as_table_mut() else {
-        return;
-    };
-    let project = table.remove("project");
-    let membership = table.remove("project_membership");
-    if project.is_none() && membership.is_none() {
-        return;
-    }
-    let mut new_doc = toml::Value::Table(toml::map::Map::new());
-    {
-        let new_table = new_doc
-            .as_table_mut()
-            .expect("freshly built document is a table");
-        if let Some(project) = project {
-            new_table.insert("project".to_string(), project);
-        }
-        if let Some(membership) = membership {
-            new_table.insert("project_membership".to_string(), membership);
-        }
-    }
-    if write_document(new_path, &new_doc).is_err() {
-        // The legacy document was never modified, so the next launch retries.
-        return;
-    }
-    rewrite_document(old_path, &old_doc);
 }
 
 /// The registry parse of one settings file — the loader the cache uses and
@@ -728,15 +670,6 @@ fn write_document(path: &Path, doc: &toml::Value) -> anyhow::Result<()> {
     temp.persist(path)
         .context("swap projects.toml into place")?;
     Ok(())
-}
-
-/// Best-effort rewrite of the legacy document (the key deletions after an
-/// extraction): failures are logged, never fatal — a lingering legacy key is
-/// dead weight, not a blocker.
-fn rewrite_document(path: &Path, doc: &toml::Value) {
-    if let Err(err) = write_document(path, doc) {
-        tracing::warn!(error = %err, "failed to rewrite the legacy settings document");
-    }
 }
 
 fn project_row(project: &Project) -> toml::Value {
@@ -1273,84 +1206,5 @@ mod tests {
         let missing = dir.path().join("absent").join("projects.toml");
         std::fs::create_dir(missing.parent().expect("parent")).expect("mkdir");
         persist_at(&missing, &reg).expect("a missing file is the first-boot shape");
-    }
-
-    /// The one-time extraction: both registry keys move into the new
-    /// document verbatim and are deleted from the legacy document, whose
-    /// other tenants (the runtime tables) survive untouched.
-    #[test]
-    fn extraction_moves_the_registry_and_deletes_it_from_the_legacy_document() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let new = dir.path().join("steer").join("projects.toml");
-        let old = dir.path().join("manox").join("settings.toml");
-        std::fs::create_dir_all(old.parent().unwrap()).expect("mkdir");
-        std::fs::write(
-            &old,
-            r#"ui_language = "zh-CN"
-[host]
-port = 42
-[[project]]
-id = "p1"
-[[project.roots]]
-path = "/somewhere"
-primary = true
-[project_membership]
-session-1 = "p1"
-"external:x" = "p1"
-"#,
-        )
-        .expect("seed");
-
-        extract_legacy_registry_at(&new, &old);
-        let loaded = load_at(&new);
-        assert_eq!(loaded.projects.len(), 1);
-        assert_eq!(loaded.projects[0].id, "p1");
-        assert_eq!(
-            loaded.membership.get("session-1").map(String::as_str),
-            Some("p1")
-        );
-        let new_raw = std::fs::read_to_string(&new).expect("read");
-        assert!(new_raw.contains("external:x"));
-
-        let old_raw = std::fs::read_to_string(&old).expect("read");
-        assert!(!old_raw.contains("[[project]]"));
-        assert!(!old_raw.contains("project_membership"));
-        assert!(old_raw.contains("[host]"), "sibling keys survive");
-        assert!(
-            old_raw.contains("ui_language"),
-            "other owners' keys survive"
-        );
-    }
-
-    #[test]
-    fn extraction_skips_when_the_legacy_document_lacks_the_registry() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let new = dir.path().join("steer").join("projects.toml");
-        let old = dir.path().join("manox").join("settings.toml");
-        std::fs::create_dir_all(old.parent().unwrap()).expect("mkdir");
-        std::fs::write(&old, "[host]\nport = 42\n").expect("seed");
-        extract_legacy_registry_at(&new, &old);
-        assert!(!new.exists(), "no keys, no new document");
-        assert_eq!(
-            std::fs::read_to_string(&old).expect("read"),
-            "[host]\nport = 42\n"
-        );
-    }
-
-    #[test]
-    fn extraction_is_refused_by_an_unparseable_legacy_document() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let new = dir.path().join("steer").join("projects.toml");
-        let old = dir.path().join("manox").join("settings.toml");
-        let corrupt = "[[project]]\nid = \"p1\"\n[host\nport =";
-        std::fs::create_dir_all(old.parent().unwrap()).expect("mkdir");
-        std::fs::write(&old, corrupt).expect("seed");
-        extract_legacy_registry_at(&new, &old);
-        assert!(!new.exists());
-        assert_eq!(
-            std::fs::read_to_string(&old).expect("read"),
-            corrupt,
-            "the legacy document is left exactly as found"
-        );
     }
 }

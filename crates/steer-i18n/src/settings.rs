@@ -8,29 +8,20 @@
 //! parse is refused rather than rewritten, so persisting can never wipe the
 //! keys it does not model.
 //!
-//! The pre-split layout kept the key on the runtime's settings document
-//! (`<manox_root>/settings.toml`). The first touch of the new document
-//! extracts the key from there and deletes it from the legacy document —
-//! one-time, idempotent, and skipping silently when the new document already
-//! exists or the legacy one never carried the key.
+//! The document is the app layer's own: no other document is read, and
+//! nothing is carried between documents.
 
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 
 use crate::Language;
-use steer_paths::{manox_root, steer_home};
+use steer_paths::steer_home;
 
 /// Return the app-layer settings document: `<steer_home>/settings.toml`.
 fn app_settings_file() -> Result<PathBuf> {
     steer_home()
         .map(|home| home.join("settings.toml"))
         .context("no home directory; nowhere to root the app settings")
-}
-
-/// The runtime's settings document — the extraction source only; after the
-/// first extraction nothing here reads it again.
-fn legacy_settings_file() -> Option<PathBuf> {
-    manox_root().map(|root| root.join("settings.toml"))
 }
 
 /// Read the persisted UI language. A missing file, a missing key, or an
@@ -41,9 +32,6 @@ pub fn load_ui_language() -> Language {
     let Ok(path) = app_settings_file() else {
         return Language::default();
     };
-    if !path.exists() {
-        extract_legacy_language(&path);
-    }
     read_language_at(&path)
 }
 
@@ -75,47 +63,6 @@ fn read_language_at(path: &Path) -> Language {
     }
 }
 
-/// One-time extraction of `ui_language` from the legacy runtime settings
-/// document. Best effort by construction: every failure just leaves the
-/// default language and a warning behind, and the extraction retries on the
-/// next launch until the new document exists.
-fn extract_legacy_language(new_path: &Path) {
-    let Some(old_path) = legacy_settings_file() else {
-        return;
-    };
-    extract_legacy_language_at(new_path, &old_path);
-}
-
-/// The path-explicit extraction core (the env-resolving wrapper is a thin
-/// shell over it, so tests exercise the same code without touching env).
-fn extract_legacy_language_at(new_path: &Path, old_path: &Path) {
-    let Ok(raw) = std::fs::read_to_string(old_path) else {
-        return;
-    };
-    let Ok(doc) = toml::from_str::<toml::Value>(&raw) else {
-        tracing::warn!(
-            path = %old_path.display(),
-            "legacy settings.toml does not parse; ui_language extraction skipped"
-        );
-        return;
-    };
-    let Some(token) = doc.get("ui_language").and_then(|v| v.as_str()) else {
-        return;
-    };
-    let mut new_doc = toml::Value::Table(toml::map::Map::new());
-    new_doc
-        .as_table_mut()
-        .expect("freshly built document is a table")
-        .insert(
-            "ui_language".to_string(),
-            toml::Value::String(token.to_string()),
-        );
-    if write_document(new_path, &new_doc).is_err() {
-        return;
-    }
-    drop_key_from_document(old_path, "ui_language");
-}
-
 /// Persist `ui_language`, rewriting only that key. Creates the file (and its
 /// parent directory) when absent.
 pub fn persist_ui_language(lang: Language) -> Result<()> {
@@ -123,7 +70,8 @@ pub fn persist_ui_language(lang: Language) -> Result<()> {
     persist_at(&path, lang)
 }
 
-/// The path-explicit persistence core (see `extract_legacy_language_at`).
+/// The path-explicit persistence core (tests call this directly so the
+/// env-resolving wrapper never needs a mutated environment).
 fn persist_at(path: &Path, lang: Language) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -167,32 +115,6 @@ fn write_document(path: &Path, doc: &toml::Value) -> Result<()> {
     Ok(())
 }
 
-/// Remove one key from a document in place. The document may carry keys this
-/// crate does not model (the runtime shares the legacy file), so a parse
-/// failure is refused rather than rewritten from an empty doc.
-fn drop_key_from_document(path: &Path, key: &str) {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(mut doc) = toml::from_str::<toml::Value>(&raw) else {
-        tracing::warn!(
-            path = %path.display(),
-            "{key} deletion skipped: document does not parse"
-        );
-        return;
-    };
-    if doc
-        .as_table_mut()
-        .map(|table| table.remove(key).is_none())
-        .unwrap_or(true)
-    {
-        return;
-    }
-    if let Err(e) = write_document(path, &doc) {
-        tracing::warn!(error = %e, "failed to rewrite the legacy settings document");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,56 +123,6 @@ mod tests {
     fn write_file(path: &Path, contents: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
-    }
-
-    #[test]
-    fn extraction_moves_the_key_and_deletes_it_from_the_legacy_document() {
-        let root = tempfile::tempdir().unwrap();
-        let new = root.path().join("steer/settings.toml");
-        let old = root.path().join("manox/settings.toml");
-        write_file(
-            &old,
-            "ui_language = \"en\"\n[journal]\ncompact = true\n[[project]]\nid = \"p\"\n",
-        );
-        extract_legacy_language_at(&new, &old);
-        assert!(new.is_file());
-        assert_eq!(read_language_at(&new), Language::En);
-        let old_raw = std::fs::read_to_string(&old).unwrap();
-        assert!(!old_raw.contains("ui_language"));
-        assert!(old_raw.contains("[journal]"), "sibling keys survive");
-        assert!(
-            old_raw.contains("[[project]]"),
-            "other owners' keys survive"
-        );
-    }
-
-    #[test]
-    fn extraction_skips_when_the_legacy_document_lacks_the_key() {
-        let root = tempfile::tempdir().unwrap();
-        let new = root.path().join("steer/settings.toml");
-        let old = root.path().join("manox/settings.toml");
-        write_file(&old, "[journal]\ncompact = true\n");
-        extract_legacy_language_at(&new, &old);
-        assert!(!new.exists(), "no key, no new document");
-        assert_eq!(
-            std::fs::read_to_string(&old).unwrap(),
-            "[journal]\ncompact = true\n"
-        );
-    }
-
-    #[test]
-    fn extraction_is_refused_by_an_unparseable_legacy_document() {
-        let root = tempfile::tempdir().unwrap();
-        let new = root.path().join("steer/settings.toml");
-        let old = root.path().join("manox/settings.toml");
-        write_file(&old, "ui_language = \"en\"\nbroken ====");
-        extract_legacy_language_at(&new, &old);
-        assert!(!new.exists());
-        // The legacy document is left exactly as found.
-        assert_eq!(
-            std::fs::read_to_string(&old).unwrap(),
-            "ui_language = \"en\"\nbroken ===="
-        );
     }
 
     #[test]

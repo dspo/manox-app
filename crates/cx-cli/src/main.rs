@@ -46,7 +46,7 @@ fn main() {
     // Same state-root contract as the desktop app: `~/.steer` with the manox
     // layer at `~/.steer/.manox` (injected as MANOX_HOME). The two binaries
     // shared `<manox-home>` before the split and still share one root — only the
-    // address changed. A preset `MANOX_HOME` is respected and skips migration.
+    // address changed. A preset `MANOX_HOME` is respected as-is.
     if let Err(err) = steer_paths::install() {
         eprintln!("cx: state-root install failed: {err}");
     }

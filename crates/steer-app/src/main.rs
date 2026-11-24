@@ -109,10 +109,11 @@ fn main() {
     }));
 
     // The state-root contract must land before anything resolves a manox
-    // path: `install` injects `MANOX_HOME` (→ `~/.steer/.manox`) and runs the
-    // one-time legacy-root rename. Best effort: a failure is logged and the
-    // app cold-starts on whatever roots resolve without it (i18n and the
-    // project registry fall back to defaults) rather than bricking startup.
+    // path: `install` creates the app home and its `.manox` layer and injects
+    // `MANOX_HOME`. No other root is read. Best effort: a failure is logged
+    // and the app cold-starts on whatever roots resolve without it (i18n and
+    // the project registry fall back to defaults) rather than bricking
+    // startup.
     if let Err(err) = steer_paths::install() {
         eprintln!("steer: state-root install failed: {err}");
     }

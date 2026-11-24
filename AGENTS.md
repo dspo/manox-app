@@ -33,7 +33,7 @@ crates/                    # 全部 workspace 成员平铺于此（cargo 交付�
   steer-components/        # app chrome 与基础渲染件（markdown、TerminalPanel、TurnFrame）
   steer-i18n/              # app chrome 本地化（Fluent 栈 + locales/{zh-CN,en}.ftl，无 gpui 依赖）
   steer-paths/             # 状态根权威（`~/.steer` 与 `~/.steer/.manox` 的分层、
-                           #   `MANOX_HOME` 注入与一次性迁移；无 gpui 依赖）
+                           #   `MANOX_HOME` 注入；无 gpui 依赖）
   steer-updater/           # 应用内自更新（GitHub Releases 检查 + dmg 校验下载 + macOS 原地
                            #   覆盖安装 + UpdateStore 状态机；仅 steer-app 消费，seam 外编译为拒绝桩）
   steer-webview/           # wry 原生 webview + Tauri 式 IPC
@@ -124,7 +124,7 @@ script/local-manox.sh off           # 还原纯 git 依赖（CI 形态）
 # 然后 cargo update -p manox-agent（全部 8 依赖随同一 tag 整体移动）
 ```
 
-runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题在本仓修。状态根分层：应用层（Steer 平台）在 `~/.steer/`（`settings.toml` 存 `ui_language`、`projects.toml` 存项目注册表，`steer-paths` crate 是路径权威，`STEER_HOME` 可覆盖）；manox harness 层在 `~/.steer/.manox/`——两个 bin（steer/cx）启动早期（任何线程与 manox 路径解析之前）调 `steer_paths::install()` 注入 `MANOX_HOME` 并把旧 `~/.manox` 一次性 rename 进来，runtime 代码零改动（路径清单见 dspo/manox 仓 AGENTS.md）。
+runtime 侧 API/行为回归优先在 dspo/manox 修；只有装配/接线问题在本仓修。状态根分层：应用层（Steer 平台）在 `~/.steer/`（`settings.toml` 存 `ui_language`、`projects.toml` 存项目注册表，`steer-paths` crate 是路径权威，`STEER_HOME` 可覆盖）；manox harness 层在 `~/.steer/.manox/`——两个 bin（steer/cx）启动早期（任何线程与 manox 路径解析之前）调 `steer_paths::install()` 注入 `MANOX_HOME`，runtime 代码零改动（路径清单见 dspo/manox 仓 AGENTS.md）。**状态根之间不存在任何搬迁**：分层是手工一次完成的历史事实，代码只读写各自所在的根——旧 `~/.manox` 不再被读取、移动或清理。
 
 单实例：`~/.steer/instance.lock` 以非阻塞 `flock` 做唯一权威（进程退出内核自动释放，不留死锁）；第二实例先经 AppKit 把运行中的实例带到前台再自退（macOS），Linux 只保证不重复启动（`crates/steer-app/src/instance.rs`）。
 
