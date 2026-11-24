@@ -7,26 +7,40 @@
 //! Shipping one ready-made indicator here is a convenience, not a default:
 //! the components have no opinion about it.
 
-use std::time::Duration;
-
 use gpui::{
-    Animation, AnimationExt as _, App, Hsla, IntoElement, ParentElement, RenderOnce, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _,
+    ElementId, Entity, Hsla, IntoElement, ParentElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::{Sizable, Size};
 
-/// Braille frames in animation order (classic 10-frame cycle).
-const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+use crate::glyph_view::{GlyphSpec, SpinnerView};
 
-/// The braille spinner's render cap: 800 ms / 12 fps ≈ 10 frames per cycle,
-/// matching the glyph set without a display-refresh timer.
-const BRAILLE_FPS: f32 = 12.;
+/// Braille frames in animation order (classic 10-frame cycle).
+pub(crate) const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// The frame index at `cycle_ms` — a pure function of the shared clock's
+/// time, so every glyph on screen derives the SAME frame from the SAME
+/// beat (the "one fleet, one frame" guarantee, testable without a window).
+pub(crate) fn frame_index(cycle_ms: f64) -> usize {
+    let frame = ((cycle_ms % CYCLE_MS) / CYCLE_MS * FRAMES.len() as f64) as usize;
+    frame.min(FRAMES.len() - 1)
+}
+
+/// One braille cycle, in milliseconds: 10 frames over 800 ms. The shared
+/// clock samples this at 30 fps — finer than the native 80 ms/frame, so
+/// each frame shows for its true duration.
+const CYCLE_MS: f64 = 800.;
 
 /// A text-based braille-dot spinner.
-#[derive(IntoElement)]
+///
+/// The value is a *spec*: mount it with [`BrailleSpinner::view`] to get an
+/// entity view driven by the shared glyph clock — a tick re-renders the
+/// spinner alone instead of notifying the containing view's whole subtree.
+/// (There is no inline render: an animated glyph without its own view is
+/// exactly the whole-window-rebuild failure mode #320 fixed.)
+#[derive(Clone, Copy, PartialEq)]
 pub struct BrailleSpinner {
     size: Size,
-    speed: Duration,
     color: Option<Hsla>,
 }
 
@@ -40,7 +54,6 @@ impl BrailleSpinner {
     pub fn new() -> Self {
         Self {
             size: Size::Medium,
-            speed: Duration::from_millis(800),
             color: None,
         }
     }
@@ -58,31 +71,60 @@ impl Sizable for BrailleSpinner {
     }
 }
 
-impl RenderOnce for BrailleSpinner {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+impl BrailleSpinner {
+    /// The glyph text this spec shows at `cycle_ms` — the comparable form
+    /// of [`Self::frame_at`], so tests can pin "same clock time, same frame
+    /// everywhere" across specs that differ in every visual knob.
+    pub(crate) fn frame_text(&self, cycle_ms: f64) -> &'static str {
+        FRAMES[frame_index(cycle_ms)]
+    }
+
+    /// The frame this spec shows `cycle_ms` into the (looping) animation.
+    /// `reduce_motion` renders `frame_at(0.)` — the static first frame, the
+    /// same contract the retired `with_animation` path honoured.
+    pub(crate) fn frame_at(&self, cycle_ms: f64) -> impl IntoElement {
+        let text = self.frame_text(cycle_ms);
         let el = div();
         let el = match self.size {
             Size::XSmall => el.text_xs(),
             Size::Small => el.text_sm(),
             _ => el.text_base(),
         };
-        let frame_count = FRAMES.len() as f32;
-
-        // One shared App clock, capped at 12 fps: a braille spinner is a
-        // status glyph, not a 60 Hz animation, and every instance on screen
-        // advances on the same tick. Unmounting the spinner removes the only
-        // clock consumer, so an idle conversation draws no frames.
         el.when_some(self.color, |this, color| this.text_color(color))
-            .with_animation(
-                "braille-spinner",
-                Animation::new(self.speed)
-                    .repeat_synced()
-                    .with_max_fps(BRAILLE_FPS),
-                move |this, delta| {
-                    let frame = ((delta * frame_count) as usize).min(FRAMES.len() - 1);
-                    this.child(SharedString::from(FRAMES[frame]))
-                },
-            )
-            .into_element()
+            .child(gpui::SharedString::from(text))
+    }
+
+    /// Mount as an entity view driven by the shared glyph clock. `key` is
+    /// scoped by the mounting element's id path — a per-spinner suffix is
+    /// only needed when two glyphs mount under one id.
+    pub fn view(
+        self,
+        key: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> Entity<SpinnerView> {
+        SpinnerView::mount(GlyphSpec::Braille(self), key, window, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two specs differing in every visual knob show the SAME frame at the
+    /// same clock time, advance together one frame-period later, and wrap
+    /// identically across the cycle — "one fleet, one frame" pinned at the
+    /// spec level (frame derivation depends on the clock time alone).
+    #[test]
+    fn the_same_clock_time_yields_the_same_frame_everywhere() {
+        let a = BrailleSpinner::new().xsmall();
+        let b = BrailleSpinner::new().small().color(gpui::red());
+        for ms in [0., 1., 100., 412.5, 799.9, 12345.6] {
+            assert_eq!(a.frame_text(ms), b.frame_text(ms), "ms={ms}");
+            assert_eq!(a.frame_text(ms), a.frame_text(ms + CYCLE_MS));
+            assert_eq!(b.frame_text(ms), b.frame_text(ms + CYCLE_MS));
+        }
+        // One frame period on is the NEXT frame, not the same one.
+        assert_ne!(a.frame_text(0.), a.frame_text(CYCLE_MS / 10.));
     }
 }

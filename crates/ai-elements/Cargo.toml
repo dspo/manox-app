@@ -21,6 +21,8 @@ gpui-component.workspace = true
 # same TextView machinery the transcript's markdown uses, so drag-select and
 # copy come from the window-level selection instead of per-mock rewrites.
 gpui-base.workspace = true
+# `MANOX_FRAME_DIAG` pacing lines from the shared glyph clock.
+log.workspace = true
 
 # The row model (`CodeLine`) and its color/metrics policy live in
 # steer-components' `code_surface` — the one vocabulary every editor-looking

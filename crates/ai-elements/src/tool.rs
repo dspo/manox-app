@@ -363,7 +363,14 @@ impl ToolHeader {
     /// The default status chip: a muted ring while pending, the crate's
     /// braille spinner while running, a check with the duration on success,
     /// a cross with the duration on failure.
-    fn default_status(status: &ToolStatus, duration: Option<Duration>, tint: Hsla) -> AnyElement {
+    fn default_status(
+        status: &ToolStatus,
+        duration: Option<Duration>,
+        tint: Hsla,
+        key: impl Into<gpui::ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
         match status {
             ToolStatus::Pending => div()
                 .size_2()
@@ -374,6 +381,7 @@ impl ToolHeader {
             ToolStatus::Running => BrailleSpinner::new()
                 .xsmall()
                 .color(tint)
+                .view((key.into(), "spinner"), window, cx)
                 .into_any_element(),
             ToolStatus::Succeeded => h_flex()
                 .gap_1()
@@ -404,14 +412,18 @@ impl ToolHeader {
 }
 
 impl RenderOnce for ToolHeader {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = self.state.read(cx);
-        let (is_open, status, duration, toggle_gen) = (
-            state.is_open,
-            &state.status,
-            state.duration,
-            state.toggle_gen,
-        );
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Copied out of the entity read so the status mount can take `cx`
+        // mutably (the keyed spinner view lives in window state).
+        let (is_open, status, duration, toggle_gen) = {
+            let state = self.state.read(cx);
+            (
+                state.is_open,
+                state.status.clone(),
+                state.duration,
+                state.toggle_gen,
+            )
+        };
         let theme = cx.theme();
         let (muted, foreground) = (theme.muted_foreground, theme.foreground);
 
@@ -421,9 +433,9 @@ impl RenderOnce for ToolHeader {
             ToolStatus::Succeeded => theme.success,
             ToolStatus::Failed => theme.danger,
         };
-        let status = self
-            .status
-            .unwrap_or_else(|| Self::default_status(status, duration, tint));
+        let status = self.status.take().unwrap_or_else(|| {
+            Self::default_status(&status, duration, tint, self.id.clone(), window, cx)
+        });
 
         let click_state = self.state.clone();
         let on_toggle = self.on_toggle.clone();

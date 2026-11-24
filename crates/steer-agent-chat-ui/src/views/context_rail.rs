@@ -265,6 +265,7 @@ impl BubbleExpanded {
 /// Cockpit state store for the active thread plus the conversation info
 /// bubble's open/fold state. Writes flow through `Workspace` →
 /// `self.context_rail.update(cx, |r, cx| …)`.
+#[derive(Clone)]
 pub struct ContextRail {
     /// The AHP store plus the attached session id (the rail's only read
     /// face — per-model usage, project, cwd and title all derive from the
@@ -570,9 +571,10 @@ impl ContextRail {
         this: &Entity<Self>,
         max_w: Pixels,
         max_h: Pixels,
-        cx: &App,
+        window: &mut gpui::Window,
+        cx: &mut App,
     ) -> AnyElement {
-        let rail = this.read(cx);
+        let rail = this.read(cx).clone();
         let theme = cx.theme().clone();
         let expanded = rail.bubble_expanded;
         let weak = this.downgrade();
@@ -581,7 +583,7 @@ impl ContextRail {
         push_section(
             &mut sections,
             &theme,
-            rail.render_agents_section(&theme, &weak, cx),
+            rail.render_agents_section(&theme, &weak, window, cx),
         );
         push_section(
             &mut sections,
@@ -629,7 +631,8 @@ impl ContextRail {
         &self,
         theme: &Theme,
         weak: &gpui::WeakEntity<Self>,
-        cx: &App,
+        window: &mut gpui::Window,
+        cx: &mut App,
     ) -> Option<AnyElement> {
         let running = self
             .store
@@ -653,7 +656,13 @@ impl ContextRail {
                 .py_0p5()
                 .gap_1p5()
                 .items_center()
-                .child(Self::captain_status_indicator(main_status, theme))
+                .child(Self::captain_status_indicator(
+                    main_status,
+                    theme,
+                    "captain-status",
+                    window,
+                    cx,
+                ))
                 .child(
                     gpui::div()
                         .flex_1()
@@ -713,7 +722,13 @@ impl ContextRail {
                         };
                         host.open_subagent_tab(&run_id, &subagent_type, &topic, status, cx);
                     })
-                    .child(status_indicator(info.status, theme))
+                    .child(status_indicator(
+                        info.status,
+                        theme,
+                        format!("subagent-status-{}", info.id),
+                        window,
+                        cx,
+                    ))
                     .child(
                         gpui::div()
                             .flex_1()
@@ -1008,13 +1023,20 @@ impl ContextRail {
     /// Status indicator for the Captain (main agent) row. The Captain uses
     /// `ship-wheel` for the completed state, distinguishing it from
     /// sub-agents that use `circle-check-big`.
-    fn captain_status_indicator(status: manox_agent::ToolCallStatus, theme: &Theme) -> AnyElement {
+    fn captain_status_indicator(
+        status: manox_agent::ToolCallStatus,
+        theme: &Theme,
+        key: impl Into<gpui::ElementId>,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) -> AnyElement {
         use manox_agent::ToolCallStatus;
         match status {
             ToolCallStatus::PendingApproval | ToolCallStatus::Running => {
                 ai_elements::BrailleSpinner::new()
                     .xsmall()
                     .color(theme.accent_foreground)
+                    .view((key.into(), "spinner"), window, cx)
                     .into_any_element()
             }
             ToolCallStatus::Success | ToolCallStatus::Continued => Icon::default()

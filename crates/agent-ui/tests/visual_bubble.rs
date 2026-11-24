@@ -383,7 +383,7 @@ mod macos {
     }
 
     impl gpui::RenderOnce for PopoverHost {
-        fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
             let theme = cx.theme().clone();
             let open = self.rail.read(cx).bubble_open;
             let track = theme.border;
@@ -409,7 +409,7 @@ mod macos {
             if !open {
                 return pill.into_any_element();
             }
-            let viewport = _window.viewport_size();
+            let viewport = window.viewport_size();
             let avail_w = f32::from(viewport.width) - 32.0;
             let max_w = px(BUBBLE_MAX_W.min(avail_w.max(BUBBLE_MIN_W)));
             let max_h = px((f32::from(viewport.height) - 180.0).max(160.0));
@@ -422,7 +422,7 @@ mod macos {
                 .occlude()
                 .popover_style(cx)
                 .p_3()
-                .child(ContextRail::render_bubble(&rail, max_w, max_h, cx));
+                .child(ContextRail::render_bubble(&rail, max_w, max_h, window, cx));
 
             // The bubble slot: a zero-height full-width row pulled up over the
             // pill by a fixed apron, so the surface's bottom edge lands a

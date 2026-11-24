@@ -16,8 +16,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Pixels, StatefulInteractiveElement, Styled, Window,
-    actions, div, px,
+    IntoElement, KeyDownEvent, ParentElement, Pixels, Render, StatefulInteractiveElement, Styled,
+    Window, actions, div, px,
 };
 
 use crate::main_surface::MainSurfaceHandle;
@@ -413,6 +413,33 @@ pub struct Shell {
     // ── host faces ──
     pub(crate) main: MainSurfaceHandle,
     pub(crate) hooks: HostHooks,
+    /// The sidebar as its own entity (see [`SidebarLens`]): a spinner tick
+    /// anywhere else marks Shell dirty as an ancestor, but this child view's
+    /// cache holds, so the row tree replays instead of rebuilding (#320).
+    sidebar: gpui::Entity<SidebarLens>,
+}
+
+/// The sidebar lens: a child entity whose render delegates straight back to
+/// [`Shell::render_sidebar`]. All session-list state and listeners stay on
+/// Shell — the lens exists purely to give the sidebar its own gpui view
+/// cache boundary. What it buys is ONE direction only: a spinner tick in the
+/// *transcript* marks Shell dirty as an ancestor without notifying anyone,
+/// so the lens's cache holds and the row tree replays. The sidebar's own
+/// running-row glyphs sit BELOW this lens, so their beats still rebuild the
+/// row tree — bounded (cheap re-emit) and beat-limited (one shared clock),
+/// not eliminated; per-row entities are the next step if the diag line ever
+/// shows that cost growing.
+struct SidebarLens(gpui::WeakEntity<Shell>);
+
+impl Render for SidebarLens {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(shell) = self.0.upgrade() else {
+            return div().into_any_element();
+        };
+        shell
+            .update(cx, |shell, cx| shell.render_sidebar(cx).into_any_element())
+            .into_any_element()
+    }
 }
 
 impl Shell {
@@ -469,6 +496,14 @@ impl Shell {
 
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let right = cx.new(|_| RightPane::new(config.tool_kinds));
+        // The lens observes Shell's notifies (state changes) and re-renders;
+        // plain ancestor dirty-marks never reach an observer, so the cache
+        // survives them.
+        let shell = cx.entity();
+        let sidebar = cx.new(|cx| {
+            cx.observe(&shell, |_, _, cx| cx.notify()).detach();
+            SidebarLens(shell.downgrade())
+        });
         Self {
             right,
             sessions: Vec::new(),
@@ -507,6 +542,7 @@ impl Shell {
             _picker_sub: None,
             main: config.main,
             hooks: config.hooks,
+            sidebar,
         }
     }
 
@@ -2028,7 +2064,7 @@ impl Shell {
                         .overflow_hidden()
                         .child(surface),
                 ),
-                None => this.child(self.render_sidebar(cx)),
+                None => this.child(self.sidebar.clone()),
             })
             .child(
                 div()

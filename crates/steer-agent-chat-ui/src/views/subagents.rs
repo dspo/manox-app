@@ -46,11 +46,18 @@ pub fn task_display_title(subagent_type: &str, description: &str) -> Option<Stri
     }
 }
 
-pub fn status_indicator(status: ToolCallStatus, theme: &Theme) -> AnyElement {
+pub fn status_indicator(
+    status: ToolCallStatus,
+    theme: &Theme,
+    key: impl Into<gpui::ElementId>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> AnyElement {
     match status {
         ToolCallStatus::PendingApproval | ToolCallStatus::Running => BrailleSpinner::new()
             .xsmall()
             .color(theme.accent_foreground)
+            .view((key.into(), "spinner"), window, cx)
             .into_any_element(),
         ToolCallStatus::Success | ToolCallStatus::Continued => Icon::default()
             .path("icons/circle-check-big.svg")

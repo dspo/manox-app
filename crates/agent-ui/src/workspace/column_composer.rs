@@ -1180,7 +1180,7 @@ impl ChatColumnView {
                         }
                     }
                 })
-                .content(move |_, _, cx| {
+                .content(move |_, window, cx| {
                     v_flex()
                         .key_context("ContextBubble")
                         .track_focus(&focus)
@@ -1201,6 +1201,7 @@ impl ChatColumnView {
                             &rail_entity,
                             max_w,
                             px(640.),
+                            window,
                             cx,
                         ))
                 })
@@ -2209,9 +2210,9 @@ impl ChatColumnView {
         &self,
         running: bool,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        use ai_elements::{PixelSpinner, PixelSpinnerVariant};
         use steer_agent_chat_ui::conversation::LiveActivity;
         use steer_agent_chat_ui::model_tag::ModelTag;
         use steer_agent_chat_ui::text::one_line;
@@ -2226,18 +2227,6 @@ impl ChatColumnView {
         let tag = ModelTag::resolve(&super::chat_access::model_label(&self.chat, cx));
 
         let muted = theme.muted_foreground;
-        let spinner = || {
-            // The 16px frame is fixed: shrink 0 keeps a tight row from
-            // squeezing the glyph (the status line's own flex base is large).
-            gpui::div()
-                .flex_shrink_0()
-                .child(
-                    PixelSpinner::new()
-                        .variant(PixelSpinnerVariant::Grid)
-                        .color(muted),
-                )
-                .into_any_element()
-        };
         // The lead-in's chrome (prefix, separators, clock) is fixed: shrink 0
         // keeps taffy from spreading a long activity summary's overflow across
         // it. The model name and the activity are runtime text — an unresolved
@@ -2333,7 +2322,7 @@ impl ChatColumnView {
                 .min_w_0()
                 .text_sm()
                 .text_color(muted)
-                .child(spinner())
+                .child(captain_spinner("captain-clock", muted, window, cx))
                 .child(status);
             rows = rows.child(row);
         }
@@ -2386,7 +2375,7 @@ impl ChatColumnView {
                 .text_color(muted)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.secondary.opacity(0.4)))
-                .child(spinner())
+                .child(captain_spinner("captain-subagent-clock", muted, window, cx))
                 // The definition's declared display color, when it named one:
                 // the identity dot that lets sibling runs be told apart at a
                 // glance. An unknown name renders uncolored, like no color.
@@ -2440,7 +2429,7 @@ impl ChatColumnView {
                         gpui::div().w_full().h(gpui::px(1.)).bg(theme.border),
                     ))
                     .when_some(
-                        self.render_captain_strip(running, &theme, cx),
+                        self.render_captain_strip(running, &theme, window, cx),
                         |this, strip| this.child(crate::views::centered(strip)),
                     )
                     .children(self.render_attachments(&theme, cx))
@@ -2608,6 +2597,27 @@ fn occupancy_arc_end(radius: f32, pct: f64) -> Option<(f32, f32, bool)> {
         (radius as f64 * phi.sin()) as f32,
         alpha > std::f64::consts::PI,
     ))
+}
+
+/// The captain strip's status glyph: a keyed mount on the shared glyph
+/// clock, flush-left with a fixed 16px frame (shrink 0 keeps a tight row
+/// from squeezing it).
+fn captain_spinner(
+    key: &'static str,
+    color: gpui::Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    use ai_elements::PixelSpinner;
+    gpui::div()
+        .flex_shrink_0()
+        .child(
+            PixelSpinner::new()
+                .variant(ai_elements::PixelSpinnerVariant::Grid)
+                .color(color)
+                .view(key, window, cx),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]
