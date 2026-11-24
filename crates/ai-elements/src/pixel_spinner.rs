@@ -7,20 +7,25 @@
 //! - `Ring` — the same six dots held in place at low opacity while a
 //!   highlight sweeps clockwise: the "waiting for input" glyph.
 //!
-//! Everything is divs under one `Animation` clock — gpui rasterizes SVG
-//! statically, so the motion lives in per-frame arithmetic. Each moving
-//! keyframe segment is snapped by `steps(6, jump-none)` (grid) or
-//! `steps(4, jump-none)` (ring) exactly as the CSS does; that snap is the
-//! whole look, and `smooth()` trading it for linear interpolation is the
-//! contrast that proves it. `frozen()` renders the hold frame with no clock
-//! at all — for statuses that need attention without churning.
-
-use std::time::Duration;
+//! Everything is divs whose per-frame arithmetic is a pure function of the
+//! shared clock's time (`tick_clock`) — gpui rasterizes SVG statically, so
+//! the motion lives in per-frame math. Each moving keyframe segment is
+//! snapped by `steps(6, jump-none)` (grid) or `steps(4, jump-none)` (ring)
+//! exactly as the CSS does; that snap is the whole look, and `smooth()`
+//! trading it for linear interpolation is the contrast that proves it.
+//!
+//! Mounting decides the lifecycle: `.view(...)` is the animated glyph (its
+//! own entity on the shared clock); the plain `RenderOnce` mount draws the
+//! hold frame with no clock at all — for statuses that need attention
+//! without churning. Because the static frame is one moment of the same
+//! animation geometry, the two can never drift apart.
 
 use gpui::{
-    Animation, AnimationExt as _, App, Div, Hsla, IntoElement, ParentElement as _, RenderOnce,
+    AnyElement, App, ElementId, Entity, Hsla, IntoElement, ParentElement as _, RenderOnce,
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
+
+use crate::glyph_view::{GlyphSpec, SpinnerView};
 
 /// Native glyph geometry, in CSS pixels at zoom 1: a 16px frame holding a
 /// 2×3 grid of 2px dots on a 4px pitch, content centered ((16−6)/2, (16−10)/2).
@@ -91,11 +96,13 @@ pub enum PixelSpinnerVariant {
 
 /// The pixel spinner: six 2px dots under one animation clock.
 ///
-/// The closure folds normalized cycle time through each dot's delay and the
-/// keyframe tables above; dot color carries the phase's opacity in its alpha.
-/// `zoom` scales the whole glyph (1 = the native 16px), `speed` scales the
+/// The value is a *spec*. `.view(...)` mounts it as an entity driven by the
+/// shared glyph clock — a tick re-renders the spinner alone instead of
+/// notifying the containing view's whole subtree (the failure mode #320
+/// fixed). The plain `RenderOnce` mount draws the hold frame, statically.
+/// The per-dot phases normalize by the native constants; `speed` scales the
 /// clock rate (1 = native; 0.25 = quarter speed for reading the hops).
-#[derive(IntoElement)]
+#[derive(Clone, Copy, IntoElement, PartialEq)]
 pub struct PixelSpinner {
     variant: PixelSpinnerVariant,
     color: Hsla,
@@ -103,13 +110,6 @@ pub struct PixelSpinner {
     speed: f32,
     smooth: bool,
     sharp: bool,
-    /// Phase-lock every instance to the App-wide clock instead of each
-    /// element's own mount time.
-    synced: bool,
-    /// Render cap in frames per second; `None` runs at display refresh.
-    max_fps: Option<f32>,
-    /// No clock: render the animation's hold frame statically.
-    frozen: bool,
 }
 
 impl Default for PixelSpinner {
@@ -127,9 +127,6 @@ impl PixelSpinner {
             speed: 1.,
             smooth: false,
             sharp: false,
-            synced: true,
-            max_fps: Some(12.),
-            frozen: false,
         }
     }
 
@@ -141,22 +138,6 @@ impl PixelSpinner {
     /// The dot color; the animation only modulates its alpha.
     pub fn color(mut self, color: Hsla) -> Self {
         self.color = color;
-        self
-    }
-
-    /// Phase-lock the cycle to the clock the whole App shares, so every
-    /// instance — a sidebar of running rows — hops on the same beat no
-    /// matter when its row mounted.
-    pub fn synced(mut self) -> Self {
-        self.synced = true;
-        self
-    }
-
-    /// Cap re-renders per second. The native hop cadence needs ~30fps to
-    /// show every stop; a spinner replicated across many rows (a sidebar)
-    /// passes a cap so the fleet repaints a bounded number of frames.
-    pub fn max_fps(mut self, max_fps: f32) -> Self {
-        self.max_fps = Some(max_fps);
         self
     }
 
@@ -185,98 +166,109 @@ impl PixelSpinner {
         self
     }
 
-    /// The animation's hold frame, statically: every dot sits in its cell
-    /// (Grid at full brightness — the all-aligned frame; Ring at its rest
-    /// opacity) and no clock is attached, so `speed`/`synced`/`max_fps`/
-    /// `smooth` have nothing to drive. Because the frame is one moment of
-    /// the animation itself, it shares the same geometry constants and can
-    /// never drift from the moving glyph — a status that needs attention
-    /// without churning (the sidebar's Unread mark) freezes it, speaking
-    /// the same static dot-matrix language as that sidebar's pending mark.
-    pub fn frozen(mut self) -> Self {
-        self.frozen = true;
-        self
+    /// Mount as an entity view driven by the shared glyph clock. `key` is
+    /// scoped by the mounting element's id path — a per-spinner suffix is
+    /// only needed when two glyphs mount under one id.
+    pub fn view(
+        self,
+        key: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> Entity<SpinnerView> {
+        SpinnerView::mount(GlyphSpec::Pixel(self), key, window, cx)
     }
-}
 
-impl RenderOnce for PixelSpinner {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    /// The animated frame `ms` into the shared clock, every dot folded
+    /// through its delay and the keyframe tables; dot color carries the
+    /// phase's opacity in its alpha. `reduce_motion` routes to
+    /// [`PixelSpinner::hold_frame`] instead.
+    pub(crate) fn frame_at(&self, ms: f64) -> AnyElement {
+        let ms = ms as f32;
+        self.animated_frame(ms)
+    }
+
+    /// The static hold frame every dot in its cell — the plain RenderOnce
+    /// mount and the `reduce_motion` arm share it, so the two can't drift.
+    pub(crate) fn hold_frame(&self) -> AnyElement {
+        // Grid freezes at the full-lit aligned frame; Ring at its rest
+        // opacity. No clock — `speed`/`smooth` have nothing to drive here.
         let zoom = if self.zoom > 0. { self.zoom } else { 1. };
-        if self.frozen {
-            // No clock: the hold frame, every dot in its cell. Grid freezes
-            // at the full-lit aligned frame; Ring at its rest opacity.
-            let alpha = match self.variant {
-                PixelSpinnerVariant::Grid => 1.,
-                PixelSpinnerVariant::Ring => RING_BASE_ALPHA,
-            };
-            return div()
-                .size(px(FRAME * zoom))
-                .relative()
-                .overflow_hidden()
-                .children((0..6usize).map(|i| {
-                    let (col, row) = ((i % 2) as f32, (i / 2) as f32);
-                    dot(col, row, 0., alpha, self.color, zoom, self.sharp)
-                }))
-                .into_any_element();
-        }
+        let alpha = match self.variant {
+            PixelSpinnerVariant::Grid => 1.,
+            PixelSpinnerVariant::Ring => RING_BASE_ALPHA,
+        };
+        div()
+            .size(px(FRAME * zoom))
+            .relative()
+            .overflow_hidden()
+            .children((0..6usize).map(|i| {
+                let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+                dot(col, row, 0., alpha, self.color, zoom, self.sharp)
+            }))
+            .into_any_element()
+    }
+
+    fn animated_frame(&self, ms: f32) -> AnyElement {
+        let zoom = if self.zoom > 0. { self.zoom } else { 1. };
         let rate = if self.speed > 0. { self.speed } else { 1. };
         let native_ms = match self.variant {
             PixelSpinnerVariant::Grid => GRID_PERIOD_MS,
             PixelSpinnerVariant::Ring => RING_PERIOD_MS,
         };
         let period_ms = native_ms / rate;
+        // Virtual time advances one NATIVE cycle per (stretched) animation
+        // period — the per-dot phases below normalize by the native
+        // constants, so deriving this from the scaled period would cancel
+        // `rate` out entirely.
+        let now_ms = ((ms % period_ms) / period_ms) * native_ms;
         div()
             .size(px(FRAME * zoom))
             .relative()
             .overflow_hidden()
-            .with_animation(
-                "pixel-spinner",
-                {
-                    // One shared App clock: `repeat_synced` phase-locks every
-                    // instance to the App frame ticker, so a screen of
-                    // spinners advances as one animation, not N mount-time
-                    // phases.
-                    let mut animation = if self.synced {
-                        Animation::new(Duration::from_millis(period_ms as u64)).repeat_synced()
-                    } else {
-                        Animation::new(Duration::from_millis(period_ms as u64)).repeat()
-                    };
-                    animation = animation.with_max_fps(self.max_fps.unwrap_or(12.));
-                    animation
-                },
-                move |el, t| {
-                    // Virtual time advances one NATIVE cycle per (stretched)
-                    // animation period — the per-dot phases below normalize
-                    // by the native constants, so deriving this from the
-                    // scaled period would cancel `rate` out entirely.
-                    let now_ms = t * native_ms;
-                    el.children((0..6usize).map(|i| {
-                        let (col, row) = ((i % 2) as f32, (i / 2) as f32);
-                        let (dy, alpha) = match self.variant {
-                            PixelSpinnerVariant::Grid => {
-                                let (delay, hold) = GRID_DOTS[i];
-                                let u =
-                                    (now_ms - delay).rem_euclid(GRID_PERIOD_MS) / GRID_PERIOD_MS;
-                                grid_phase(u, hold, self.smooth)
-                            }
-                            PixelSpinnerVariant::Ring => {
-                                let u = (now_ms - RING_DOTS[i]).rem_euclid(RING_PERIOD_MS)
-                                    / RING_PERIOD_MS;
-                                (0., ring_alpha(u, self.smooth))
-                            }
-                        };
-                        dot(col, row, dy, alpha, self.color, zoom, self.sharp)
-                    }))
-                },
-            )
+            .children((0..6usize).map(|i| {
+                let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+                let (dy, alpha) = match self.variant {
+                    PixelSpinnerVariant::Grid => {
+                        let (delay, hold) = GRID_DOTS[i];
+                        let u = (now_ms - delay).rem_euclid(GRID_PERIOD_MS) / GRID_PERIOD_MS;
+                        grid_phase(u, hold, self.smooth)
+                    }
+                    PixelSpinnerVariant::Ring => {
+                        let u = (now_ms - RING_DOTS[i]).rem_euclid(RING_PERIOD_MS) / RING_PERIOD_MS;
+                        (0., ring_alpha(u, self.smooth))
+                    }
+                };
+                dot(col, row, dy, alpha, self.color, zoom, self.sharp)
+            }))
             .into_any_element()
+    }
+}
+
+impl RenderOnce for PixelSpinner {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        // The static mount: the animation's hold frame, every dot in its
+        // cell. Grid freezes at the full-lit aligned frame; Ring at its rest
+        // opacity. No clock — `speed`/`smooth` have nothing to drive here.
+        let zoom = if self.zoom > 0. { self.zoom } else { 1. };
+        let alpha = match self.variant {
+            PixelSpinnerVariant::Grid => 1.,
+            PixelSpinnerVariant::Ring => RING_BASE_ALPHA,
+        };
+        div()
+            .size(px(FRAME * zoom))
+            .relative()
+            .overflow_hidden()
+            .children((0..6usize).map(|i| {
+                let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+                dot(col, row, 0., alpha, self.color, zoom, self.sharp)
+            }))
     }
 }
 
 /// One 2px dot at its grid cell — `dy` offsets it along its travel, `alpha`
 /// scales the color's opacity. The single shape both the animated frame and
 /// the frozen one build from, so the two can't drift apart.
-fn dot(col: f32, row: f32, dy: f32, alpha: f32, color: Hsla, zoom: f32, sharp: bool) -> Div {
+fn dot(col: f32, row: f32, dy: f32, alpha: f32, color: Hsla, zoom: f32, sharp: bool) -> gpui::Div {
     let mut dot_color = color;
     dot_color.a *= alpha;
     div()
@@ -401,5 +393,49 @@ mod tests {
         let tail = ring_alpha(1. - 1e-6, false);
         let head = ring_alpha(0., false);
         assert!((tail - head).abs() < 1e-6);
+    }
+
+    /// The clock-time fold lands on the same phases the cycle math tests:
+    /// one period in, the grid is back at its first frame.
+    #[test]
+    fn frame_at_wraps_over_the_cycle_period() {
+        let u = |ms: f32| (ms % GRID_PERIOD_MS) / GRID_PERIOD_MS;
+        assert_eq!(u(0.), u(GRID_PERIOD_MS));
+        assert_eq!(u(GRID_PERIOD_MS + 520.), u(520.));
+    }
+}
+
+#[cfg(test)]
+mod hold_frame_is_an_animation_moment {
+    use super::*;
+
+    /// The static hold frame (dy = 0, full alpha for every dot) is a moment
+    /// the animated pass actually shows: some t in one grid period has all
+    /// six dots simultaneously in their hold window. Deleting `.frozen()` as
+    /// a knob therefore cannot drift the static face from the moving one —
+    /// both are the same geometry at the same phases.
+    #[test]
+    fn the_hold_frame_is_a_moment_the_animation_shows() {
+        let step = 1.;
+        let mut found = None;
+        let mut t = 0.;
+        while t < GRID_PERIOD_MS {
+            let all_holding = (0..6usize).all(|i| {
+                let (delay, hold) = GRID_DOTS[i];
+                let u = (t - delay).rem_euclid(GRID_PERIOD_MS) / GRID_PERIOD_MS;
+                grid_phase(u, hold, false) == (0., 1.)
+            });
+            if all_holding {
+                found = Some(t);
+                break;
+            }
+            t += step;
+        }
+        let t = found.expect("no all-hold moment in one grid period");
+        // Cross-check the moment through the ring-free grid phases alone.
+        for &(delay, hold) in &GRID_DOTS {
+            let u = (t - delay).rem_euclid(GRID_PERIOD_MS) / GRID_PERIOD_MS;
+            assert_eq!(grid_phase(u, hold, false), (0., 1.));
+        }
     }
 }

@@ -12,7 +12,26 @@
 //! from here. Components therefore take content and localized strings from the
 //! caller rather than reading them from a session.
 
+//! Agent-facing display semantics: reasoning blocks, tool/shell cards, ask
+//! cards, markdown-adjacent views — and the status glyphs.
+//!
+//! ## Spinner mounting contract
+//!
+//! The animated glyphs (`BrailleSpinner`, `PixelSpinner`) split by mount:
+//!
+//! - `.view(key, window, cx)` — the ANIMATED mount: a `SpinnerView` entity
+//!   on the shared [`TickClock`]. All in-app mounts use this; there is no
+//!   inline animated render (an animated glyph without its own view is the
+//!   whole-window-rebuild failure mode #320 fixed). `reduce_motion`
+//!   renders the static frame and stops the beat.
+//! - plain `IntoElement`/`RenderOnce` — the STATIC mount: PixelSpinner's
+//!   hold frame; `BrailleSpinner` has none (it has no static face — it is
+//!   an animated-only glyph).
+//!
+//! `synced`/`max_fps` knobs are gone: one clock owns the rate.
+
 mod animation;
+mod glyph_view;
 mod text_runs;
 
 pub mod ask;
@@ -22,10 +41,12 @@ pub mod pixel_spinner;
 pub mod reasoning;
 pub mod shell;
 pub mod spinner;
+pub mod tick_clock;
 pub mod tool;
 
 pub use ask::{AskBlock, AskOption, AskState, AskSubmitted, AskUserQuestion};
 pub use code_view::{CodeLine, CodeLineKind, CodeView};
+pub use glyph_view::SpinnerView;
 pub use meerkat::{FRAME_NAMES, Meerkat, NATIVE_CELL};
 pub use pixel_spinner::{PixelSpinner, PixelSpinnerVariant};
 pub use reasoning::{
@@ -34,6 +55,7 @@ pub use reasoning::{
 };
 pub use shell::{ShellLine, ShellSpanKind, ShellView};
 pub use spinner::BrailleSpinner;
+pub use tick_clock::{GLYPH_FPS, TickClock, live_glyphs};
 pub use tool::{
     AUTO_FOLD_DELAY, Tool, ToolEvent, ToolHeader, ToolState, ToolStatus, format_tool_duration,
 };

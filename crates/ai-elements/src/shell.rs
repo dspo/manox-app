@@ -277,7 +277,7 @@ impl ShellView {
 }
 
 impl RenderOnce for ShellView {
-    fn render(self, _window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
+    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
         let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
         let (doc, runs) = self.compose(&theme);
@@ -291,7 +291,12 @@ impl RenderOnce for ShellView {
         let footer = if self.running {
             h_flex()
                 .gap_2()
-                .child(BrailleSpinner::new().xsmall().color(theme.muted_foreground))
+                .child(
+                    BrailleSpinner::new()
+                        .xsmall()
+                        .color(theme.muted_foreground)
+                        .view((self.id.clone(), "running-spinner"), window, cx),
+                )
                 .child(div().text_color(theme.muted_foreground).child("running"))
         } else {
             let (glyph, glyph_color, label_color) = match self.exit {

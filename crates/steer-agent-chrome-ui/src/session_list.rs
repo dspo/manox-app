@@ -355,7 +355,7 @@ pub struct SessionList {
 }
 
 impl RenderOnce for SessionList {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         // Flat visible-row order for the up/down focus walk (collapsed
         // groups contribute nothing).
         let order: Vec<String> = self
@@ -410,7 +410,12 @@ impl RenderOnce for SessionList {
                                 .child(steer_i18n::t("chrome-no-chats")),
                         )
                     })
-                    .children(self.groups.iter().map(|g| group(&self, g, &order, window)))
+                    .children(
+                        self.groups
+                            .iter()
+                            .map(|g| group(&self, g, &order, window, cx).into_any_element())
+                            .collect::<Vec<_>>(),
+                    )
                     // A filter active on a fully-filtered-out list: an empty
                     // state of its own, distinct from "no chats yet".
                     .when(
@@ -773,7 +778,8 @@ fn group(
     list: &SessionList,
     g: &SessionGroup,
     order: &[String],
-    window: &Window,
+    window: &mut Window,
+    cx: &mut App,
 ) -> impl IntoElement {
     let toggle = list.on_toggle_group.clone();
     let key = g.key.clone();
@@ -953,7 +959,7 @@ fn group(
         items.extend(
             g.rows
                 .iter()
-                .map(|r| session_row(list, r, order, window).into_any_element()),
+                .map(|r| session_row(list, r, order, window, cx).into_any_element()),
         );
         // The fold footer: hidden rows → show more (with the count), a
         // lifted fold → show less. A group within the limit carries neither.
@@ -1071,7 +1077,8 @@ fn session_row(
     list: &SessionList,
     data: &SessionRowData,
     order: &[String],
-    window: &Window,
+    window: &mut Window,
+    cx: &mut App,
 ) -> Stateful<gpui::Div> {
     let selected = list.selected.as_deref() == Some(data.id.as_str());
     let hovered = list.hovered.as_deref() == Some(data.id.as_str());
@@ -1223,7 +1230,9 @@ fn session_row(
                             SessionRowKind::Thread if selectable => {
                                 check_slot(checked).into_any_element()
                             }
-                            SessionRowKind::Thread => status_slot(data.status).into_any_element(),
+                            SessionRowKind::Thread => {
+                                status_slot(data.status, data.id.clone(), window, cx)
+                            }
                             SessionRowKind::External { icon: brand } => div()
                                 .text_color(FG_FAINT)
                                 .child(icon(brand, 14.))
@@ -1428,20 +1437,24 @@ fn check_slot(checked: bool) -> impl IntoElement {
 /// hops on the same beat), `Unread` the PixelSpinner frozen at its
 /// six-dots-aligned hold frame (attention without churn — the animation
 /// itself stays reserved for `Running`), `Idle` nothing.
-fn status_slot(status: SessionStatus) -> impl IntoElement {
+fn status_slot(
+    status: SessionStatus,
+    row_id: impl Into<gpui::ElementId>,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
     match status {
         SessionStatus::Pending(_) => pending_mark().into_any_element(),
         SessionStatus::Running => PixelSpinner::new()
             .variant(PixelSpinnerVariant::Grid)
             .color(ACCENT.into())
-            .synced()
-            // 30fps catches every hop of the native cadence (~34ms per
-            // stop); a fleet of running rows repaints a bounded number
-            // of frames, not vsync.
-            .max_fps(30.)
+            // The shared glyph clock's 12 fps beat; the whole fleet of
+            // running rows hops on one tick (#320).
+            .view((row_id.into(), "status"), window, cx)
             .into_any_element(),
         SessionStatus::Unread => PixelSpinner::new()
-            .frozen()
+            // Static mount: the hold frame, no clock — attention without
+            // churn.
             .color(SUCCESS_GREEN.into())
             .into_any_element(),
         SessionStatus::Idle => div().into_any_element(),

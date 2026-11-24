@@ -217,6 +217,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-macos",
  "gpui-pre-platform",
+ "log",
  "steer-components",
 ]
 
