@@ -379,8 +379,8 @@ impl CanvasPaneStore {
             self.close_webview_tab(&slot, cx);
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            let _ = self.webviews.remove(sheet);
+        if let Some(slot) = self.webviews.remove(sheet) {
+            self.close_webview_tab(&slot, cx);
         }
         if self.agents.remove(sheet).is_some() {
             // The picker may have spawned: the kill handle rides the
