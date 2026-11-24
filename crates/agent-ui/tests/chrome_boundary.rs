@@ -158,7 +158,14 @@ async fn chrome_gestures_survive_their_real_leases(cx: &mut TestAppContext) {
     let bottom = regions
         .iter()
         .find(|(side, ..)| side == "bottom")
-        .expect("the flipped region exists");
+        .unwrap_or_else(|| {
+            panic!(
+                "the flipped region exists; regions after the toggle: {regions:?} \
+             (launcher={}, foreground={:?})",
+                cx.update(|cx| ws.read(cx).diagnostic_view_mode_is_launcher()),
+                common::foreground_session(cx, &ws),
+            )
+        });
     assert!(bottom.1, "the toggle opened the canvas's bottom dock");
     assert!(
         bottom.2.iter().any(|sheet| sheet.starts_with("terminal:")),
