@@ -91,6 +91,56 @@ async fn chrome_gestures_survive_their_real_leases(cx: &mut TestAppContext) {
         "the switch closed the outgoing thread's diff tab (the silent drop is gone)"
     );
 
+    // ── the titlebar's dock toggle: the canvas dock is the host's write ───
+    // The click lands the host hook under the REAL lease shape (a shell
+    // update), and the flip is canvas state — the chrome keeps no mirror
+    // (invariant ②; the button's lit state is a render-time read).
+    //
+    // This runs before the launcher section on purpose: the launcher's ⏎
+    // lands an attach asynchronously, and that attach may move the foreground
+    // after the fact (observed on the Linux leg — the canvas had switched to
+    // the freshly minted container by the time the toggle settled). The dock
+    // flip belongs to the canvas shown at click time, so it is asserted while
+    // the foreground is the row this test just bound.
+    let sheets_before = cx.update(|cx| ws.read(cx).diagnostic_canvas_sheets(cx));
+    assert!(
+        !sheets_before.is_empty(),
+        "the dock toggle runs on a live canvas: {sheets_before:?}"
+    );
+    fire(cx, window, |window, cx| {
+        shell.update(cx, |shell, cx| shell.toggle_bottom_dock(window, cx));
+    });
+    cx.run_until_parked();
+    let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
+    let sheets_after = cx.update(|cx| ws.read(cx).diagnostic_canvas_sheets(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, ..)| side == "bottom")
+        .unwrap_or_else(|| {
+            panic!(
+                "the flipped region exists; sheets before={sheets_before:?} \
+                 after={sheets_after:?} regions={regions:?} \
+                 (launcher={}, foreground={:?})",
+                cx.update(|cx| ws.read(cx).diagnostic_view_mode_is_launcher()),
+                common::foreground_session(cx, &ws),
+            )
+        });
+    assert!(bottom.1, "the toggle opened the canvas's bottom dock");
+    assert!(
+        bottom.2.iter().any(|sheet| sheet.starts_with("terminal:")),
+        "opening an empty bottom dock asked for a terminal"
+    );
+    fire(cx, window, |window, cx| {
+        shell.update(cx, |shell, cx| shell.toggle_bottom_dock(window, cx));
+    });
+    cx.run_until_parked();
+    let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, ..)| side == "bottom")
+        .expect("the region stays after closing");
+    assert!(!bottom.1, "the second toggle closed the dock");
+
     // ── ⌘N / the New button: the launcher landing must not re-enter ───────
     fire(cx, window, |window, cx| {
         shell.update(cx, |shell, cx| shell.new_session(window, cx));
@@ -145,58 +195,6 @@ async fn chrome_gestures_survive_their_real_leases(cx: &mut TestAppContext) {
         });
     });
     cx.run_until_parked();
-
-    // ── the titlebar's dock toggle: the canvas dock is the host's write ───
-    // The click lands the host hook under the REAL lease shape (a shell
-    // update), and the flip is canvas state — the chrome keeps no mirror
-    // (invariant ②; the button's lit state is a render-time read).
-    //
-    // The batch archive above ends differently by environment: with a live
-    // dependent it opens the confirm gate and archives nothing; without one
-    // it lands, and a container whose last sheet left takes its canvas with
-    // it. The dock toggle is not the archive's subject — it needs a live
-    // canvas — so the gesture binds a known row first and states the
-    // precondition instead of inheriting whatever the archive left behind.
-    click_row(cx, &shell, window, "boundary-thread-1");
-    cx.run_until_parked();
-    let sheets_before = cx.update(|cx| ws.read(cx).diagnostic_canvas_sheets(cx));
-    assert!(
-        !sheets_before.is_empty(),
-        "the dock toggle runs on a live canvas: {sheets_before:?}"
-    );
-    fire(cx, window, |window, cx| {
-        shell.update(cx, |shell, cx| shell.toggle_bottom_dock(window, cx));
-    });
-    cx.run_until_parked();
-    let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
-    let sheets_after = cx.update(|cx| ws.read(cx).diagnostic_canvas_sheets(cx));
-    let bottom = regions
-        .iter()
-        .find(|(side, ..)| side == "bottom")
-        .unwrap_or_else(|| {
-            panic!(
-                "the flipped region exists; sheets before={sheets_before:?} \
-                 after={sheets_after:?} regions={regions:?} \
-                 (launcher={}, foreground={:?})",
-                cx.update(|cx| ws.read(cx).diagnostic_view_mode_is_launcher()),
-                common::foreground_session(cx, &ws),
-            )
-        });
-    assert!(bottom.1, "the toggle opened the canvas's bottom dock");
-    assert!(
-        bottom.2.iter().any(|sheet| sheet.starts_with("terminal:")),
-        "opening an empty bottom dock asked for a terminal"
-    );
-    fire(cx, window, |window, cx| {
-        shell.update(cx, |shell, cx| shell.toggle_bottom_dock(window, cx));
-    });
-    cx.run_until_parked();
-    let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
-    let bottom = regions
-        .iter()
-        .find(|(side, ..)| side == "bottom")
-        .expect("the region stays after closing");
-    assert!(!bottom.1, "the second toggle closed the dock");
 
     common::full_wiring_teardown(cx);
 }
