@@ -150,18 +150,34 @@ async fn chrome_gestures_survive_their_real_leases(cx: &mut TestAppContext) {
     // The click lands the host hook under the REAL lease shape (a shell
     // update), and the flip is canvas state — the chrome keeps no mirror
     // (invariant ②; the button's lit state is a render-time read).
+    //
+    // The batch archive above ends differently by environment: with a live
+    // dependent it opens the confirm gate and archives nothing; without one
+    // it lands, and a container whose last sheet left takes its canvas with
+    // it. The dock toggle is not the archive's subject — it needs a live
+    // canvas — so the gesture binds a known row first and states the
+    // precondition instead of inheriting whatever the archive left behind.
+    click_row(cx, &shell, window, "boundary-thread-1");
+    cx.run_until_parked();
+    let sheets_before = cx.update(|cx| ws.read(cx).diagnostic_canvas_sheets(cx));
+    assert!(
+        !sheets_before.is_empty(),
+        "the dock toggle runs on a live canvas: {sheets_before:?}"
+    );
     fire(cx, window, |window, cx| {
         shell.update(cx, |shell, cx| shell.toggle_bottom_dock(window, cx));
     });
     cx.run_until_parked();
     let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
+    let sheets_after = cx.update(|cx| ws.read(cx).diagnostic_canvas_sheets(cx));
     let bottom = regions
         .iter()
         .find(|(side, ..)| side == "bottom")
         .unwrap_or_else(|| {
             panic!(
-                "the flipped region exists; regions after the toggle: {regions:?} \
-             (launcher={}, foreground={:?})",
+                "the flipped region exists; sheets before={sheets_before:?} \
+                 after={sheets_after:?} regions={regions:?} \
+                 (launcher={}, foreground={:?})",
                 cx.update(|cx| ws.read(cx).diagnostic_view_mode_is_launcher()),
                 common::foreground_session(cx, &ws),
             )
