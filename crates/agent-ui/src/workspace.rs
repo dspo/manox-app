@@ -3502,7 +3502,7 @@ impl Workspace {
                 this.canvas_archive_requested(container_id, cx);
             }
         }));
-
+        self.canvas_view = Some(view.clone());
         view
     }
 
