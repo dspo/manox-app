@@ -51,7 +51,6 @@ type TitleLog = Rc<RefCell<Vec<(String, String)>>>;
 fn shell_config(main: gpui::AnyView, set_tag_log: TagLog, title_log: TitleLog) -> ShellConfig {
     ShellConfig {
         main: Arc::new(StubMain { view: main }),
-        tool_kinds: vec![],
         brand: None,
         fixed_rows: vec![],
         customizations: vec![],

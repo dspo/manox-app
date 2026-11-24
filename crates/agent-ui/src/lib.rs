@@ -17,6 +17,7 @@ pub use steer_agent_chat_ui::{ahp_store, cockpit, conversation, git_status, over
 // survives in `capability_host` on every platform.
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub mod browser_host;
+pub mod canvas_kinds;
 pub mod capability_host;
 pub mod chatgpt_app;
 pub mod chrome_assembly;

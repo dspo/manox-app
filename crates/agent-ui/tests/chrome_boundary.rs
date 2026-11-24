@@ -62,21 +62,26 @@ async fn chrome_gestures_survive_their_real_leases(cx: &mut TestAppContext) {
         "the click opened the row"
     );
 
-    // ── the outgoing thread's diff tab is really closed ───────────────────
-    // The silent-drop regression: the attach's `close_tool_tabs_of_kind`
-    // round-tripped through the window handle, which has no window to take
-    // while an event dispatch is in flight — so it returned false and the
-    // stale tab survived. With the deferred command channel it lands.
+    // ── the edit card's diff sheet lands in the canvas right dock ────────
+    // The pane era pinned "the switch closed the outgoing diff tab"; the
+    // per-container canvas gives that scoping by construction (the sheet
+    // parks with its container's canvas), so the pin here is: the sheet is
+    // the foreground container's, held open in its dock.
     cx.update(|cx| {
         ws.update(cx, |ws, cx| {
             ws.diagnostic_open_right_diff(Some("a.rs".into()), PATCH.to_string(), cx)
         })
     });
     cx.run_until_parked();
+    let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
+    let right = regions
+        .iter()
+        .find(|(side, ..)| side == "right")
+        .expect("the right dock");
     assert!(
-        !cx.update(|cx| agent_ui::chrome_assembly::pane_open_tab_ids(cx))
-            .is_empty(),
-        "the diff tab is open before the switch"
+        right.2.iter().any(|sheet| sheet.starts_with("diff:")),
+        "the diff sheet landed in the right dock, got {:?}",
+        right.2
     );
     click_row(cx, &shell, window, "boundary-thread-2");
     cx.run_until_parked();
@@ -85,10 +90,13 @@ async fn chrome_gestures_survive_their_real_leases(cx: &mut TestAppContext) {
         Some("boundary-thread-2"),
         "the second click opened the second row"
     );
+    let groups = cx.update(|cx| ws.read(cx).diagnostic_canvas_groups(cx));
     assert!(
-        cx.update(|cx| agent_ui::chrome_assembly::pane_open_tab_ids(cx))
-            .is_empty(),
-        "the switch closed the outgoing thread's diff tab (the silent drop is gone)"
+        groups
+            .iter()
+            .flatten()
+            .all(|sheet| !sheet.starts_with("diff:boundary-thread-1")),
+        "the new container's canvas carries no outgoing diff sheet"
     );
 
     // ── the titlebar's dock toggle: the canvas dock is the host's write ───
@@ -195,6 +203,35 @@ async fn chrome_gestures_survive_their_real_leases(cx: &mut TestAppContext) {
         });
     });
     cx.run_until_parked();
+
+    // ── the titlebar's dock toggle: the canvas dock is the host's write ───
+    // The click lands the host hook under the REAL lease shape (a shell
+    // update), and the flip is canvas state — the chrome keeps no mirror
+    // (invariant ②; the button's lit state is a render-time read).
+    fire(cx, window, |window, cx| {
+        shell.update(cx, |shell, cx| shell.toggle_bottom_dock(window, cx));
+    });
+    cx.run_until_parked();
+    let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, ..)| side == "bottom")
+        .expect("the flipped region exists");
+    assert!(bottom.1, "the toggle opened the canvas's bottom dock");
+    assert!(
+        bottom.2.iter().any(|sheet| sheet.starts_with("terminal:")),
+        "opening an empty bottom dock asked for a terminal"
+    );
+    fire(cx, window, |window, cx| {
+        shell.update(cx, |shell, cx| shell.toggle_bottom_dock(window, cx));
+    });
+    cx.run_until_parked();
+    let regions = cx.update(|cx| ws.read(cx).diagnostic_canvas_regions(cx));
+    let bottom = regions
+        .iter()
+        .find(|(side, ..)| side == "bottom")
+        .expect("the region stays after closing");
+    assert!(!bottom.1, "the second toggle closed the dock");
 
     common::full_wiring_teardown(cx);
 }

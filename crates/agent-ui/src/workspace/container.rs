@@ -457,12 +457,9 @@ impl Workspace {
         // integrated browser on Linux/FreeBSD — no tab ever registers.)
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         self.close_container_browser_tabs(container_id, cx);
-        // The stashed dock view + right-pane session.
-        self.reclaim_stash(container_id);
-        // The durable pane snapshot: a restore source only for a LIVE
-        // container's return — the dead container's registry key must not
-        // outlive it.
-        crate::chrome_assembly::remove_right_pane(container_id);
+        // The per-container pane stash (dock/right sessions) retired with
+        // the panes: the container's tool sheets reclaim through the canvas
+        // (chrome_assembly::reclaim_container_panes, deferred below).
         // The membership prune rides the ONE teardown: an EXTERNAL
         // container's death detaches it from its project (the record is gone
         // for good — the process model has no revival to keep the fact

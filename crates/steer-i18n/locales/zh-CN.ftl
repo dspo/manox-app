@@ -992,6 +992,7 @@ chrome-quick-editor = 打开编辑器
 chrome-tab-diff = Diff
 chrome-editor-placeholder = 在此书写 markdown…
 
+chrome-agent-pick-cli = 选择 CLI
 chrome-agent-pick-model = 为 { $agent } 选择模型
 
 workspace-change-rejected = 更改未生效（宿主拒绝）
@@ -1071,6 +1072,8 @@ canvas-tab-zoom = 放大
 canvas-tab-unzoom = 还原
 canvas-split-right = 向右分屏
 canvas-close-sheet = 关闭标签页
+canvas-tab-agent = CLI agent
+canvas-tab-subagent = 子代理
 launcher-action-pi = pi 会话
 pi-selector-mode = 模式
 pi-plan-title = 计划

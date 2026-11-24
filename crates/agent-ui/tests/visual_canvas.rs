@@ -47,6 +47,7 @@ mod macos {
         let zoom = std::env::var("CANVAS_ZOOM").is_ok();
         let drag_slot = std::env::var("CANVAS_DRAG_SLOT").is_ok();
         let drag_block = std::env::var("CANVAS_DRAG_BLOCK").is_ok();
+        let diff = std::env::var("CANVAS_DIFF").is_ok();
 
         manox_agent::init();
         // render_to_image only exists on non-headless platforms (Metal
@@ -124,6 +125,29 @@ mod macos {
             cx.update(|cx| {
                 if let Some(ws) = agent_ui::dispatch::workspace_global() {
                     ws.update(cx, |ws, cx| ws.diagnostic_canvas_toggle_dock("bottom", cx));
+                }
+            });
+            settle(&mut cx);
+        }
+        if diff {
+            // The edit card's open-diff entry (the real workspace face): a
+            // full-diff sheet lands in the container's right dock.
+            cx.update(|cx| {
+                if let Some(ws) = agent_ui::dispatch::workspace_global() {
+                    ws.update(cx, |ws, cx| {
+                        let patch = concat!(
+                            "[src/a.rs#T4K2]\n",
+                            "--- a/src/a.rs\n+++ b/src/a.rs\n",
+                            "@@ -1,2 +1,3 @@\n",
+                            " fn a() {}\n",
+                            "+fn a2() {}\n",
+                        );
+                        ws.diagnostic_open_right_diff(
+                            Some("src/a.rs".into()),
+                            patch.to_string(),
+                            cx,
+                        );
+                    });
                 }
             });
             settle(&mut cx);

@@ -85,7 +85,6 @@ fn newest_session_leads_its_group_in_the_workspace_grouping(cx: &mut TestAppCont
             Shell::new(
                 ShellConfig {
                     main: Arc::new(StubMain { view: main }),
-                    tool_kinds: vec![],
                     brand: None,
                     fixed_rows: vec![],
                     customizations: vec![],
@@ -157,7 +156,6 @@ fn group_order_seeds_keys_and_drag_mirrors_to_the_host(cx: &mut TestAppContext) 
             Shell::new(
                 ShellConfig {
                     main: Arc::new(StubMain { view: main }),
-                    tool_kinds: vec![],
                     brand: None,
                     fixed_rows: vec![],
                     customizations: vec![],

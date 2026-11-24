@@ -59,9 +59,11 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
     let toggle_dock = cx.listener(|this, _: &ClickEvent, window, cx| {
         this.toggle_bottom_dock(window, cx);
     });
-    let toggle_right = cx.listener(|this, _: &ClickEvent, _w, cx| {
-        this.right.update(cx, |pane, cx| pane.toggle_visible(cx));
-        cx.notify();
+    let toggle_right = cx.listener(|this, _: &ClickEvent, window, cx| {
+        if let Some(hook) = &this.hooks.on_toggle_dock {
+            hook("right", window, cx);
+            cx.notify();
+        }
     });
     let nav_back = cx.listener(|this, _: &ClickEvent, window, cx| {
         this.nav_back(window, cx);
@@ -203,7 +205,12 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
                     "tb-panel",
                     icons::LAYOUT_PANEL,
                     15.,
-                    if shell.hooks.dock_open.as_ref().is_some_and(|open| open(cx)) {
+                    if shell
+                        .hooks
+                        .dock_open
+                        .as_ref()
+                        .is_some_and(|open| open("bottom", cx))
+                    {
                         IconButtonState::On
                     } else {
                         IconButtonState::Off
@@ -215,7 +222,12 @@ pub(crate) fn render(shell: &Shell, window: &mut Window, cx: &mut Context<Shell>
                     "tb-right",
                     icons::LAYOUT_SIDEBAR_RIGHT,
                     15.,
-                    if shell.right.read(cx).visible {
+                    if shell
+                        .hooks
+                        .dock_open
+                        .as_ref()
+                        .is_some_and(|open| open("right", cx))
+                    {
                         IconButtonState::On
                     } else {
                         IconButtonState::Off

@@ -101,7 +101,6 @@ fn mount(
         let main: gpui::AnyView = cx.new(|_| StubView).into();
         let config = ShellConfig {
             main: Arc::new(StubMain { view: main }),
-            tool_kinds: vec![],
             brand: None,
             fixed_rows: vec![],
             customizations: vec![],

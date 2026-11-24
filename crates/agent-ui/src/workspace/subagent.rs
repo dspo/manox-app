@@ -7,11 +7,12 @@
 use super::*;
 
 impl Workspace {
-    /// Sub-agent drill-down tabs are per-thread ephemeral state: close the
-    /// outgoing thread's panels before rebinding (the transcript itself is
-    /// the child session's own fold now — there is nothing local to clear).
-    pub(super) fn close_subagent_tabs(&mut self, cx: &mut Context<Self>) {
-        crate::chrome_assembly::close_tool_tabs_of_kind("subagent", cx);
+    /// The sub-agent sheet a run rides: the panel entity lives in the pane
+    /// store (the workspace streams child events into it there).
+    pub(crate) fn subagent_sheet_id(&self, id: &str, cx: &Context<Self>) -> Option<String> {
+        let canvas = self.canvas_view.as_ref()?;
+        let container = canvas.read(cx).host.canvas_key().to_string();
+        Some(format!("subagent:{container}:{id}"))
     }
 
     /// Open (or focus) a sub-agent drill-down in the right pane. The run id
@@ -49,14 +50,21 @@ impl Workspace {
             source,
             cx,
         );
-        // The tab's identity is the run id (one panel per run — open_tab
-        // dedups by id, so topic-colliding runs must not share a tab);
-        // the label is the task topic, not the bare run id — a row of hex
-        // tails cannot be told apart.
-        let tab = crate::tool_tabs::subagent_tab(id, &banner, panel);
-        // The pane open crosses at the effect boundary (defer_shell takes the
-        // deferral).
-        crate::chrome_assembly::open_tool_tab(tab, cx);
+        // The sheet's identity is the run id (one panel per run — the id
+        // dedups by construction: a second event stream mounts into the
+        // same sheet's slot); the label is the task topic, not the bare
+        // run id — a row of hex tails cannot be told apart.
+        let Some(sheet) = self.subagent_sheet_id(id, cx) else {
+            return;
+        };
+        if let Some(canvas) = self.canvas_view.clone() {
+            canvas.update(cx, |canvas, cx| {
+                canvas
+                    .panes
+                    .update(cx, |panes, _| panes.put_subagent(&sheet, &banner, panel));
+                canvas.open_in_right_dock(&sheet, cx);
+            });
+        }
     }
 
     /// Rebuild the per-thread sub-agent observation rows (the rail's crew

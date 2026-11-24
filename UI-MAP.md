@@ -20,10 +20,10 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 
 | 层 | 组件 |
 | --- | --- |
-| 根视图 | `steer_agent_chrome_ui::Shell`（壳：38px 工具栏 + 侧栏 + 主区卡 + 右栏 + 底部 dock） |
+| 根视图 | `steer_agent_chrome_ui::Shell`（壳：38px 工具栏 + 侧栏 + 主区卡；右栏与底部 dock 已并入主区卡的画布，PLAN-ABSORB-08） |
 | 侧栏 | `chrome::SessionList`（props 组件）+ `agent_ui::sidebar_projection`（wire 行 → props 的纯投影） |
 | 主区卡内容 | `Workspace`（`agent-ui`）的会话列 —— 挂进 chrome 的 `MainSurface` 槽（日志/契约见 §3） |
-| 右栏 | `chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / Ghostty 终端 / CLI agents / 编辑器 / 浏览器 / diff——浏览器仅 macOS/Windows，Linux/FreeBSD 编译排除；Ghostty 走 `steer-ghostty` 的 libghostty-vt 核 + 自绘 GPUI element，tab 标题镜像 OSC title）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-container 会话由 `RightPaneSession` stash/restore（容器 id 键，存于 workspace 资源注册表 `agent_ui::resource_registry`），快照落 PANE_REGISTRY |
+| 右栏（08B 退役） | **右栏已并入画布**（PLAN-ABSORB-08B）：右 dock 承载 webview / editor / diff / agent / subagent 五个 sheet kind，状态按 sheet id 记账（`agent_ui::canvas_kinds::CanvasPaneStore`），持久化收成容器布局文件——`RightPane` / `ToolTab` / `RightPaneSession` / PANE_REGISTRY 均退役；壳契约的 `ToolTab*`/`PanelSurface` 面随之删除，`HostHooks` 增加 `on_toggle_dock` 与 `dock_open`。旧实现：`chrome::RightPane` + `ToolTab` 实例页签；`agent_ui::tool_tabs::registry` 提供 kind（终端 / Ghostty 终端 / CLI agents / 编辑器 / 浏览器 / diff——浏览器仅 macOS/Windows，Linux/FreeBSD 编译排除；Ghostty 走 `steer-ghostty` 的 libghostty-vt 核 + 自绘 GPUI element，tab 标题镜像 OSC title）+ 装配层宿主页签（子代理面板、宿主打开的浏览器页签）；per-container 会话由 `RightPaneSession` stash/restore（容器 id 键，存于 workspace 资源注册表 `agent_ui::resource_registry`），快照落 PANE_REGISTRY |
 | 底部 dock | `chrome::panel` + `PanelSurface` 注入（steer 装终端；随前台容器属性 cwd 拉起） |
 | Settings | 分栏布局：chrome 侧栏换设置导航（`Shell::sidebar_surface` 注入），主列放选中页详情（§4）。注入面挂载期间侧栏被 pin：强制可见、titlebar 隐藏开关惰性化——导航是该模式唯一出口，不可被藏到身后；pin 只借用可见性，卸载时还原用户原先的折叠状态 |
 
@@ -31,8 +31,8 @@ cargo run                       # 桌面应用（chrome 壳，唯一）
 slash_command / Settings 视图）、`steer-agent-chat-ui`（聊天状态机与消息管线；pi 腿的数据面
 `AcpStore` 也在本 crate，见 §2.10）、`steer-webview`。
 
-壳的契约（均可在不改 agent-ui 的前提下扩展）：`MainSurface`（主栏槽）、`ToolTab` /
-`ToolTabFactory`（右栏 kind）、`PanelSurface`（dock 内容）、`HostHooks`（pin/archive/new/select
+壳的契约（均可在不改 agent-ui 的前提下扩展）：`MainSurface`（主栏槽）、`HostHooks`
+（pin/archive/new/select + dock 开合）——`ToolTab*`/`PanelSurface` 随 08B 退役
 回调）。装配层另有两条进程级通路：`chrome_assembly::{open_tool_tab, subagent_panel}` ——
 宿主（agent 的浏览器打开、会话列/rail 上的子代理点击）经它把页签落到活着的右上栏。
 依赖不变量：chat crate 不得依赖 steer-webview/steer-ext-agents
@@ -440,6 +440,30 @@ tool、ask、elicitation 选择四个 map）；视图的 render 不经 `cx.entit
 则该行整个缺席（`crates/steer-app/src/about.rs`）。
 
 > Source: `crates/steer-app/src/pins.rs`, `crates/steer-app/build.rs`, `crates/steer-app/src/about.rs`
+#### 画布右 dock 的工具 kind（PLAN-ABSORB-08B）
+
+五个 sheet kind（`agent_ui::canvas_kinds`，每个 body 经 registry 工厂 mint-or-reuse，按
+sheet id 记账于 `CanvasPaneStore`；容器布局文件是唯一持久化）：
+
+- **webview**（`webview:{cid}:{n}`，浏览器平台专属——Linux/FreeBSD 上 kind 不注册）：
+  真 `BrowserView`，走生产 `restore_browser_tab`/`close_browser_tab` 与进程级
+  `WorkspaceBrowserHost`（IPC 全通）；页面 `<title>` 镜像到页签（2s ticker，通知画布
+  重绘）；**OS 子窗只在 shown 页挂载**（wry 不吃 CSS 裁剪，隐藏即卸、回来按 store 的
+  URL 重挂）；支撑件（槽结构 / ticker / 显隐）与 kind 同 gate；
+- **editor**（`editor:{cid}:{encodedPath}`）：markdown 编辑器按 sheet id 记账（草稿不被
+  tab 切换重置）；restore 判据 = 文件存在；
+- **diff**（`diff:{cid}:{old}~{new}`）：上游 `Diff`；内容 = 编辑卡 open 时交给 store 的
+  `DiffState` 实体（替换语义：同一 sheet 的 view 换新 patch）；
+- **agent**（`agent:{cid}:{n}`）：CLI 的 model picker（agent 段 → model 段 → TUI），
+  spawn 的 kill handle 随 sheet id 挂 kill-handle 注册表；restore = store 仍持有子进程；
+- **subagent**（`subagent:{cid}:{id}`）：SubagentPanel 钻取，label = 任务主题；
+  restore = store 仍持有面板。
+
+打开通道全部落 `CanvasView::open_in_right_dock`（`drop_sheet(Dock{Right})`——dock 区域
+随 drop 展开）；diff/浏览器/CLI 的 `/exit` 与容器 teardown 腿改读画布（关 sheet 即回收）。
+壳的右栏（`right_pane.rs`）与 dock 槽（`panel.rs`）退役。
+
+> Source: `crates/agent-ui/src/canvas_kinds.rs`, `crates/agent-ui/src/tool_tabs.rs`
 
 ## 3. 会话列布局
 
@@ -1351,23 +1375,23 @@ wire 行 → chrome 侧栏 props 的**纯投影**（`crates/agent-ui/src/sidebar
 
 > Source: `crates/agent-ui/src/sidebar_projection.rs`
 
-#### ChromeRightPane
+#### ChromeRightPane（08B 退役）
 
-右栏外壳（`crates/steer-agent-chrome-ui/src/right_pane.rs`）：圆角卡 + 页签条（**下划线式页签**：平面标签压在条带自身的 `border_b_1` 共享轨道上，激活项为 `ACCENT` + 半粗；一条**共享的下划线指示器**按激活 id 播放滑动动画，从旧页签横移到新页签；条右端仅「+」一个动作——再开一个激活 kind 的实例；无激活页签（新标签页空态）时按共享扁平按钮的 Disabled 形态置灰且不挂点击，2026-09-30 删除无语义的 split/external 假钮；**条行容器必须显式 `.flex()`**——gpui div 默认 block，缺了动作组会换行压进正文）+ 新标签页空态（快捷操作由注册表生成）+ 打开/激活/关闭生命周期（最后一个页签关闭即收起）。
+右栏已并入画布（见 2.9 的工具 kind 节）；本节为历史。旧实现（`crates/steer-agent-chrome-ui/src/right_pane.rs`）：圆角卡 + 页签条（**下划线式页签**：平面标签压在条带自身的 `border_b_1` 共享轨道上，激活项为 `ACCENT` + 半粗；一条**共享的下划线指示器**按激活 id 播放滑动动画，从旧页签横移到新页签；条右端仅「+」一个动作——再开一个激活 kind 的实例；无激活页签（新标签页空态）时按共享扁平按钮的 Disabled 形态置灰且不挂点击，2026-09-30 删除无语义的 split/external 假钮；**条行容器必须显式 `.flex()`**——gpui div 默认 block，缺了动作组会换行压进正文）+ 新标签页空态（快捷操作由注册表生成）+ 打开/激活/关闭生命周期（最后一个页签关闭即收起）。
 
 页签几何由 `on_prepaint` 实测上报（`TabBounds`，键为页签 id），指示器据此定位——标签宽度不一，无法由序号推出。注意 `on_prepaint` 上报的是**内容盒原点**（它挂的是 `canvas().absolute().size_full()` 子元素，padding 已计入），故记录时减去 `TAB_PL` 还原页签左边界；指示器与条带是**兄弟**（同在 relative wrapper 内）而非父子——gpui 的 `Style::paint` 先画子元素、**后画自身 border**，所以子元素永远压不住条带的 `border_b_1`，会只剩半截可见。wrapper 即指示器的包含块，其原点也就是 tab 几何的反基准坐标系。内容经 `ToolTab` 注入、kind 经 `ToolTabFactory` 注册；**实例级 id**（一种 kind 可多开）。**per-thread 会话**：`RightPaneSession{open, store, active_id, visible}` 整体 stash/restore（挂起走 `on_active(false)`——浏览器子视图隐藏、终端保活；仅显式关页签才拆内容）。快照经 `ToolTab::persist` / `ToolTabFactory::restore`（浏览器 `{"url"}`、编辑器空稿可恢复；终端与 CLI 会话不可复活，恢复时丢弃）落 `threads.db` 的 `thread_right_pane`。
 
 > Source: `crates/steer-agent-chrome-ui/src/right_pane.rs`, `crates/agent-ui/src/chrome_assembly.rs`
 
-#### ToolTabRegistry
+#### ToolTabRegistry（08B 退役）
 
-chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮；**仅 macOS/Windows，Linux/FreeBSD 编译排除**——见 [BrowserView](#browserview)）、**diff**（见 [DiffTab](#difftab)，注册表内但不上快捷操作页——无 patch 的空 diff 页签没有意义，入口只在 Edit 卡片上）。
+旧右栏 kind 全集（现为画布右 dock 的 sheet kind，见 2.9）——曾为 chrome 壳右栏的 kind 全集（`crates/agent-ui/src/tool_tabs.rs`，快捷操作顺序）：**终端**（$SHELL，独立 PTY，关页签拆进程树）、**Claude Code / Codex / GitHub Copilot**（页签体先落模型选择器——复用共享级联投影 `cascade_provider_groups`；点选即以该端点 `AgentBuilder` 拉起 CLI，picker 实体此后自渲染 TUI；cwd = 前台线程项目目录）、**编辑器**（markdown 软换行 + 行号）、**浏览器**（真 `BrowserView`：地址栏 + 导航；走生产 `restore_browser_tab`/`close_browser_tab`，注册进进程级 `WorkspaceBrowserHost`——IPC notify/inbound、eval oneshot、yield 全通；2s ticker 把页面 `<title>` 镜像到页签标签，`on_active` 隐藏 OS 子视图防漂浮；**仅 macOS/Windows，Linux/FreeBSD 编译排除**——见 [BrowserView](#browserview)）、**diff**（见 [DiffTab](#difftab)，注册表内但不上快捷操作页——无 patch 的空 diff 页签没有意义，入口只在 Edit 卡片上）。
 
 > Source: `crates/agent-ui/src/tool_tabs.rs`
 
-#### ChromePanel
+#### ChromePanel（08A 退役）
 
-底部 dock（`crates/steer-agent-chrome-ui/src/panel.rs` + `shell.rs` 的渲染）：通用容器，内容经 `PanelSurface` 注入（`open`=展开即拉起、`close`=收起即回收；新建/清理/收起三个动作）。steer 装配装集成终端，cwd 取前台容器属性（创建时快照，D10）；dock 视图按容器 stash/restore（键存于 workspace 资源注册表 `agent_ui::resource_registry`，随容器 teardown 回收；同右栏语义）。
+底部 dock 已并入画布（2.9）；本节为历史。旧实现（`crates/steer-agent-chrome-ui/src/panel.rs`）：通用容器，内容经 `PanelSurface` 注入（`open`=展开即拉起、`close`=收起即回收；新建/清理/收起三个动作）。steer 装配装集成终端，cwd 取前台容器属性（创建时快照，D10）；dock 视图按容器 stash/restore（键存于 workspace 资源注册表 `agent_ui::resource_registry`，随容器 teardown 回收；同右栏语义）。
 
 > Source: `crates/steer-agent-chrome-ui/src/panel.rs`, `crates/agent-ui/src/chrome_assembly.rs`
 
