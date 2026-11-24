@@ -151,17 +151,6 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
     ws.update(cx, |ws, _| {
         ws.diagnostic_register_kill_handle(&row2, "codex-tab-1", cat2.clone());
     });
-    // The pane registry's durable snapshot (A12): one under the dying
-    // container's key, one under a foreign key — the teardown removes only
-    // the dead container's.
-    let pane_payload = r#"{"visible":true,"active":0,"tabs":[]}"#.to_string();
-    let foreign_pane_key = "external:codex:pane-registry-survivor";
-    agent_ui::chrome_assembly::diagnostic_persist_right_pane(&row2, pane_payload.clone());
-    agent_ui::chrome_assembly::diagnostic_persist_right_pane(foreign_pane_key, pane_payload);
-    assert!(
-        agent_ui::chrome_assembly::diagnostic_right_pane_snapshot(&row2).is_some(),
-        "the snapshot is planted"
-    );
     // The browser-route legs assert only where the integrated browser
     // compiles (Linux/FreeBSD have no browser host — nothing can register).
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
@@ -223,16 +212,6 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
         wait_child_dead(cx, cat2),
         "the death reclaimed the container's CLI-tab child"
     );
-    wait_until(
-        cx,
-        "the death reclaimed the dead container's pane snapshot",
-        |_cx| agent_ui::chrome_assembly::diagnostic_right_pane_snapshot(&row2).is_none(),
-    );
-    assert!(
-        agent_ui::chrome_assembly::diagnostic_right_pane_snapshot(foreign_pane_key).is_some(),
-        "the removal is keyed — a foreign container's snapshot survives"
-    );
-    agent_ui::chrome_assembly::remove_right_pane(foreign_pane_key);
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     wait_until(
         cx,
@@ -275,30 +254,6 @@ async fn container_teardown_reclaims_its_resources(cx: &mut TestAppContext) {
         common::run_slash(cx, &ws, window, "/exit");
         assert!(common::wait_launcher(cx, &ws), "/exit lands the launcher");
     }
-
-    // ── the right stash is keyed per container ──────────────────────────
-    let attach = |cx: &mut TestAppContext,
-                  id: &str,
-                  ws: &gpui::Entity<agent_ui::Workspace>,
-                  window: gpui::AnyWindowHandle| {
-        let ws = ws.clone();
-        let id = id.to_string();
-        cx.update_window(window, |_, window, cx| {
-            ws.update(cx, |ws, cx| {
-                ws.diagnostic_attach_thread(common::landing_thread(&id), true, window, cx);
-            });
-        })
-        .expect("attach lands on the live window");
-        cx.run_until_parked();
-    };
-    attach(cx, "stash-a", &ws, window);
-    attach(cx, "stash-b", &ws, window);
-    let owner = ws.read_with(cx, |ws, _| ws.diagnostic_live_owner());
-    assert_eq!(
-        owner,
-        Some("stash-b".into()),
-        "the live right owner slot follows the foreground container"
-    );
 
     common::full_wiring_teardown(cx);
 }

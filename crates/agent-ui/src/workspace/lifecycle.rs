@@ -50,7 +50,7 @@ impl Workspace {
         if self.chat.read(cx).pending_ask.is_some() {
             self.dismiss_ask(cx);
         }
-        crate::chrome_assembly::close_tool_tabs_of_kind("subagent", cx);
+        self.close_sheets_of_kind("subagent", cx);
         self.multiplexer.update(cx, |mux, cx| {
             mux.stop_container(&sid, cx);
         });

@@ -21,11 +21,6 @@ use super::Workspace;
 /// The right pane's diff tab content: the tab label plus the parsed patch —
 /// `Err` carries the upstream parse error, so a malformed patch still opens
 /// the tab and says why it cannot render.
-pub(crate) struct RightDiff {
-    pub(crate) title: SharedString,
-    pub(crate) state: Result<Entity<DiffState>, SharedString>,
-}
-
 impl Workspace {
     /// The edit card's open-diff entry: parse the patch, replace the diff
     /// tab's content (one tab, however many cards open it), and focus the
@@ -39,32 +34,41 @@ impl Workspace {
     ) {
         let patch = strip_diff_envelope(&patch);
         let parsed = DiffFile::parse(patch);
-        let title = diff_tab_title(path.as_deref(), parsed.as_deref().ok());
-        let state = parsed
+        let title: SharedString = diff_tab_title(path.as_deref(), parsed.as_deref().ok());
+        let state: Result<Entity<gpui_component::diff::DiffState>, SharedString> = parsed
             .map(|files| cx.new(|cx| DiffState::new(files, cx)))
             .map_err(|e| SharedString::from(e.to_string()));
-        self.right_diff = Some(RightDiff { title, state });
-        cx.notify();
-        // The pane open crosses at the effect boundary (defer_shell takes
-        // the deferral), never inline in this update.
-        crate::chrome_assembly::open_right_kind(crate::tool_tabs::DIFF_KIND, cx);
+        // The sheet lands in the container's own right dock: per-container
+        // canvases give the per-thread ephemeral scoping by construction
+        // (the pane era retired the global close-on-rebind leg with it).
+        let canvas = self.ensure_canvas_view(cx);
+        let sheet =
+            steer_canvas::id::diff_sheet_id(&self.foreground_or_attached(cx), "patch", "current");
+        canvas.update(cx, |canvas, cx| {
+            canvas.panes.update(cx, |panes, cx| {
+                panes.put_diff(&sheet, title, state, cx);
+            });
+            canvas.open_in_right_dock(&sheet, cx);
+        });
     }
 
-    /// Diff tabs are per-thread ephemeral state like the sub-agent panels:
-    /// the payload is the latest opened patch workspace-wide, so a tab
-    /// carried across a switch could show another thread's patch. Retired
-    /// on rebind; a card's chip reopens on demand.
-    pub(super) fn close_diff_tabs(&mut self, cx: &mut Context<Self>) {
-        crate::chrome_assembly::close_tool_tabs_of_kind(crate::tool_tabs::DIFF_KIND, cx);
+    /// The container id the canvas keys its sheets by (the canvas host's
+    /// own canvas key: the foreground container, or the scratch surface).
+    fn foreground_or_attached(&self, cx: &Context<Self>) -> String {
+        self.canvas_view
+            .as_ref()
+            .map(|canvas| canvas.read(cx).host.canvas_key().to_string())
+            .unwrap_or_else(|| "scratch".to_string())
     }
 
     /// Probe: the diff tab's current content — `(label, parsed file count)`;
     /// `None` while nothing opened a diff (or the patch failed to parse).
     #[cfg(feature = "test-support")]
     pub fn diagnostic_right_diff(&self, cx: &gpui::App) -> Option<(String, usize)> {
-        let diff = self.right_diff.as_ref()?;
-        let files = diff.state.as_ref().ok()?.read(cx).files().len();
-        Some((diff.title.to_string(), files))
+        let canvas = self.canvas_view.as_ref()?;
+        let container = canvas.read(cx).host.canvas_key().to_string();
+        let sheet = steer_canvas::id::diff_sheet_id(&container, "patch", "current");
+        canvas.read(cx).panes.read(cx).diagnostic_diff(&sheet, cx)
     }
 
     /// Probe: drive the same entry the edit card's chip routes to (the

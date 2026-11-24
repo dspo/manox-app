@@ -21,7 +21,6 @@ use gpui::{
 };
 
 use crate::main_surface::MainSurfaceHandle;
-use crate::right_pane::{RightPane, ToolTabFactory};
 use crate::session_list::{
     CustomizationRow, DraggedRow, FixedRow, LOOSE_BUCKET_KEY, SessionGroup, SessionList,
     SessionRowData, SessionRowKind, SessionStatus, SidebarGrouping,
@@ -248,13 +247,16 @@ pub struct HostHooks {
     /// flip; the button's lit state arrives through [`Self::dock_open`].
     /// Absent → the click is inert.
     pub on_toggle_dock: Option<HookOnDockSide>,
-    /// Whether the bottom dock is open, read at render time (the button's
-    /// state; no local mirror — invariant ②). Absent → the button reads dark.
-    pub dock_open: Option<HookQuery<bool>>,
+    /// Whether the dock on `side` is open, read at render time (the
+    /// buttons' state; no local mirror — invariant ②). Absent → the button
+    /// reads dark.
+    pub dock_open: Option<HookOnDockOpen>,
 }
 
 /// Dock-side callback: the side's wire name (`left` / `right` / `bottom`).
 pub type HookOnDockSide = Box<dyn Fn(&str, &mut Window, &mut App)>;
+/// Render-time dock-state query: the side's wire name → open flag.
+pub type HookOnDockOpen = Box<dyn Fn(&str, &App) -> bool>;
 
 /// Batch-ids callback (the selection bar's archive commit).
 pub type HookOnIds = Box<dyn Fn(&[String], &mut Window, &mut App)>;
@@ -275,7 +277,6 @@ struct MembershipMenuRows {
 /// Everything the shell needs from its host at construction.
 pub struct ShellConfig {
     pub main: MainSurfaceHandle,
-    pub tool_kinds: Vec<Arc<dyn ToolTabFactory>>,
     /// Fixed sidebar rows (Automations / Chats …) — labels resolved by the
     /// host.
     pub fixed_rows: Vec<FixedRow>,
@@ -379,9 +380,6 @@ pub struct Shell {
     /// `show_sidebar` as the user had it before the pin forced it visible;
     /// restored when the injected surface unmounts.
     pub(crate) sidebar_pinned_was: bool,
-    /// The right pane (the shell view; tab content is decoupled through
-    /// ToolTab — see `right_pane.rs`).
-    pub right: Entity<RightPane>,
     /// Sidebar width (invisible-handle drag, 180–460, double-click reset).
     pub sidebar_width: Pixels,
     /// Host-injected sidebar content. When set, the sidebar slot renders
@@ -495,7 +493,6 @@ impl Shell {
     }
 
     pub fn new(config: ShellConfig, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let right = cx.new(|_| RightPane::new(config.tool_kinds));
         // The lens observes Shell's notifies (state changes) and re-renders;
         // plain ancestor dirty-marks never reach an observer, so the cache
         // survives them.
@@ -505,7 +502,6 @@ impl Shell {
             SidebarLens(shell.downgrade())
         });
         Self {
-            right,
             sessions: Vec::new(),
             collapsed: Vec::new(),
             expanded_groups: RefCell::new(Vec::new()),
@@ -1807,33 +1803,6 @@ impl Shell {
     pub fn set_sidebar_width(&mut self, width: f32) {
         self.sidebar_width = px(width.clamp(divider::SIDEBAR_MIN, divider::SIDEBAR_MAX));
     }
-
-    /// Detach the right pane's whole session (per-thread stashing — see
-    /// [`crate::right_pane::RightPaneSession`]).
-    pub fn stash_right_session(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Option<crate::right_pane::RightPaneSession> {
-        Some(self.right.update(cx, |pane, cx| pane.stash_session(cx)))
-    }
-
-    /// Resume a stashed right-pane session.
-    pub fn restore_right_session(
-        &mut self,
-        session: crate::right_pane::RightPaneSession,
-        cx: &mut Context<Self>,
-    ) {
-        self.right
-            .update(cx, |pane, cx| pane.restore_session(session, cx));
-        cx.notify();
-    }
-
-    /// Open (or focus) a right-pane tool kind.
-    pub fn open_right(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.right
-            .update(cx, |pane, cx| pane.open_kind(kind, window, cx));
-        cx.notify();
-    }
 }
 
 impl gpui::Render for Shell {
@@ -1890,18 +1859,6 @@ impl gpui::Render for Shell {
                     // pointer x − root left edge.
                     let w: f32 = f32::from(ev.event.position.x - ev.bounds.left());
                     this.set_sidebar_width(w.clamp(divider::SIDEBAR_MIN, divider::SIDEBAR_MAX));
-                    cx.notify();
-                },
-            ))
-            .on_drag_move(cx.listener(
-                |this, ev: &gpui::DragMoveEvent<divider::DraggedRightDivider>, _w, cx| {
-                    // The right pane's right edge = root right edge − the
-                    // main column's FLOAT_GAP right pad: width = right edge −
-                    // pointer.
-                    let w: f32 = f32::from(ev.bounds.right() - ev.event.position.x) - FLOAT_GAP;
-                    this.right.update(cx, |pane, _cx| {
-                        pane.set_width(w.clamp(divider::RIGHT_MIN, divider::RIGHT_MAX));
-                    });
                     cx.notify();
                 },
             ))
@@ -2030,15 +1987,13 @@ impl gpui::Render for Shell {
 }
 
 impl Shell {
-    /// Content assembly — [sidebar | main area [[main card | right pane] /
-    /// bottom dock]]. Card gaps are 6px (the seam); resize handles are
-    /// invisible absolute layers centered on the seams (see `divider.rs`),
-    /// taking no layout width.
+    /// Content assembly — sidebar | main card. The right dock lives in the
+    /// canvas (the main card's own surface); card gaps are 6px (the seam);
+    /// resize handles are invisible absolute layers centered on the seams
+    /// (see `divider.rs`), taking no layout width.
     fn render_content(&mut self, cx: &mut Context<Shell>) -> gpui::AnyElement {
         let show_sidebar = self.show_sidebar;
         let sidebar_surface = self.sidebar_surface.clone();
-        let right = self.right.clone();
-        let right_visible = right.read(cx).visible;
         let main = self.main.view();
 
         // The handle follows the width, so the content row must be relative;
@@ -2102,12 +2057,8 @@ impl Shell {
                                     .rounded(px(crate::theme::CARD_RADIUS))
                                     .overflow_hidden()
                                     .child(main),
-                            )
-                            // main card | right pane: the 6px sash is the
-                            // seam (an in-layout element).
-                            .when(right_visible, |this| {
-                                this.child(divider::chat_right_sash(cx)).child(right)
-                            }),
+                            ), // main card | right pane: the 6px sash is the
+                               // seam (an in-layout element).
                     ),
             )
             .children(sidebar_handle)

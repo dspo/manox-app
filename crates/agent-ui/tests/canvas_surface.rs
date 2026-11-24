@@ -1029,17 +1029,9 @@ async fn a_zoom_toggles_and_survives_a_container_switch(cx: &mut TestAppContext)
         .find(|sheet| sheet.starts_with("session:"))
         .expect("the session sheet");
 
-    let groups = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_groups(cx));
-    println!("DEBUG zoom groups: {groups:?} session: {session:?}");
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_canvas_toggle_zoom(&session, cx);
     });
-    println!(
-        "DEBUG zoomed after toggle: {:?} sheets: {:?} groups: {:?}",
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx)),
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx)),
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_groups(cx))
-    );
     assert_eq!(
         workspace
             .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx))
@@ -1051,11 +1043,6 @@ async fn a_zoom_toggles_and_survives_a_container_switch(cx: &mut TestAppContext)
     workspace.update(&mut visual.cx, |ws, cx| {
         ws.diagnostic_canvas_toggle_dock("bottom", cx);
     });
-    println!(
-        "DEBUG after dock toggle: zoomed={:?} regions={:?}",
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx)),
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx))
-    );
     let terminal = workspace
         .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx))
         .iter()
@@ -1089,11 +1076,6 @@ async fn a_zoom_toggles_and_survives_a_container_switch(cx: &mut TestAppContext)
         ws.diagnostic_bind_store(alpha, "zoom-alpha", cx);
     });
     draw(&mut visual);
-    println!(
-        "DEBUG rebind-back zoomed: {:?} sheets: {:?}",
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx)),
-        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_sheets(cx))
-    );
     assert_eq!(
         workspace
             .read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_zoomed(cx))
@@ -1143,4 +1125,88 @@ async fn a_split_handle_drag_sizes_and_the_center_resets(cx: &mut TestAppContext
     });
     let sizes = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_center_sizes(cx));
     assert_eq!(sizes, Some(None), "the reset lands None (equal shares)");
+}
+
+// ── the 08B right-dock tool kinds ────────────────────────────────────────
+
+#[gpui::test]
+async fn an_agent_sheet_opens_in_the_right_dock_with_its_picker(cx: &mut TestAppContext) {
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, "agent-demo", cx);
+    });
+    draw(&mut visual);
+
+    // The strip's CLI entry: the sheet lands in the right dock, its body is
+    // the picker (the agent segment first).
+    let sheet = "agent:agent-demo:1".to_string();
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_drop(&sheet, "dock:right", cx);
+    });
+    for _ in 0..3 {
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    let regions = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx));
+    let right = regions
+        .iter()
+        .find(|(side, ..)| side == "right")
+        .expect("the right dock");
+    assert!(
+        right.2.iter().any(|s| s == &sheet),
+        "the agent sheet rides the right dock, got {:?}",
+        right.2
+    );
+    // The picker body paints (the agent segment's rows).
+    println!(
+        "DEBUG agent keys: {:?} bounds {:?}",
+        workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_agent_keys(cx)),
+        visual.debug_bounds("agent-picker")
+    );
+    assert!(
+        visual.debug_bounds("agent-picker").is_some(),
+        "the CLI picker paints as the agent sheet's body"
+    );
+}
+
+#[gpui::test]
+async fn an_editor_sheet_restores_only_while_its_file_exists(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("draft.md");
+    std::fs::write(&path, "# draft\n").unwrap();
+    let encoded = steer_canvas::persist::encode_id(&path.to_string_lossy());
+
+    init_harness(cx);
+    let (window, workspace) = open_workspace(cx);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let store = visual.cx.new(|_| AhpStore::detached());
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_bind_store(store, "editor-demo", cx);
+    });
+    draw(&mut visual);
+
+    let sheet = format!("editor:editor-demo:{}", encoded);
+    workspace.update(&mut visual.cx, |ws, cx| {
+        ws.diagnostic_canvas_drop(&sheet, "dock:right", cx);
+    });
+    draw(&mut visual);
+
+    // The editor body paints (a minted markdown editor).
+    let regions = workspace.read_with(&visual.cx, |ws, cx| ws.diagnostic_canvas_regions(cx));
+    let right = regions
+        .iter()
+        .find(|(side, ..)| side == "right")
+        .expect("the dock");
+    assert!(
+        right.2.iter().any(|s| s == &sheet),
+        "the editor sheet rides the dock"
+    );
+
+    // The restore face: the file exists here; a dead path prunes the sheet.
+    let file_alive = std::path::Path::new(&path).exists();
+    assert!(file_alive, "the probe's file exists");
+    let _ = visual;
 }

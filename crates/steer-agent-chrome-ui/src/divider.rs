@@ -25,33 +25,15 @@ use gpui_base::{InteractiveElementExt as _, ResizeHandleRenderer, resize_handle}
 
 use crate::shell::Shell;
 
-pub(crate) const HANDLE_WIDTH: f32 = 6.;
 pub(crate) const SIDEBAR_DEFAULT: f32 = 224.;
 pub(crate) const SIDEBAR_MIN: f32 = 180.;
 pub(crate) const SIDEBAR_MAX: f32 = 460.;
-pub(crate) const RIGHT_DEFAULT: f32 = 460.;
-pub(crate) const RIGHT_MIN: f32 = 320.;
-pub(crate) const RIGHT_MAX: f32 = 900.;
 
 /// Sidebar|main drag payload (doubles as the invisible ghost).
 #[derive(Clone, Copy, PartialEq)]
 pub struct DraggedSidebarDivider;
 
 impl Render for DraggedSidebarDivider {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut gpui::Context<Self>,
-    ) -> impl IntoElement {
-        gpui::Empty
-    }
-}
-
-/// Main-card|right-pane drag payload (doubles as the invisible ghost).
-#[derive(Clone, Copy, PartialEq)]
-pub struct DraggedRightDivider;
-
-impl Render for DraggedRightDivider {
     fn render(
         &mut self,
         _window: &mut gpui::Window,
@@ -92,36 +74,6 @@ pub(crate) fn sidebar_handle(shell: &Shell, cx: &mut gpui::Context<Shell>) -> im
             })
             .on_double_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.set_sidebar_width(SIDEBAR_DEFAULT);
-                cx.notify();
-            })),
-        )
-}
-
-/// The main-card|right-pane sash: the 6px strip stays the seam itself (an
-/// in-layout flex child, invisible), and the band rides it absolutely so the
-/// drag keeps the strip's geometry.
-pub(crate) fn chat_right_sash(cx: &mut gpui::Context<Shell>) -> impl IntoElement {
-    div()
-        .w(px(HANDLE_WIDTH))
-        .h_full()
-        .flex_shrink_0()
-        .relative()
-        .child(
-            resize_handle::<DraggedRightDivider, DraggedRightDivider>(
-                "right-resize-sash",
-                Axis::Horizontal,
-            )
-            .with_appearance(invisible_appearance())
-            .on_drag(DraggedRightDivider, |_, _, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| DraggedRightDivider)
-            })
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_double_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.right
-                    .update(cx, |pane, _cx| pane.set_width(RIGHT_DEFAULT));
                 cx.notify();
             })),
         )

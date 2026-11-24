@@ -5,38 +5,38 @@
 //! - the 2026-Light design tokens ([`theme`]) and base controls
 //!   ([`primitives`]);
 //! - the sidebar session tree ([`session_list`]) — props-driven, host-fed;
-//! - the right tool pane shell ([`right_pane`]) — content injected through
-//!   the [`right_pane::ToolTab`] trait, kinds registered through
-//!   [`right_pane::ToolTabFactory`] (instance-level ids: one kind may be
-//!   open many times);
-//! - the main-column slot ([`main_surface`]) — chat is the first intended
-//!   implementation, settings the second;
+//! - the main-column slot ([`main_surface`]) — the workspace (its canvas is
+//!   the container view) is the only implementation in this app;
 //! - the root [`shell::Shell`] assembling all of the above plus the toolbar
-//!   ([`titlebar`]) and resize handles ([`divider`]).
+//!   ([`titlebar`]) and the sidebar resize handle ([`divider`]).
+//!
+//! The former right pane and bottom dock shells retired with
+//! PLAN-ABSORB-08: the container canvas hosts those tools as sheets
+//! (steer-canvas kinds, right dock), and their state lives with the canvas
+//! — the shell keeps no mirror. Dock open/close mirror to
+//! [`shell::HostHooks::on_toggle_dock`] (the button state is a render-time
+//! [`shell::HostHooks::dock_open`] read).
 //!
 //! It deliberately depends on no data source: session rows are pushed in as
-//! snapshots, state-changing actions mirror to [`shell::HostHooks`], and tab
-//! content is injected by the host. The `shell` example wires a full
-//! assembly (real `<manox-home>` threads, a PTY terminal kind, an embedded
-//! browser kind) — run it with:
+//! snapshots, state-changing actions mirror to [`shell::HostHooks`]. The
+//! `shell` example wires a full assembly (real `<manox-home>` threads) —
+//! run it with:
 //!
 //! ```sh
 //! cargo run -p steer-agent-chrome-ui --example shell
 //! ```
 //!
-//! Known gaps at this stage: per-session right-pane tab sets are not yet
-//! modeled; the sidebar's fixed rows (Automations / Chats) and the
-//! Customizations block are decorative — dimmed with an unimplemented
-//! tooltip until real surfaces exist. All chrome text resolves through
-//! `steer-i18n` (`chrome-*` keys, zh-CN primary / en fallback) — chrome
-//! copy is app chrome by definition.
+//! The sidebar's fixed rows (Automations / Chats) and the Customizations
+//! block are decorative — dimmed with an unimplemented tooltip until real
+//! surfaces exist. All chrome text resolves through `steer-i18n`
+//! (`chrome-*` keys, zh-CN primary / en fallback) — chrome copy is app
+//! chrome by definition.
 
 pub mod divider;
 pub mod launcher;
 pub mod main_surface;
 pub mod primitives;
 pub mod project_dialog;
-pub mod right_pane;
 pub mod session_list;
 pub mod shell;
 pub mod theme;
@@ -45,7 +45,6 @@ pub mod titlebar;
 pub use launcher::{Launcher, LauncherAction};
 pub use main_surface::{MainSurface, MainSurfaceHandle};
 pub use project_dialog::{ProjectDialog, ProjectRootRow};
-pub use right_pane::{RightPane, TabStore, ToolTab, ToolTabFactory};
 pub use session_list::{
     CustomizationRow, FixedRow, PendingKind, SessionGroup, SessionList, SessionRowData,
     SessionStatus,

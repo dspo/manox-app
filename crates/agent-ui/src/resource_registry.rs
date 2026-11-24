@@ -6,7 +6,7 @@
 //! everything under its key; other containers' entries are untouched.
 //!
 //! The registry lives ON the [`Workspace`]: gpui views are main-thread
-//! values (a `RightPaneSession`/`AnyView` cannot sit in a global), and the
+//! values (gpui views cannot sit in a global), and the
 //! workspace is the process-lifetime singleton the resources' owner
 //! outlives — the legacy stash lifetime, restored.
 //!
@@ -22,13 +22,6 @@ use steer_ext_agents::SessionHandle;
 
 use crate::workspace::Workspace;
 
-/// One container's pane-side holding: the stashed right-pane session (the
-/// tab set + store). The dock lives in the canvas now — it keeps no stash.
-#[derive(Default)]
-pub(crate) struct PaneEntry {
-    pub(crate) right: Option<steer_agent_chrome_ui::right_pane::RightPaneSession>,
-}
-
 /// A registered CLI-tab kill handle: the tab instance id → (owning
 /// container, handle). Registered once at spawn (under the then-foreground
 /// container) and removed when killed — by the tab's own close or by the
@@ -36,40 +29,6 @@ pub(crate) struct PaneEntry {
 pub(crate) type KillHandles = HashMap<String, (String, Arc<SessionHandle>)>;
 
 impl Workspace {
-    // ── right-pane sessions ───────────────────────────────────────────
-
-    /// Park the outgoing live right-pane session under its container.
-    pub(crate) fn stash_right(
-        &mut self,
-        container: &str,
-        session: steer_agent_chrome_ui::right_pane::RightPaneSession,
-    ) {
-        self.pane_stash
-            .entry(container.to_string())
-            .or_default()
-            .right = Some(session);
-    }
-
-    /// Take a container's stashed right-pane session back. `None` → the
-    /// caller falls back to the container's persisted snapshot.
-    pub(crate) fn take_right(
-        &mut self,
-        container: &str,
-    ) -> Option<steer_agent_chrome_ui::right_pane::RightPaneSession> {
-        self.pane_stash
-            .get_mut(container)
-            .and_then(|entry| entry.right.take())
-    }
-
-    /// Which container's right-pane session is live in the shell right now.
-    pub(crate) fn right_owner(&self) -> Option<String> {
-        self.live_right_owner.clone()
-    }
-
-    pub(crate) fn set_right_owner(&mut self, container: Option<String>) {
-        self.live_right_owner = container;
-    }
-
     // ── CLI-tab kill handles ──────────────────────────────────────────
 
     /// Register a CLI tab's child handle under `(container, tab instance
@@ -123,25 +82,8 @@ impl Workspace {
     /// container-external half — the LIVE dock/pane — is
     /// `chrome_assembly::reclaim_container_panes`, which must run outside
     /// the workspace lease.
-    pub(crate) fn reclaim_stash(&mut self, container: &str) {
-        let _ = self.take_right(container);
-        // An emptied entry is dead weight (the container is going away).
-        if let Some(entry) = self.pane_stash.get(container)
-            && entry.right.is_none()
-        {
-            self.pane_stash.remove(container);
-        }
-    }
 
     // ── diagnostics (test-support only) ───────────────────────────────
-
-    /// Whether a container holds a stashed right-pane session.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_right_stash_contains(&self, container: &str) -> bool {
-        self.pane_stash
-            .get(container)
-            .is_some_and(|entry| entry.right.is_some())
-    }
 
     /// The (container, tab) pairs of the registered kill handles — the
     /// ownership regression read.
@@ -154,12 +96,6 @@ impl Workspace {
             .collect();
         pairs.sort();
         pairs
-    }
-
-    /// The live right-pane owner slot — the switch-tracking regression read.
-    #[cfg(feature = "test-support")]
-    pub fn diagnostic_live_owner(&self) -> Option<String> {
-        self.right_owner()
     }
 
     /// Diagnostic: register a CLI tab's kill handle under `(container, tab)`
