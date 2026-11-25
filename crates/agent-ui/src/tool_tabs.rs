@@ -29,18 +29,39 @@ pub(crate) fn thread_cwd_or_home(cx: &App) -> std::path::PathBuf {
 /// this read, which is the honest capture the runtime's lack of environment
 /// history leaves). Falls back to home + no overrides: a terminal has to
 /// spawn somewhere.
+///
+/// This face is for callers OUTSIDE a workspace lease: it reaches the
+/// workspace through the process-global handle. A workspace gesture (the
+/// launcher submits run inside `Context<Workspace>`) must call
+/// [`attrs_for_spawn`] with its own `&self` — re-reading the already-leased
+/// entity through the global panics.
 pub(crate) fn thread_attrs_for_spawn(cx: &App) -> crate::workspace::container::ContainerAttrs {
-    crate::dispatch::workspace_global()
-        .and_then(|ws| {
-            let fg = ws.read(cx).foreground_container_id(cx)?;
-            Some(ws.read(cx).container_attrs(&fg, cx))
-        })
-        .unwrap_or_else(|| crate::workspace::container::ContainerAttrs {
-            cwd: std::env::var("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| ".".into()),
-            env: Default::default(),
-        })
+    match crate::dispatch::workspace_global() {
+        Some(ws) => attrs_for_spawn(ws.read(cx), cx),
+        None => home_attrs(),
+    }
+}
+
+/// The same attrs snapshot taken from a workspace the caller already holds —
+/// the lease-safe face for workspace-side gestures (the double-lease panic
+/// the global face hits there is what this seam exists to avoid).
+pub(crate) fn attrs_for_spawn(
+    ws: &crate::Workspace,
+    cx: &App,
+) -> crate::workspace::container::ContainerAttrs {
+    match ws.foreground_container_id(cx) {
+        Some(fg) => ws.container_attrs(&fg, cx),
+        None => home_attrs(),
+    }
+}
+
+fn home_attrs() -> crate::workspace::container::ContainerAttrs {
+    crate::workspace::container::ContainerAttrs {
+        cwd: std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| ".".into()),
+        env: Default::default(),
+    }
 }
 
 /// The standalone spawn's environment layering, as a pure function (the

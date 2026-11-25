@@ -231,7 +231,7 @@ impl crate::Workspace {
         let project_id = target.project_id().map(str::to_string);
         let cwd = project_path
             .clone()
-            .unwrap_or_else(|| crate::tool_tabs::thread_cwd_or_home(cx));
+            .unwrap_or_else(|| crate::tool_tabs::attrs_for_spawn(self, cx).cwd);
         match crate::tool_tabs::spawn_agent_terminal(
             launch.agent_id,
             &cwd,
@@ -272,6 +272,18 @@ impl crate::Workspace {
         }
     }
 
+    /// Test-only: the attrs snapshot the three launcher submits resolve
+    /// through, taken inside a held lease. The regression drives it through
+    /// `Workspace::update` with the workspace also registered as the
+    /// dispatch global — the global face's `read` would panic there.
+    #[cfg(feature = "test-support")]
+    pub fn diagnostic_spawn_attrs(
+        &self,
+        cx: &gpui::App,
+    ) -> crate::workspace::container::ContainerAttrs {
+        crate::tool_tabs::attrs_for_spawn(self, cx)
+    }
+
     /// The launcher's pi action: open a pi conversation as a sheet of the
     /// foreground container. A pi conversation needs no manox session, so it
     /// must not ride the native container-creation path (that path mints one);
@@ -284,7 +296,7 @@ impl crate::Workspace {
     ) {
         let cwd = target
             .folder()
-            .unwrap_or_else(|| crate::tool_tabs::thread_cwd_or_home(cx));
+            .unwrap_or_else(|| crate::tool_tabs::attrs_for_spawn(self, cx).cwd);
         self.view_mode = super::ViewMode::Workspace;
         self.sync_canvas(cx);
         let canvas = self.ensure_canvas_view(cx);
@@ -307,7 +319,7 @@ impl crate::Workspace {
         let project_id = target.project_id().map(str::to_string);
         let cwd = project_path
             .clone()
-            .unwrap_or_else(|| crate::tool_tabs::thread_cwd_or_home(cx));
+            .unwrap_or_else(|| crate::tool_tabs::attrs_for_spawn(self, cx).cwd);
         // The shell PTY IS the new container's 0 号 — no container env to
         // inherit; its own attrs snapshot is captured at the registration.
         let no_attrs = crate::workspace::container::ContainerAttrs {
