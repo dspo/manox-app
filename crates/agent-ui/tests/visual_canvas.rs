@@ -159,7 +159,7 @@ mod macos {
                 if let Some(ws) = agent_ui::dispatch::workspace_global() {
                     ws.update(cx, |ws, cx| {
                         let home = steer_canvas::id::home_sheet_id(&container);
-                        ws.diagnostic_canvas_drop(&home, &format!("dock:right"), cx);
+                        ws.diagnostic_canvas_drop(&home, "dock:right", cx);
                     });
                 }
             });

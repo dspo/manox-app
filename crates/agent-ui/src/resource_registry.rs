@@ -75,14 +75,6 @@ impl Workspace {
         owned.len()
     }
 
-    // ── teardown ──────────────────────────────────────────────────────
-
-    /// Reclaim a container's registry entries: the stashed dock view and the
-    /// stashed right-pane session (the PTYs die with the dropped views). The
-    /// container-external half — the LIVE dock/pane — is
-    /// `chrome_assembly::reclaim_container_panes`, which must run outside
-    /// the workspace lease.
-
     // ── diagnostics (test-support only) ───────────────────────────────
 
     /// The (container, tab) pairs of the registered kill handles — the
